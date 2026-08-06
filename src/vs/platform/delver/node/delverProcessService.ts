@@ -5,9 +5,9 @@
 
 import { Emitter } from '../../../base/common/event.js';
 import { IDelverProcessService, IDelverTargetSnapshot } from '../common/delverProcessService.js';
-import { AddressSpaceKind, IAddressSpace } from '../common/address.js';
+import { IAddressSpace } from '../common/address.js';
 import { TargetCapability } from '../common/capabilities.js';
-import { IGetImageInfoResult, IInitializeResult, TargetCapabilityWire, AddressSpaceKindWire } from '../common/protocol.generated.js';
+import { IGetImageInfoResult } from '../common/protocol.generated.js';
 import { TargetConfig } from '../common/target.js';
 import { DelverProviderProcess } from './providerProcess.js';
 

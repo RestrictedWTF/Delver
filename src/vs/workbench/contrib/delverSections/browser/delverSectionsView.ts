@@ -29,11 +29,13 @@ export class DelverSectionsTreeDataProvider implements ITreeViewDataProvider {
 		}
 		return this.info.sections.map((section, index) => ({
 			handle: `delver.section.${index}`,
-			label: section.name,
+			label: { label: section.name },
+			// Addresses arrive as "0x..." strings (ADR 0001), so they already
+			// carry their prefix — do not add another one.
 			description: `va ${section.virtual_address}, raw ${section.raw_offset}`,
 			tooltip: localize(
 				'delverSectionTooltip',
-				'VA: 0x{0} ({1} bytes)\nRaw: 0x{2} ({3} bytes)',
+				'VA: {0} ({1} bytes)\nRaw: {2} ({3} bytes)',
 				section.virtual_address,
 				section.virtual_size,
 				section.raw_offset,

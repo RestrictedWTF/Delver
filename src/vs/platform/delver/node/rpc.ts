@@ -3,8 +3,23 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { connect } from 'net';
 import { Readable, Writable } from 'stream';
 import { IRequest, IResponse } from '../common/protocol.generated.js';
+
+/**
+ * Translates a Delver endpoint string into a path `net.connect` understands.
+ */
+function socketPathFor(endpoint: string): string {
+	if (endpoint.startsWith('pipe://') || endpoint.startsWith('npipe://')) {
+		const name = endpoint.slice(endpoint.indexOf('//') + 2);
+		return name.startsWith('\\\\.\\pipe\\') ? name : `\\\\.\\pipe\\${name}`;
+	}
+	if (endpoint.startsWith('unix://')) {
+		return endpoint.slice('unix://'.length);
+	}
+	return endpoint;
+}
 
 export interface IRpcMessage {
 	readonly json: IResponse;
@@ -90,6 +105,31 @@ export class DelverRpcClient {
 	constructor(transport: IRpcTransport) {
 		this.reader = new StreamReader(transport.reader);
 		this.writer = transport.writer;
+	}
+
+	/**
+	 * Connects to a listening Delver server over a local endpoint.
+	 *
+	 * Accepts the same endpoint strings the Rust side emits: `pipe://<name>` on
+	 * Windows and `unix://<path>` elsewhere. A socket is duplex, so it serves as
+	 * both halves of the transport.
+	 */
+	static connect(endpoint: string): Promise<DelverRpcClient> {
+		const target = socketPathFor(endpoint);
+
+		return new Promise<DelverRpcClient>((resolve, reject) => {
+			const socket = connect(target);
+			const onError = (err: Error) => {
+				socket.off('connect', onConnect);
+				reject(new Error(`Failed to connect to ${endpoint}: ${err.message}`));
+			};
+			const onConnect = () => {
+				socket.off('error', onError);
+				resolve(new DelverRpcClient({ reader: socket, writer: socket }));
+			};
+			socket.once('error', onError);
+			socket.once('connect', onConnect);
+		});
 	}
 
 	/**
