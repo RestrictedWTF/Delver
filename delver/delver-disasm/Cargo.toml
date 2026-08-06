@@ -1,0 +1,10 @@
+[package]
+name = "delver-disasm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+iced-x86 = { workspace = true }
+delver-core = { workspace = true }
