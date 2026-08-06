@@ -1,0 +1,35 @@
+{
+  "name": "x86-minimal",
+  "covers": "32-bit layout, and that x86 yields no exception-directory seeds",
+  "arch": "I386",
+  "entry": "0x1000",
+  "image_base": "0x400000",
+  "sections": [
+    {
+      "name": ".text",
+      "rva": "0x1000",
+      "virtual_size": 3
+    }
+  ],
+  "imports": [],
+  "exports": [],
+  "seeds": [
+    {
+      "rva": "0x1000",
+      "end": null,
+      "source": "EntryPoint"
+    }
+  ],
+  "entry_disassembly": [
+    "0x1000 mov eax,ebx",
+    "0x1002 ret"
+  ],
+  "analysis": {
+    "instruction_count": 2,
+    "functions": [
+      "0x1000:EntryPoint"
+    ],
+    "xrefs": [],
+    "strings": []
+  }
+}

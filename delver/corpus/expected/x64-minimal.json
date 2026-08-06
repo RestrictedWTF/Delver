@@ -1,0 +1,36 @@
+{
+  "name": "x64-minimal",
+  "covers": "section layout, entry point, RVA-relative addressing",
+  "arch": "X86_64",
+  "entry": "0x1000",
+  "image_base": "0x140000000",
+  "sections": [
+    {
+      "name": ".text",
+      "rva": "0x1000",
+      "virtual_size": 8
+    }
+  ],
+  "imports": [],
+  "exports": [],
+  "seeds": [
+    {
+      "rva": "0x1000",
+      "end": null,
+      "source": "EntryPoint"
+    }
+  ],
+  "entry_disassembly": [
+    "0x1000 mov rax,rbx",
+    "0x1003 add rax,1",
+    "0x1007 ret"
+  ],
+  "analysis": {
+    "instruction_count": 3,
+    "functions": [
+      "0x1000:EntryPoint"
+    ],
+    "xrefs": [],
+    "strings": []
+  }
+}

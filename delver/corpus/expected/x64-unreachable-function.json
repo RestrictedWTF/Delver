@@ -1,0 +1,35 @@
+{
+  "name": "x64-unreachable-function",
+  "covers": "linear sweep finds a function nothing references, at lower confidence",
+  "arch": "X86_64",
+  "entry": "0x1000",
+  "image_base": "0x140000000",
+  "sections": [
+    {
+      "name": ".text",
+      "rva": "0x1000",
+      "virtual_size": 8
+    }
+  ],
+  "imports": [],
+  "exports": [],
+  "seeds": [
+    {
+      "rva": "0x1000",
+      "end": null,
+      "source": "EntryPoint"
+    }
+  ],
+  "entry_disassembly": [
+    "0x1000 ret"
+  ],
+  "analysis": {
+    "instruction_count": 3,
+    "functions": [
+      "0x1000:EntryPoint",
+      "0x1004:LinearSweep"
+    ],
+    "xrefs": [],
+    "strings": []
+  }
+}

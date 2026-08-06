@@ -1,0 +1,61 @@
+{
+  "name": "x64-imports",
+  "covers": "import descriptors, IAT RVAs, and multi-module ordering",
+  "arch": "X86_64",
+  "entry": "0x1000",
+  "image_base": "0x140000000",
+  "sections": [
+    {
+      "name": ".text",
+      "rva": "0x1000",
+      "virtual_size": 8
+    },
+    {
+      "name": ".rdata",
+      "rva": "0x2000",
+      "virtual_size": 208
+    }
+  ],
+  "imports": [
+    {
+      "module": "KERNEL32.dll",
+      "symbols": [
+        "ExitProcess@0x2054",
+        "GetLastError@0x205C"
+      ]
+    },
+    {
+      "module": "USER32.dll",
+      "symbols": [
+        "MessageBoxW@0x207C"
+      ]
+    }
+  ],
+  "exports": [],
+  "seeds": [
+    {
+      "rva": "0x1000",
+      "end": null,
+      "source": "EntryPoint"
+    }
+  ],
+  "entry_disassembly": [
+    "0x1000 mov rax,rbx",
+    "0x1003 add rax,1",
+    "0x1007 ret"
+  ],
+  "analysis": {
+    "instruction_count": 3,
+    "functions": [
+      "0x1000:EntryPoint"
+    ],
+    "xrefs": [],
+    "strings": [
+      "0x208C:Ascii:KERNEL32.dll",
+      "0x209C:Ascii:ExitProcess",
+      "0x20AA:Ascii:GetLastError",
+      "0x20B7:Ascii:USER32.dll",
+      "0x20C4:Ascii:MessageBoxW"
+    ]
+  }
+}

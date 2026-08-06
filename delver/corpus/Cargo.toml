@@ -1,0 +1,19 @@
+[package]
+name = "delver-corpus"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+delver-analysis = { workspace = true }
+delver-disasm = { workspace = true }
+delver-format = { workspace = true }
+
+[[bin]]
+name = "delver-corpus"
+path = "src/main.rs"
