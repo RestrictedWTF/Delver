@@ -2939,6 +2939,20 @@ export default defineConfig(
 			],
 		}
 	},
+	// Delver invariants.
+	{
+		files: [
+			'src/vs/**/delver/**/*.ts',
+			'build/lib/delver/**/*.ts',
+		],
+		plugins: {
+			'local': pluginLocal,
+		},
+		rules: {
+			'local/delver-address-is-bigint': 'error',
+			'local/delver-no-target-kind-branch': 'error',
+		},
+	},
 	// Forbid new JavaScript files - use TypeScript instead.
 	// The allowlist of pre-existing JS/CJS/MJS files lives in
 	// `.eslint-allowed-javascript-files`, which is gated by CODEOWNERS.
