@@ -58,11 +58,12 @@ than a branch.
 | Analysis server | `done` | `delver/server-analysis` | Progress notifications during indexing; multi-image sessions (one image at a time) | |
 | Disassembly (`delver-disasm`) | `done` | `delver/delver-disasm` | Non-x86 architectures; instruction index is D5 | |
 | Function detection | `done` | `delver/delver-analysis` | Signature matching (P5); sweep heuristics are deliberately naive — see status | |
+| Analysis session host | `done` | `platform/delver/node/analysisSession.ts` | Progress reporting during indexing; one image per session | |
 | Listing editor | `planned` | `contrib/delverListing` | Inline source interleaving (needs dynamic row heights) | |
 | Xrefs | `done` | `delver/delver-analysis` | Graph query API (P6); indirect-call targets need dataflow | |
 | Strings view | `planned` | `contrib/delverStrings` | | |
 | Quick access (address/symbol/string) | `planned` | `contrib/delverListing` | | |
-| Focus bus | `planned` | `services/delver/common/focusService.ts` | | |
+| Focus bus | `done` | `services/delver/common/delverFocusService.ts` | Thread/frame focus (P4); pin is per-view state, not bus state | |
 | Interpretation layer | `planned` | `services/delver/common/` | Types (P5) | |
 | `.delver` project | `planned` | `delver/delver-store` | | |
 | Golden corpus | `done` | `delver/corpus` | Real-binary samples: F4 forbids non-redistributable ones, so samples are synthesised. Local-only real binaries by path are not wired up yet | |

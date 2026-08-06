@@ -5,7 +5,7 @@
 
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
-import { hasKey } from '../../../../base/common/types.js';
+
 import { ILocation, IRange } from '../../../../platform/delver/common/address.js';
 import { IMoment, STATIC_MOMENT } from '../../../../platform/delver/common/moment.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
@@ -53,6 +53,15 @@ export interface IDelverFocusChangeEvent {
 }
 
 /**
+ * A partial focus change. `undefined` keeps the current value, `null` clears it.
+ */
+export interface IFocusUpdate {
+	readonly moment?: IMoment;
+	readonly location?: ILocation | null;
+	readonly selection?: IRange | null;
+}
+
+/**
  * The synchronization bus. One owner of "where are we", broadcast to every view.
  */
 export interface IDelverFocusService {
@@ -62,9 +71,14 @@ export interface IDelverFocusService {
 	readonly onDidChangeFocus: Event<IDelverFocusChangeEvent>;
 
 	/**
-	 * Moves the focus. Fields left undefined keep their current value.
+	 * Moves the focus.
+	 *
+	 * A field left `undefined` keeps its current value; pass `null` to clear
+	 * one. Distinguishing the two by presence would need the `in` operator,
+	 * and "omitted" versus "explicitly cleared" is worth stating in the type
+	 * rather than inferring from the shape of the object.
 	 */
-	setFocus(partial: Partial<IDelverFocus>, origin: string, reason: FocusReason): void;
+	setFocus(update: IFocusUpdate, origin: string, reason: FocusReason): void;
 
 	readonly canGoBack: boolean;
 	readonly canGoForward: boolean;
@@ -114,12 +128,12 @@ export class DelverFocusService extends Disposable implements IDelverFocusServic
 		return this.index >= 0 && this.index < this.history.length - 1;
 	}
 
-	setFocus(partial: Partial<IDelverFocus>, origin: string, reason: FocusReason): void {
+	setFocus(update: IFocusUpdate, origin: string, reason: FocusReason): void {
 		const previous = this._focus;
 		const next: IDelverFocus = {
-			moment: partial.moment ?? previous.moment,
-			location: hasKey(partial, 'location') ? partial.location : previous.location,
-			selection: hasKey(partial, 'selection') ? partial.selection : previous.selection,
+			moment: update.moment ?? previous.moment,
+			location: update.location === undefined ? previous.location : (update.location ?? undefined),
+			selection: update.selection === undefined ? previous.selection : (update.selection ?? undefined),
 		};
 
 		if (isSameFocus(previous, next)) {

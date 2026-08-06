@@ -9,11 +9,49 @@ something is the way it is, see [adr/](../history/adr/).
 ---
 
 **Last updated:** 2026-08-07
-**Current phase:** P1 Stage D complete (D1–D6) — ready for Stage E, the listing editor
+**Current phase:** P1 Stage E in progress — focus bus and analysis session done, listing editor next
 
 ## In flight
 
-Nothing. **Stage D is complete** — D1 through D6.
+**Stage E** — E1t (focus bus) and the analysis session host are done. The
+listing editor (E2t) is next.
+
+**E1t · Focus bus** — `IDelverFocusService`, 11 tests. Every change carries an
+`origin` so a view can ignore its own echo; without that, two views that can
+each scroll the other ping-pong forever. History coalesces positions within
+0x40 bytes, so scrolling a few instructions does not fill the back stack — the
+thing that makes back/forward useless in tools that shipped without it.
+
+The update type distinguishes "keep" from "clear" explicitly (`undefined` vs
+`null`) rather than by key presence, which also avoids the banned `in` operator.
+
+**Analysis session host** — `platform/delver/node/analysisSession.ts` starts
+*both* processes and brokers the endpoint: `provider-file --listen <pipe>`, then
+`server-analysis --provider <pipe> --listen <pipe>`. Endpoint names carry 8
+random bytes, because the endpoint grants read access to whatever is attached
+and a predictable name would let any local process connect. It waits for each
+server's `listening on` line rather than sleeping — connecting before the bind
+races, and that only fails on a loaded machine.
+
+### Two things this turned up
+
+**Stale staged binaries were shadowing the dev build.** `resolveBinary`
+preferred `resources/delver/bin/` over `delver/target/debug/`, so the tests ran
+a `provider-file` built before D1 added `--listen` and failed with a clap usage
+error. Order flipped: the dev build wins where it exists, and a packaged build
+has no `delver/target/` so the staged copy still wins there. Anyone running
+`cargo build` and seeing no change was hitting this.
+
+**Analysis does not yet scale to large images.** `node.exe` is 92 MB and takes
+**91 seconds** to analyse — 8.85M instructions, 178k functions, 1.87M xrefs, and
+it saturates the 200k string cap. Fine for the 360 KB binaries used so far,
+unacceptable as an interactive open. Progress notifications during indexing were
+already deferred; this says they are a requirement, not a nicety, and the
+indexing pass itself likely needs work before Stage E can open real targets.
+
+Test targets are now generated in-process (`test/node/minimalPe.ts`) for the
+same reason the corpus generates its samples: hermetic, fast, and no dependency
+on a system binary. Session tests run in ~81 ms each instead of timing out.
 
 **D6 · `server-analysis`** — owns the fact store for one target and serves the
 `analysis/*` methods. Per P1 decision E1 it does *not* open the file; it
@@ -98,7 +136,7 @@ function seeds. New protocol methods `getImports`, `getExports`,
 `getFunctionSeeds`; `getImageInfo` stays a summary with counts so opening a
 large DLL does not drag thousands of symbols with it.
 
-Gates: `cargo test --workspace` **60 passing** · `npm run delver:corpus` clean · `cargo clippy -- -D warnings`
+Gates: `cargo test --workspace` **60 passing** · `npm run test-node --grep Delver` **14 passing** · `npm run delver:corpus` clean · `cargo clippy -- -D warnings`
 clean · `cargo fmt --check` clean · `npm run typecheck-client` clean · eslint
 clean on all Delver sources · schema and `protocol.generated.ts` regenerate
 idempotently.
@@ -120,24 +158,21 @@ idempotently.
 
 ## Next up
 
-**Stage E — the listing editor.** The first real UI in the project.
+**E2t · Listing editor** — `DelverListingInput` + `EditorPane` +
+`WorkbenchTable`. Read
+`src/vs/workbench/contrib/debug/browser/disassemblyView.ts` first; it is the
+same shape, and its comment about `WorkbenchTable` not supporting dynamic row
+heights matters if inline source interleaving is ever wanted.
 
-1. **E1t · Focus bus** — `IDelverFocusService` with `origin` on every change,
-   history with proximity coalescing, back/forward. Without the origin tag two
-   views that can both scroll will ping-pong updates forever.
-2. **E2t · Listing editor** — `DelverListingInput` + `EditorPane` +
-   `WorkbenchTable`. Read
-   `src/vs/workbench/contrib/debug/browser/disassemblyView.ts` first; it is the
-   same shape. Paged, cancellable data source over `analysis/listingWindow`,
-   placeholder rows while a page is in flight.
-3. **E3t · Quick access + address history**, **E4t · per-view pin**.
+The data source pages over `analysis/listingWindow` through
+`DelverAnalysisSession`, which is already wired. Rows must render as
+placeholders while a page is in flight — the fetch must never block the scroll.
 
-The TypeScript side already has generated types for every analysis method —
-`IListingRowWire`, `IOpenImageResult`, `FunctionSourceWire` and the rest — so
-Stage E is wiring, not protocol work.
+Then **E3t** (quick access: go to address/symbol/string, plus Alt+Left/Right on
+the focus history) and **E4t** (per-view pin).
 
-One thing to decide early: the workbench must spawn *two* processes and broker
-the endpoint between them. `providerProcess.ts` handles one today.
+**Before opening anything large, address the indexing cost above.** A 92 MB
+image taking 91 seconds is not an experience the listing can paper over.
 
 ## Rust status
 

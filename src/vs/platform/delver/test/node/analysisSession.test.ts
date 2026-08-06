@@ -1,0 +1,93 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+import * as assert from 'assert';
+import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from '../../../../base/common/path.js';
+import { DelverAnalysisSession } from '../../node/analysisSession.js';
+import { buildMinimalPe } from './minimalPe.js';
+
+suite('DelverAnalysisSession', () => {
+
+	ensureNoDisposablesAreLeakedInTestSuite();
+
+	let dir: string;
+	let path: string;
+
+	/**
+	 * A generated PE keeps the test hermetic and fast. Using the Node binary
+	 * instead would analyse ~92 MB and 8.8 million instructions per test.
+	 */
+	setup(() => {
+		dir = mkdtempSync(join(tmpdir(), 'delver-test-'));
+		path = join(dir, 'minimal.exe');
+		writeFileSync(path, buildMinimalPe());
+	});
+
+	teardown(() => {
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	test('starts a provider and analysis server and serves listing rows', async function () {
+		this.timeout(30_000);
+
+		const session = await DelverAnalysisSession.start({ kind: 'file', path });
+		try {
+			assert.ok(
+				session.image.instruction_count > 0,
+				'a real PE must decode to at least one instruction'
+			);
+
+			const window = await session.listingWindow(0, 4);
+			assert.strictEqual(window.rows.length, 3, 'the generated PE decodes to three instructions');
+			assert.strictEqual(
+				window.rows[0].row,
+				0,
+				'the first requested row must be row zero'
+			);
+			assert.ok(window.rows[0].mnemonic.length > 0, 'rows carry formatted text');
+			assert.ok(
+				window.total_rows >= BigInt(window.rows.length) ||
+				Number(window.total_rows) >= window.rows.length,
+				'total row count is reported so a client can size a scrollbar'
+			);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	test('round-trips between rows and addresses', async function () {
+		this.timeout(30_000);
+
+		const session = await DelverAnalysisSession.start({ kind: 'file', path });
+		try {
+			const address = await session.addressForRow(0);
+			assert.ok(address !== undefined, 'row zero has an address');
+
+			const row = await session.rowForAddress(address!, false);
+			assert.strictEqual(row, 0, 'an exact instruction boundary maps back to its row');
+		} finally {
+			session.dispose();
+		}
+	});
+
+	test('reports functions with their confidence', async function () {
+		this.timeout(30_000);
+
+		const session = await DelverAnalysisSession.start({ kind: 'file', path });
+		try {
+			const { functions } = await session.functions();
+			assert.ok(functions.length > 0, 'a real PE yields functions');
+			assert.ok(
+				functions.some(f => f.authoritative),
+				'at least one boundary must come from a source the image vouches for'
+			);
+		} finally {
+			session.dispose();
+		}
+	});
+});
