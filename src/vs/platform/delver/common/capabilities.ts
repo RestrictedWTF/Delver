@@ -11,6 +11,10 @@ export const enum TargetCapability {
 	ListSpaces = 'listSpaces',
 	GetImageInfo = 'getImageInfo',
 	ReadMemory = 'readMemory',
+	GetImports = 'getImports',
+	GetExports = 'getExports',
+	GetFunctionSeeds = 'getFunctionSeeds',
+	Analyze = 'analyze',
 }
 
 /**

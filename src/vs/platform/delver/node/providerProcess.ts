@@ -134,6 +134,10 @@ function capFromWire(wire: TargetCapabilityWire): TargetCapability {
 		case TargetCapabilityWire.ListSpaces: return TargetCapability.ListSpaces;
 		case TargetCapabilityWire.GetImageInfo: return TargetCapability.GetImageInfo;
 		case TargetCapabilityWire.ReadMemory: return TargetCapability.ReadMemory;
+		case TargetCapabilityWire.GetImports: return TargetCapability.GetImports;
+		case TargetCapabilityWire.GetExports: return TargetCapability.GetExports;
+		case TargetCapabilityWire.GetFunctionSeeds: return TargetCapability.GetFunctionSeeds;
+		case TargetCapabilityWire.Analyze: return TargetCapability.Analyze;
 		default: throw new Error(`Unknown capability: ${wire}`);
 	}
 }
@@ -143,6 +147,7 @@ function spaceFromWire(wire: IAddressSpaceWire): IAddressSpace {
 		id: wire.id,
 		kind: kindFromWire(wire.kind),
 		pointerWidth: wire.pointer_width,
+		size: BigInt(wire.size),
 		translatesTo: wire.translates_to,
 	};
 }

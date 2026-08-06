@@ -25,6 +25,7 @@ export interface IAddressSpace {
 	readonly id: SpaceId;
 	readonly kind: AddressSpaceKind;
 	readonly pointerWidth: number;
+	readonly size: bigint;
 	readonly translatesTo: SpaceId | undefined;
 }
 
