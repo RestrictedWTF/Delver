@@ -127,6 +127,8 @@ import { getCodeDisplayProtocol, getDisplayProtocol } from '../../../base/node/o
 import { RequestService } from '../../../platform/request/electron-utility/requestService.js';
 import { DefaultExtensionsInitializer } from './contrib/defaultExtensionsInitializer.js';
 import { AllowedExtensionsService } from '../../../platform/extensionManagement/common/allowedExtensionsService.js';
+import { IDelverProcessService } from '../../../platform/delver/common/delverProcessService.js';
+import { DelverProcessService } from '../../../platform/delver/node/delverProcessService.js';
 import { IExtensionGalleryManifestService } from '../../../platform/extensionManagement/common/extensionGalleryManifest.js';
 import { ExtensionGalleryManifestIPCService } from '../../../platform/extensionManagement/common/extensionGalleryManifestServiceIpc.js';
 import { ISharedWebContentExtractorService } from '../../../platform/webContentExtractor/common/webContentExtractor.js';
@@ -418,6 +420,9 @@ class SharedProcessMain extends Disposable implements IClientConnectionFilter {
 		// Local Git
 		services.set(ILocalGitService, new SyncDescriptor(LocalGitService, undefined, false /* proxied to other processes */));
 
+		// Delver
+		services.set(IDelverProcessService, new SyncDescriptor(DelverProcessService));
+
 		// SSH Remote Agent Host
 		services.set(ISSHRemoteAgentHostMainService, new SyncDescriptor(SSHRemoteAgentHostMainService, undefined, true));
 
@@ -484,6 +489,10 @@ class SharedProcessMain extends Disposable implements IClientConnectionFilter {
 		this.server.registerChannel('userDataAutoSync', ProxyChannel.fromService(userDataAutoSync, this._store));
 
 		this.server.registerChannel('IUserDataSyncResourceProviderService', ProxyChannel.fromService(accessor.get(IUserDataSyncResourceProviderService), this._store));
+
+		// Delver
+		const delverChannel = ProxyChannel.fromService(accessor.get(IDelverProcessService), this._store);
+		this.server.registerChannel('delver', delverChannel);
 
 		// Tunnel
 		const sharedProcessTunnelChannel = ProxyChannel.fromService(accessor.get(ISharedProcessTunnelService), this._store);
