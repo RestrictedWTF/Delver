@@ -479,4 +479,7 @@ import './contrib/editTelemetry/browser/editTelemetry.contribution.js';
 // Opener
 import './contrib/opener/browser/opener.contribution.js';
 
+// DELVER: Delver contributions
+import './contrib/delverSections/browser/delverSections.contribution.js';
+
 //#endregion
