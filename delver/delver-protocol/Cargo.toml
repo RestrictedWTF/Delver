@@ -1,0 +1,17 @@
+[package]
+name = "delver-protocol"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+delver-core = { workspace = true }
+thiserror = { workspace = true }
+
+[[bin]]
+name = "gen-schema"
+path = "src/bin/gen-schema.rs"

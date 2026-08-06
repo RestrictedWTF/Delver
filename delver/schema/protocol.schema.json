@@ -1,0 +1,165 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Request and response messages for the Delver provider protocol.",
+  "oneOf": [
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "A JSON-RPC style request.",
+      "properties": {
+        "id": {
+          "description": "Opaque identifier used to correlate the response.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "method": {
+          "description": "Method name.",
+          "type": "string"
+        },
+        "params": {
+          "default": null,
+          "description": "Method-specific parameters."
+        }
+      },
+      "required": [
+        "id",
+        "method"
+      ],
+      "title": "Request",
+      "type": "object"
+    },
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "definitions": {
+        "ErrorData": {
+          "description": "Structured detail carried by a domain error.",
+          "properties": {
+            "detail": {
+              "description": "Provider-specific detail.",
+              "type": "string"
+            },
+            "kind": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ErrorKind"
+                }
+              ],
+              "description": "Error kind."
+            }
+          },
+          "required": [
+            "detail",
+            "kind"
+          ],
+          "type": "object"
+        },
+        "ErrorKind": {
+          "description": "Domain-level error kinds.",
+          "oneOf": [
+            {
+              "description": "`initialize` reported an incompatible protocol version.",
+              "enum": [
+                "ProtocolVersionMismatch"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "A method that requires an attached target was called before attachment.",
+              "enum": [
+                "NotAttached"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "The supplied address is not valid in the requested space.",
+              "enum": [
+                "InvalidAddress"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "No bytes were readable at the requested location.",
+              "enum": [
+                "UnreadableMemory"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "The target does not support the requested capability.",
+              "enum": [
+                "UnsupportedCapability"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "The target is temporarily busy and the request should be retried.",
+              "enum": [
+                "TargetBusy"
+              ],
+              "type": "string"
+            }
+          ]
+        },
+        "RpcError": {
+          "description": "JSON-RPC error object extended with Delver-specific error data.",
+          "properties": {
+            "code": {
+              "description": "JSON-RPC error code.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "data": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ErrorData"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Delver error kind and detail."
+            },
+            "message": {
+              "description": "Human-readable message.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "type": "object"
+        }
+      },
+      "description": "A JSON-RPC style response.",
+      "properties": {
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RpcError"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Error payload, present only on failure."
+        },
+        "id": {
+          "description": "Identifier matching the request.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "result": {
+          "description": "Result payload, present only on success."
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "Response",
+      "type": "object"
+    }
+  ],
+  "title": "Delver Protocol v0"
+}
