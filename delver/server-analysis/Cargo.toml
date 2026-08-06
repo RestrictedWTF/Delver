@@ -1,0 +1,21 @@
+[package]
+name = "server-analysis"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+delver-analysis = { workspace = true }
+delver-disasm = { workspace = true }
+delver-format = { workspace = true }
+delver-protocol = { workspace = true }
+delver-rpc = { workspace = true }
+
+[[bin]]
+name = "server-analysis"
+path = "src/main.rs"
