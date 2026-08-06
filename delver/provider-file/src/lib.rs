@@ -11,61 +11,25 @@
 
 use std::fs::File;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
+use delver_format::{parse_pe, ParsedImage, SeedSource};
 use delver_protocol::{
-	AddressSpaceKindWire, AddressSpaceWire, FrameRef, GetImageInfoResult, InitializeResult,
-	MomentKindWire, MomentWire, RangeWire, ReadMemoryParams, ReadMemoryResult, SectionWire,
-	TargetCapabilityWire, TargetDescriptorWire,
+	AddressSpaceKindWire, AddressSpaceWire, ExportWire, FrameRef, FunctionSeedWire,
+	GetExportsResult, GetFunctionSeedsResult, GetImageInfoResult, GetImportsResult,
+	ImportedModuleWire, ImportedSymbolWire, InitializeResult, MomentKindWire, MomentWire,
+	RangeWire, ReadMemoryParams, ReadMemoryResult, SectionWire, SeedSourceWire,
+	TargetCapabilityWire, TargetDescriptorWire, TlsWire,
 };
 use memmap2::Mmap;
-
-/// Parsed image metadata extracted once at open time.
-#[derive(Debug, Clone)]
-pub struct ParsedImage {
-	/// Architecture string, e.g. "x86_64".
-	pub arch: String,
-	/// Image entry point as an RVA.
-	pub entry: u64,
-	/// Preferred image base.
-	pub image_base: u64,
-	/// Loadable sections.
-	pub sections: Vec<Section>,
-}
-
-/// A single image section.
-#[derive(Debug, Clone)]
-pub struct Section {
-	/// Section name.
-	pub name: String,
-	/// RVA of the section start.
-	pub virtual_address: u64,
-	/// Virtual size in bytes.
-	pub virtual_size: u64,
-	/// Raw file offset.
-	pub raw_offset: u64,
-	/// Raw size in bytes.
-	pub raw_size: u64,
-}
-
-impl Section {
-	/// Exclusive end of the virtual range.
-	pub fn virtual_end(&self) -> u64 {
-		self.virtual_address.saturating_add(self.virtual_size)
-	}
-
-	/// Exclusive end of the raw range.
-	pub fn raw_end(&self) -> u64 {
-		self.raw_offset.saturating_add(self.raw_size)
-	}
-}
 
 /// Provider state for a single target file.
 pub struct FileProvider {
 	mmap: Mmap,
 	image: ParsedImage,
 	file_size: u64,
-	next_frame_id: u64,
+	next_frame_id: AtomicU64,
 }
 
 impl FileProvider {
@@ -79,15 +43,13 @@ impl FileProvider {
 			mmap,
 			image,
 			file_size,
-			next_frame_id: 1,
+			next_frame_id: AtomicU64::new(1),
 		})
 	}
 
 	/// Allocates the next binary frame id.
-	fn alloc_frame_id(&mut self) -> u64 {
-		let id = self.next_frame_id;
-		self.next_frame_id += 1;
-		id
+	fn alloc_frame_id(&self) -> u64 {
+		self.next_frame_id.fetch_add(1, Ordering::Relaxed)
 	}
 
 	/// Returns the initialize response payload.
@@ -98,6 +60,9 @@ impl FileProvider {
 				TargetCapabilityWire::ListSpaces,
 				TargetCapabilityWire::GetImageInfo,
 				TargetCapabilityWire::ReadMemory,
+				TargetCapabilityWire::GetImports,
+				TargetCapabilityWire::GetExports,
+				TargetCapabilityWire::GetFunctionSeeds,
 			],
 			spaces: self.list_spaces(),
 			target: TargetDescriptorWire {
@@ -109,24 +74,48 @@ impl FileProvider {
 
 	/// Returns the address spaces.
 	pub fn list_spaces(&self) -> Vec<AddressSpaceWire> {
+		// The image space extends to the end of the last section, which is
+		// where a client sizing a scrollbar or pulling the whole image needs it
+		// to stop.
+		let image_size = self
+			.image
+			.sections
+			.iter()
+			.map(|s| s.virtual_end())
+			.max()
+			.unwrap_or(0);
+
 		vec![
 			AddressSpaceWire {
 				id: "File".to_string(),
 				kind: AddressSpaceKindWire::File,
 				pointer_width: 64,
+				size: self.file_size,
 				translates_to: None,
 			},
 			AddressSpaceWire {
 				id: "Image".to_string(),
 				kind: AddressSpaceKindWire::Image,
 				pointer_width: 64,
+				size: image_size,
 				translates_to: Some("File".to_string()),
 			},
 		]
 	}
 
 	/// Returns image metadata.
+	///
+	/// A summary only: imports, exports, and function seeds have their own
+	/// methods so that opening a large system DLL does not drag thousands of
+	/// symbols along with it.
 	pub fn get_image_info(&self) -> GetImageInfoResult {
+		let import_symbol_count = self
+			.image
+			.imports
+			.iter()
+			.map(|m| m.symbols.len() as u64)
+			.sum();
+
 		GetImageInfoResult {
 			arch: self.image.arch.clone(),
 			entry: self.image.entry,
@@ -143,12 +132,79 @@ impl FileProvider {
 					raw_size: s.raw_size,
 				})
 				.collect(),
+			import_module_count: self.image.imports.len() as u64,
+			import_symbol_count,
+			export_count: self.image.exports.len() as u64,
+			function_seed_count: self.image.function_seeds.len() as u64,
+			relocation_count: self.image.relocations.len() as u64,
+			tls: self.image.tls.as_ref().map(|t| TlsWire {
+				index_rva: t.index_rva,
+				raw_data_rva: t.raw_data_rva,
+				raw_data_size: t.raw_data_size,
+				callbacks: t.callbacks.clone(),
+			}),
+		}
+	}
+
+	/// Returns imported modules and their symbols.
+	pub fn get_imports(&self) -> GetImportsResult {
+		GetImportsResult {
+			modules: self
+				.image
+				.imports
+				.iter()
+				.map(|m| ImportedModuleWire {
+					name: m.name.clone(),
+					symbols: m
+						.symbols
+						.iter()
+						.map(|s| ImportedSymbolWire {
+							name: s.name.clone(),
+							ordinal: s.ordinal,
+							iat_rva: s.iat_rva,
+						})
+						.collect(),
+				})
+				.collect(),
+		}
+	}
+
+	/// Returns exported symbols.
+	pub fn get_exports(&self) -> GetExportsResult {
+		GetExportsResult {
+			exports: self
+				.image
+				.exports
+				.iter()
+				.map(|e| ExportWire {
+					name: e.name.clone(),
+					ordinal: e.ordinal,
+					rva: e.rva,
+					forwarded_to: e.forwarded_to.clone(),
+				})
+				.collect(),
+		}
+	}
+
+	/// Returns candidate function starts, sorted by address.
+	pub fn get_function_seeds(&self) -> GetFunctionSeedsResult {
+		GetFunctionSeedsResult {
+			seeds: self
+				.image
+				.function_seeds
+				.iter()
+				.map(|s| FunctionSeedWire {
+					rva: s.rva,
+					end_rva: s.end_rva,
+					source: seed_source_wire(s.source),
+				})
+				.collect(),
 		}
 	}
 
 	/// Reads memory from the requested space and returns the response payload
 	/// plus the binary bytes to send.
-	pub fn read_memory(&mut self, params: ReadMemoryParams) -> Result<(ReadMemoryResult, Vec<u8>)> {
+	pub fn read_memory(&self, params: ReadMemoryParams) -> Result<(ReadMemoryResult, Vec<u8>)> {
 		let space = params.space.as_str();
 		let address = params.address;
 		let len = params.len;
@@ -233,58 +289,68 @@ impl FileProvider {
 	}
 }
 
-fn parse_pe(data: &[u8]) -> Result<ParsedImage> {
-	// Prefer the 64-bit PE parser; fall back to 32-bit.
-	if let Ok(file) = object::read::pe::PeFile64::parse(data) {
-		return extract_image(&file);
+fn seed_source_wire(source: SeedSource) -> SeedSourceWire {
+	match source {
+		SeedSource::ExceptionDirectory => SeedSourceWire::ExceptionDirectory,
+		SeedSource::EntryPoint => SeedSourceWire::EntryPoint,
+		SeedSource::Export => SeedSourceWire::Export,
+		SeedSource::TlsCallback => SeedSourceWire::TlsCallback,
 	}
-	if let Ok(file) = object::read::pe::PeFile32::parse(data) {
-		return extract_image(&file);
-	}
-	bail!("file is not a supported PE image")
-}
-
-fn extract_image<'data, File>(file: &File) -> Result<ParsedImage>
-where
-	File: object::read::Object<'data>,
-{
-	use object::read::ObjectSection;
-
-	let image_base = file.relative_address_base();
-	let arch = format!("{:?}", file.architecture());
-	let entry = file.entry().saturating_sub(image_base);
-
-	let sections = file
-		.sections()
-		.map(|s| {
-			let va = s.address();
-			let size = s.size();
-			let (raw_offset, raw_size) = s.file_range().unwrap_or((0, 0));
-			Section {
-				name: s.name().unwrap_or("").to_string(),
-				virtual_address: va.saturating_sub(image_base),
-				virtual_size: size,
-				raw_offset,
-				raw_size,
-			}
-		})
-		.collect();
-
-	Ok(ParsedImage {
-		arch,
-		entry,
-		image_base,
-		sections,
-	})
 }
 
 #[cfg(test)]
 mod tests {
+	use std::thread;
+
 	use delver_core::{AddressSpace, AddressSpaceKind};
+	use delver_protocol::ReadMemoryParams;
+
+	use super::*;
 
 	#[test]
 	fn file_provider_api_types_exist() {
-		let space = AddressSpace::new("Image", AddressSpaceKind::Image, 64, Option::<&str>::None);
+		let space = AddressSpace::new(
+			"Image",
+			AddressSpaceKind::Image,
+			64,
+			0x1000,
+			Option::<&str>::None,
+		);
 		assert_eq!(space.pointer_width, 64);
+	}
+
+	#[test]
+	fn concurrent_read_memory_is_safe() {
+		// Use the test binary itself as a PE target.
+		let exe = std::env::current_exe().expect("current exe");
+		let provider = FileProvider::open(&exe).expect("open current exe");
+		let info = provider.get_image_info();
+		let first_section = info
+			.sections
+			.first()
+			.expect("test binary has at least one section");
+		let address = first_section.virtual_address;
+
+		let provider = std::sync::Arc::new(provider);
+		let mut handles = Vec::new();
+
+		for _ in 0..2 {
+			let provider = std::sync::Arc::clone(&provider);
+			handles.push(thread::spawn(move || {
+				let params = ReadMemoryParams {
+					space: "Image".to_string(),
+					address,
+					len: 16,
+					moment: None,
+				};
+				let (result, bytes) = provider.read_memory(params).expect("read memory");
+				assert_eq!(bytes.len(), 16);
+				assert_eq!(result.data.len, 16);
+			}));
+		}
+
+		for handle in handles {
+			handle.join().expect("thread join");
+		}
 	}
 }
