@@ -73,6 +73,7 @@
     "compile-web": "npm run gulp compile-web",
     "delver:build": "npm run gulp compile-delver-release",
     "delver:test": "cd delver && cargo test",
+    "delver:corpus": "cd delver && cargo run --quiet --bin delver-corpus -- check",
     "delver:protocol": "cd delver && cargo run --bin gen-schema && cd .. && node --experimental-strip-types build/lib/delver/generate-protocol.ts",
     "serve-out-rspack": "cd build/rspack && npx rspack serve --config rspack.serve-out.config.mts",
     "watch-web": "npm run gulp watch-web",
