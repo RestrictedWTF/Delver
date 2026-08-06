@@ -8,6 +8,7 @@ when a design decision does.
 | --- | --- |
 | [roadmap.md](roadmap.md) | *What order, and what's deliberately not in this phase?* |
 | [p1-plan.md](p1-plan.md) | Task-level plan for the phase in progress |
+| [stage-d-plan.md](stage-d-plan.md) | Stage-level detail for P1 Stage D (the analysis engine) |
 | [rebranding-plan.md](rebranding-plan.md) | *How do we stop being Code - OSS?* — identity, icons, packaging, theme scaffold |
 | [status.md](status.md) | *Where were we?* — overwritten each session |
 | [ledger.md](ledger.md) | *What exists, what's stubbed, what did we skip and why?* |

@@ -37,13 +37,14 @@ than a branch.
 | Cargo workspace | `done` | `delver/` | | |
 | `delver-core` domain types | `done` | `delver/delver-core` | | |
 | `delver-protocol` + TS codegen | `done` | `delver/delver-protocol` | | |
-| `delver-rpc` transport | `done` | `delver/delver-rpc` | Named pipe and TCP transports — stdio only at first | |
+| `delver-rpc` transport | `done` | `delver/delver-rpc` | TCP transport not implemented; named pipe landed in P1 D1 | [ADR 0003](../history/adr/0003-unsafe-code-in-transport-listener.md) |
 | `provider-file` (PE headers) | `done` | `delver/provider-file` | ELF, Mach-O | |
 | Provider process host | `done` | `src/vs/platform/delver/node/` | Sandboxing (deferred to P4) | |
 | `delverctl` | `done` | `delver/delverctl` | | |
 | Delver sections view | `done` | `src/vs/workbench/contrib/delverSections/` | | |
 | Delver target service | `done` | `src/vs/workbench/services/delver/` | | |
 | Build integration | `done` | `build/gulpfile.delver.ts`, `package.json` | | |
+| Protocol codegen (Rust → schema → TS) | `done` | `delver-protocol/src/bin/gen-schema.rs`, `build/lib/delver/generate-protocol.ts` | Repaired 2026-08-07: the TS emitter was a hardcoded string and the schema only carried the envelope, so no payload type had ever been generated | |
 | Branding + CI | `planned` | `product.json`, `build/`, `resources/` | Icons, installer artwork, Linux packaging — see [rebranding-plan.md](rebranding-plan.md) | |
 | Theme (`theme-delver`) | `planned` | `extensions/theme-delver` | Product icon + file icon themes deferred | |
 
@@ -51,18 +52,20 @@ than a branch.
 
 | Feature | Status | Code | Deliberately not done | ADR |
 | --- | --- | --- | --- | --- |
-| PE loader | `planned` | `delver/delver-format` | Resources, TLS if sliding P1 | |
-| Analysis server | `planned` | `delver/server-analysis` | | |
-| Disassembly (`iced-x86`) | `planned` | `delver/delver-disasm` | Non-x86 architectures | |
-| Function detection | `planned` | `delver/delver-analysis` | Signature matching (P5) | |
+| Named-pipe / Unix-socket transport | `done` | `delver/delver-rpc` | TCP transport; see also P0 `delver-rpc` row | [0003](../history/adr/0003-unsafe-code-in-transport-listener.md) |
+| Imports / exports / seeds over DTP | `done` | `delver/provider-file`, `delver/delver-protocol` | Not surfaced in the UI until Stage G | |
+| PE loader (`delver-format`) | `done` | `delver/delver-format` | Resource-directory *contents* (the directory itself is parsed); ELF and Mach-O (P5) | |
+| Analysis server | `done` | `delver/server-analysis` | Progress notifications during indexing; multi-image sessions (one image at a time) | |
+| Disassembly (`delver-disasm`) | `done` | `delver/delver-disasm` | Non-x86 architectures; instruction index is D5 | |
+| Function detection | `done` | `delver/delver-analysis` | Signature matching (P5); sweep heuristics are deliberately naive — see status | |
 | Listing editor | `planned` | `contrib/delverListing` | Inline source interleaving (needs dynamic row heights) | |
-| Xrefs | `planned` | `delver/delver-analysis` | Graph query API (P6) | |
+| Xrefs | `done` | `delver/delver-analysis` | Graph query API (P6); indirect-call targets need dataflow | |
 | Strings view | `planned` | `contrib/delverStrings` | | |
 | Quick access (address/symbol/string) | `planned` | `contrib/delverListing` | | |
 | Focus bus | `planned` | `services/delver/common/focusService.ts` | | |
 | Interpretation layer | `planned` | `services/delver/common/` | Types (P5) | |
 | `.delver` project | `planned` | `delver/delver-store` | | |
-| Golden corpus | `planned` | `delver/corpus` | | |
+| Golden corpus | `done` | `delver/corpus` | Real-binary samples: F4 forbids non-redistributable ones, so samples are synthesised. Local-only real binaries by path are not wired up yet | |
 | Hex view | `planned` | `contrib/delverMemory` | **Slidable to P4** — nothing in P2/P3 needs it | |
 
 ## P2 — Decompilation & p-code
