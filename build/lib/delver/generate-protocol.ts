@@ -3,191 +3,169 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+/**
+ * Generates `src/vs/platform/delver/common/protocol.generated.ts` from
+ * `delver/schema/protocol.schema.json`.
+ *
+ * The Rust `delver-protocol` crate is the single source of truth for the wire
+ * format (ADR 0002). This script derives the TypeScript view of it — it must
+ * never contain hand-written type declarations, because a hardcoded output
+ * makes the "regenerating produces no diff" CI check vacuously true while the
+ * two sides silently drift.
+ */
+
 import * as fs from 'fs';
 import * as path from 'path';
 
-const outPath = path.resolve(import.meta.dirname, '..', '..', '..', 'src', 'vs', 'platform', 'delver', 'common', 'protocol.generated.ts');
+const repoRoot = path.resolve(import.meta.dirname, '..', '..', '..');
+const schemaPath = path.join(repoRoot, 'delver', 'schema', 'protocol.schema.json');
+const outPath = path.join(repoRoot, 'src', 'vs', 'platform', 'delver', 'common', 'protocol.generated.ts');
 
-const content = `/*---------------------------------------------------------------------------------------------
+interface ISchemaNode {
+	readonly description?: string;
+	readonly type?: string | string[];
+	readonly format?: string;
+	readonly properties?: Record<string, ISchemaNode>;
+	readonly required?: string[];
+	readonly items?: ISchemaNode;
+	readonly enum?: string[];
+	readonly oneOf?: ISchemaNode[];
+	readonly anyOf?: ISchemaNode[];
+	readonly $ref?: string;
+}
+
+type DefinitionKind = 'interface' | 'enum';
+
+const schema: { definitions: Record<string, ISchemaNode> } = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
+const definitions = schema.definitions;
+
+/** Enums are emitted bare; objects get the `I` prefix, per VS Code convention. */
+function kindOf(node: ISchemaNode): DefinitionKind {
+	if (node.enum || node.oneOf?.every(v => Array.isArray(v.enum))) {
+		return 'enum';
+	}
+	return 'interface';
+}
+
+const kinds = new Map<string, DefinitionKind>(
+	Object.entries(definitions).map(([name, node]) => [name, kindOf(node)])
+);
+
+function typeName(name: string): string {
+	return kinds.get(name) === 'enum' ? name : `I${name}`;
+}
+
+function refName(ref: string): string {
+	return typeName(ref.replace('#/definitions/', ''));
+}
+
+/** Strips the `null` branch that schemars emits for `Option<T>`. */
+function withoutNull(node: ISchemaNode): { inner: ISchemaNode; nullable: boolean } {
+	if (Array.isArray(node.type)) {
+		const types = node.type.filter(t => t !== 'null');
+		return { inner: { ...node, type: types.length === 1 ? types[0] : types }, nullable: node.type.includes('null') };
+	}
+	if (node.anyOf) {
+		const branches = node.anyOf.filter(b => b.type !== 'null');
+		if (branches.length === 1) {
+			return { inner: branches[0], nullable: branches.length !== node.anyOf.length };
+		}
+	}
+	return { inner: node, nullable: false };
+}
+
+function tsType(node: ISchemaNode): string {
+	if (node.$ref) {
+		return refName(node.$ref);
+	}
+	if (node.anyOf || Array.isArray(node.type)) {
+		return tsType(withoutNull(node).inner);
+	}
+	switch (node.type) {
+		case 'string':
+			return 'string';
+		case 'integer':
+		case 'number':
+			return 'number';
+		case 'boolean':
+			return 'boolean';
+		case 'array':
+			return node.items ? `${tsType(node.items)}[]` : 'unknown[]';
+		case 'object':
+			return 'Record<string, unknown>';
+		default:
+			// No `type` at all: an opaque `serde_json::Value`.
+			return 'unknown';
+	}
+}
+
+function docComment(description: string | undefined, indent: string): string {
+	if (!description) {
+		return '';
+	}
+	const lines = description.split('\n');
+	if (lines.length === 1) {
+		return `${indent}/**\n${indent} * ${lines[0]}\n${indent} */\n`;
+	}
+	return `${indent}/**\n${lines.map(l => `${indent} * ${l}`).join('\n')}\n${indent} */\n`;
+}
+
+/** Property names come from serde and may not be valid TS identifiers. */
+function propertyKey(name: string): string {
+	return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) ? name : `['${name}']`;
+}
+
+function emitInterface(name: string, node: ISchemaNode): string {
+	const required = new Set(node.required ?? []);
+	let out = docComment(node.description, '');
+	out += `export interface ${typeName(name)} {\n`;
+	for (const [prop, propNode] of Object.entries(node.properties ?? {})) {
+		const { nullable } = withoutNull(propNode);
+		const optional = !required.has(prop) || nullable;
+		out += docComment(propNode.description, '\t');
+		out += `\t${propertyKey(prop)}${optional ? '?' : ''}: ${tsType(propNode)};\n`;
+	}
+	out += '}\n';
+	return out;
+}
+
+function emitEnum(name: string, node: ISchemaNode): string {
+	const members: { value: string; description?: string }[] = node.oneOf
+		? node.oneOf.map(v => ({ value: v.enum![0], description: v.description }))
+		: (node.enum ?? []).map(v => ({ value: v }));
+
+	let out = docComment(node.description, '');
+	out += `export const enum ${name} {\n`;
+	for (const member of members) {
+		out += docComment(member.description, '\t');
+		// PascalCase the member name; the wire value is preserved verbatim.
+		const key = member.value.charAt(0).toUpperCase() + member.value.slice(1);
+		out += `\t${key} = '${member.value}',\n`;
+	}
+	out += '}\n';
+	return out;
+}
+
+const header = `/*---------------------------------------------------------------------------------------------
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
 // GENERATED — DO NOT EDIT
 // Generated from delver/schema/protocol.schema.json by \`npm run delver:protocol\`.
-
-/**
- * A JSON-RPC style request.
- */
-export interface IRequest {
-	id: number;
-	method: string;
-	params: unknown;
-}
-
-/**
- * A JSON-RPC style response.
- */
-export interface IResponse {
-	id: number;
-	result?: unknown;
-	error?: IRpcError;
-}
-
-/**
- * JSON-RPC error object extended with Delver-specific error data.
- */
-export interface IRpcError {
-	code: number;
-	message: string;
-	data?: IErrorData;
-}
-
-/**
- * Domain-level error kinds.
- */
-export const enum ErrorKind {
-	ProtocolVersionMismatch = 'ProtocolVersionMismatch',
-	NotAttached = 'NotAttached',
-	InvalidAddress = 'InvalidAddress',
-	UnreadableMemory = 'UnreadableMemory',
-	UnsupportedCapability = 'UnsupportedCapability',
-	TargetBusy = 'TargetBusy',
-}
-
-/**
- * Structured detail carried by a domain error.
- */
-export interface IErrorData {
-	kind: ErrorKind;
-	detail: string;
-}
-
-/**
- * Response payload for \`initialize\`.
- */
-export interface IInitializeResult {
-	protocol_version: string;
-	capabilities: TargetCapabilityWire[];
-	spaces: IAddressSpaceWire[];
-	target: ITargetDescriptorWire;
-}
-
-/**
- * Response payload for \`listSpaces\`.
- */
-export interface IListSpacesResult {
-	spaces: IAddressSpaceWire[];
-}
-
-/**
- * Response payload for \`getImageInfo\`.
- */
-export interface IGetImageInfoResult {
-	arch: string;
-	entry: string;
-	image_base: string;
-	sections: ISectionWire[];
-}
-
-/**
- * Parameters for \`readMemory\`.
- */
-export interface IReadMemoryParams {
-	space: string;
-	address: string;
-	len: number;
-	moment?: IMomentWire;
-}
-
-/**
- * Response payload for \`readMemory\`.
- */
-export interface IReadMemoryResult {
-	data: IFrameRef;
-	valid: IRangeWire[];
-	served_moment: IMomentWire;
-}
-
-/**
- * Reference to a binary frame delivered inline after a JSON response.
- */
-export interface IFrameRef {
-	['$frame']: number;
-	len: number;
-}
-
-/**
- * A readable byte range.
- */
-export interface IRangeWire {
-	start: string;
-	end: string;
-}
-
-/**
- * A moment on the wire.
- */
-export interface IMomentWire {
-	kind: MomentKindWire;
-	epoch: number;
-}
-
-/**
- * Address space kind on the wire.
- */
-export const enum AddressSpaceKindWire {
-	File = 'file',
-	Image = 'image',
-}
-
-/**
- * Moment kind on the wire.
- */
-export const enum MomentKindWire {
-	Static = 'static',
-	Snapshot = 'snapshot',
-	Live = 'live',
-}
-
-/**
- * Target capability on the wire.
- */
-export const enum TargetCapabilityWire {
-	ListSpaces = 'listSpaces',
-	GetImageInfo = 'getImageInfo',
-	ReadMemory = 'readMemory',
-}
-
-/**
- * Address space on the wire.
- */
-export interface IAddressSpaceWire {
-	id: string;
-	kind: AddressSpaceKindWire;
-	pointer_width: number;
-	translates_to?: string;
-}
-
-/**
- * Image section on the wire.
- */
-export interface ISectionWire {
-	name: string;
-	virtual_address: string;
-	virtual_size: number;
-	raw_offset: string;
-	raw_size: number;
-}
-
-/**
- * High-level target descriptor on the wire.
- */
-export interface ITargetDescriptorWire {
-	name: string;
-	kind: string;
-}
+// Edit the delver-protocol crate and regenerate.
+//
+// Addresses cross the wire as "0x..." strings, never JSON numbers, because JSON
+// numbers are IEEE 754 doubles and truncate above 2^53 (ADR 0001). Parse them
+// to bigint before use — never to number.
 `;
 
-fs.writeFileSync(outPath, content);
-console.log(`Wrote ${outPath}`);
+const blocks = Object.keys(definitions)
+	.sort()
+	.map(name => {
+		const node = definitions[name];
+		return kinds.get(name) === 'enum' ? emitEnum(name, node) : emitInterface(name, node);
+	});
+
+fs.writeFileSync(outPath, `${header}\n${blocks.join('\n')}`, 'utf8');
+console.log(`Wrote ${outPath} (${blocks.length} types)`);

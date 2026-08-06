@@ -3,7 +3,7 @@
 //! JSON numbers are IEEE 754 doubles and silently truncate integers above 2^53.
 //! Every address-like value crosses the wire as a `"0x..."` string instead.
 
-use serde::{Deserialize, Deserializer, Serializer, de::Error};
+use serde::{de::Error, Deserialize, Deserializer, Serializer};
 
 /// Serializes a `u64` as an uppercase `0x` hex string.
 pub fn serialize<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
@@ -24,11 +24,10 @@ where
 
 /// Parses a `0x...` hex string into a `u64`.
 pub fn parse(s: &str) -> Result<u64, String> {
-	let digits = s.strip_prefix("0x").ok_or_else(|| {
-		format!("hex string must start with '0x', got: {s}")
-	})?;
-	u64::from_str_radix(digits, 16)
-		.map_err(|e| format!("invalid hex string '{s}': {e}"))
+	let digits = s
+		.strip_prefix("0x")
+		.ok_or_else(|| format!("hex string must start with '0x', got: {s}"))?;
+	u64::from_str_radix(digits, 16).map_err(|e| format!("invalid hex string '{s}': {e}"))
 }
 
 /// Serializes an `Option<u64>` as an optional `0x` hex string.
@@ -52,7 +51,41 @@ pub mod option {
 		D: Deserializer<'de>,
 	{
 		let maybe = Option::<String>::deserialize(deserializer)?;
-		maybe.as_deref().map(parse).transpose().map_err(D::Error::custom)
+		maybe
+			.as_deref()
+			.map(parse)
+			.transpose()
+			.map_err(D::Error::custom)
+	}
+}
+
+/// Serializes a `Vec<u64>` as an array of `0x` hex strings.
+pub mod vec {
+	use super::*;
+
+	/// Serializes each element as a `"0x..."` string.
+	pub fn serialize<S>(value: &Vec<u64>, serializer: S) -> Result<S::Ok, S::Error>
+	where
+		S: Serializer,
+	{
+		use serde::ser::SerializeSeq;
+		let mut seq = serializer.serialize_seq(Some(value.len()))?;
+		for v in value {
+			seq.serialize_element(&format!("0x{:X}", v))?;
+		}
+		seq.end()
+	}
+
+	/// Deserializes each element from a `"0x..."` string.
+	pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u64>, D::Error>
+	where
+		D: Deserializer<'de>,
+	{
+		let raw = Vec::<String>::deserialize(deserializer)?;
+		raw.iter()
+			.map(|s| parse(s))
+			.collect::<Result<Vec<_>, _>>()
+			.map_err(D::Error::custom)
 	}
 }
 
@@ -66,9 +99,28 @@ mod tests {
 		addr: u64,
 	}
 
+	#[derive(Serialize, Deserialize, Debug, PartialEq)]
+	struct VecWrapper {
+		#[serde(with = "crate::hex::vec")]
+		addrs: Vec<u64>,
+	}
+
+	#[test]
+	fn vec_round_trips_above_2_53() {
+		let value = VecWrapper {
+			addrs: vec![0, 0x7FFFFFFFFFFFFFFF],
+		};
+		let json = serde_json::to_string(&value).unwrap();
+		assert_eq!(json, r#"{"addrs":["0x0","0x7FFFFFFFFFFFFFFF"]}"#);
+		let back: VecWrapper = serde_json::from_str(&json).unwrap();
+		assert_eq!(back, value);
+	}
+
 	#[test]
 	fn round_trip_max_u64() {
-		let value = Wrapper { addr: 0x7FFFFFFFFFFFFFFF };
+		let value = Wrapper {
+			addr: 0x7FFFFFFFFFFFFFFF,
+		};
 		let json = serde_json::to_string(&value).unwrap();
 		assert_eq!(json, r#"{"addr":"0x7FFFFFFFFFFFFFFF"}"#);
 		let back: Wrapper = serde_json::from_str(&json).unwrap();

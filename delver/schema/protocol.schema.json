@@ -1,9 +1,920 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "description": "Request and response messages for the Delver provider protocol.",
-  "oneOf": [
-    {
-      "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "AddressForRowParams": {
+      "description": "Parameters for `analysis/addressForRow`.",
+      "properties": {
+        "image_id": {
+          "description": "Image handle.",
+          "type": "string"
+        },
+        "row": {
+          "description": "Row ordinal.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "image_id",
+        "row"
+      ],
+      "type": "object"
+    },
+    "AddressForRowResult": {
+      "description": "Response payload for `analysis/addressForRow`.",
+      "properties": {
+        "rva": {
+          "description": "Address of the row, absent when the row is out of range.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AddressSpaceKindWire": {
+      "description": "Address space kind on the wire.",
+      "oneOf": [
+        {
+          "description": "Raw file offsets.",
+          "enum": [
+            "file"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Loaded image view.",
+          "enum": [
+            "image"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "AddressSpaceWire": {
+      "description": "Address space on the wire.",
+      "properties": {
+        "id": {
+          "description": "Space id, e.g. \"File\" or \"Image\".",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/AddressSpaceKindWire",
+          "description": "Kind of address space."
+        },
+        "pointer_width": {
+          "description": "Pointer width in bits.",
+          "format": "uint8",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "size": {
+          "description": "Extent of the space in bytes.\n\nA client that needs the whole space — the analysis server pulling an image through the provider, or a hex view sizing its scrollbar — would otherwise have to probe for the end by reading until it gets a short answer.",
+          "type": "string"
+        },
+        "translates_to": {
+          "description": "Id of the space this translates to, if any.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "pointer_width",
+        "size"
+      ],
+      "type": "object"
+    },
+    "ErrorData": {
+      "description": "Structured detail carried by a domain error.",
+      "properties": {
+        "detail": {
+          "description": "Provider-specific detail.",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/ErrorKind",
+          "description": "Error kind."
+        }
+      },
+      "required": [
+        "detail",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "ErrorKind": {
+      "description": "Domain-level error kinds.",
+      "oneOf": [
+        {
+          "description": "`initialize` reported an incompatible protocol version.",
+          "enum": [
+            "ProtocolVersionMismatch"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A method that requires an attached target was called before attachment.",
+          "enum": [
+            "NotAttached"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The supplied address is not valid in the requested space.",
+          "enum": [
+            "InvalidAddress"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "No bytes were readable at the requested location.",
+          "enum": [
+            "UnreadableMemory"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The target does not support the requested capability.",
+          "enum": [
+            "UnsupportedCapability"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The target is temporarily busy and the request should be retried.",
+          "enum": [
+            "TargetBusy"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "ExportWire": {
+      "description": "An exported symbol on the wire.",
+      "properties": {
+        "forwarded_to": {
+          "description": "Forward target, e.g. \"NTDLL.RtlAllocateHeap\".",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Symbol name, absent for exports by ordinal only.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ordinal": {
+          "description": "Export ordinal.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "rva": {
+          "description": "RVA of the export target, absent when forwarded.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "ordinal"
+      ],
+      "type": "object"
+    },
+    "FlowKindWire": {
+      "description": "Control-flow classification on the wire.",
+      "oneOf": [
+        {
+          "description": "Falls through to the next instruction.",
+          "enum": [
+            "sequential"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Unconditional direct branch.",
+          "enum": [
+            "jump"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Conditional branch.",
+          "enum": [
+            "conditionalJump"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Direct call.",
+          "enum": [
+            "call"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Branch or call through a register or memory operand.",
+          "enum": [
+            "indirect"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Returns from the current function.",
+          "enum": [
+            "return"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Interrupt or syscall.",
+          "enum": [
+            "interrupt"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Not a valid instruction.",
+          "enum": [
+            "invalid"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "FrameRef": {
+      "description": "Reference to a binary frame delivered inline after a JSON response.",
+      "properties": {
+        "$frame": {
+          "description": "Frame id matching the `Delver-Frame` header.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "len": {
+          "description": "Length of the binary payload in bytes.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "$frame",
+        "len"
+      ],
+      "type": "object"
+    },
+    "FunctionSeedWire": {
+      "description": "A candidate function start on the wire.",
+      "properties": {
+        "end_rva": {
+          "description": "Exclusive end as an RVA, when the source records one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rva": {
+          "description": "Function start as an RVA.",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/definitions/SeedSourceWire",
+          "description": "Where the seed came from. Consumers must render inferred boundaries differently from compiler-emitted ones."
+        }
+      },
+      "required": [
+        "rva",
+        "source"
+      ],
+      "type": "object"
+    },
+    "FunctionSourceWire": {
+      "description": "Origin of a detected function, most authoritative first.",
+      "oneOf": [
+        {
+          "description": "From the exception directory. Compiler-emitted.",
+          "enum": [
+            "exceptionDirectory"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The image entry point.",
+          "enum": [
+            "entryPoint"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "An exported symbol.",
+          "enum": [
+            "export"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A TLS callback.",
+          "enum": [
+            "tlsCallback"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Reached by a direct call during recursive descent.",
+          "enum": [
+            "callTarget"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Found by linear sweep. Nothing references it — a guess.",
+          "enum": [
+            "linearSweep"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "FunctionWire": {
+      "description": "A detected function on the wire.",
+      "properties": {
+        "authoritative": {
+          "description": "Whether the image itself vouches for this boundary. Consumers must render an inferred boundary differently from a confirmed one.",
+          "type": "boolean"
+        },
+        "end_rva": {
+          "description": "Exclusive end, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rva": {
+          "description": "Entry RVA.",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/definitions/FunctionSourceWire",
+          "description": "Where the boundary came from."
+        }
+      },
+      "required": [
+        "authoritative",
+        "rva",
+        "source"
+      ],
+      "type": "object"
+    },
+    "FunctionsResult": {
+      "description": "Response payload for `analysis/functions`.",
+      "properties": {
+        "functions": {
+          "description": "Detected functions, sorted by address.",
+          "items": {
+            "$ref": "#/definitions/FunctionWire"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "functions"
+      ],
+      "type": "object"
+    },
+    "GetExportsResult": {
+      "description": "Response payload for `getExports`.",
+      "properties": {
+        "exports": {
+          "description": "Exported symbols.",
+          "items": {
+            "$ref": "#/definitions/ExportWire"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "exports"
+      ],
+      "type": "object"
+    },
+    "GetFunctionSeedsResult": {
+      "description": "Response payload for `getFunctionSeeds`.",
+      "properties": {
+        "seeds": {
+          "description": "Candidate function starts, sorted by address.",
+          "items": {
+            "$ref": "#/definitions/FunctionSeedWire"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "seeds"
+      ],
+      "type": "object"
+    },
+    "GetImageInfoResult": {
+      "description": "Response payload for `getImageInfo`.\n\nDeliberately a summary. Imports, exports, and function seeds are unbounded in principle — a large system DLL exports thousands of symbols — so they are fetched through their own methods rather than inflating every image open.",
+      "properties": {
+        "arch": {
+          "description": "Architecture string, e.g. \"x86_64\".",
+          "type": "string"
+        },
+        "entry": {
+          "description": "Image entry point virtual address.",
+          "type": "string"
+        },
+        "export_count": {
+          "description": "Number of exported symbols.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "function_seed_count": {
+          "description": "Number of candidate function starts.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "image_base": {
+          "description": "Preferred or actual image base.",
+          "type": "string"
+        },
+        "import_module_count": {
+          "description": "Number of imported modules.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "import_symbol_count": {
+          "description": "Total number of imported symbols across all modules.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "relocation_count": {
+          "description": "Number of base relocation targets.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "sections": {
+          "description": "Loadable sections.",
+          "items": {
+            "$ref": "#/definitions/SectionWire"
+          },
+          "type": "array"
+        },
+        "tls": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TlsWire"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "TLS directory, when the image has one."
+        }
+      },
+      "required": [
+        "arch",
+        "entry",
+        "export_count",
+        "function_seed_count",
+        "image_base",
+        "import_module_count",
+        "import_symbol_count",
+        "relocation_count",
+        "sections"
+      ],
+      "type": "object"
+    },
+    "GetImportsResult": {
+      "description": "Response payload for `getImports`.",
+      "properties": {
+        "modules": {
+          "description": "Imported modules.",
+          "items": {
+            "$ref": "#/definitions/ImportedModuleWire"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "modules"
+      ],
+      "type": "object"
+    },
+    "ImageQueryParams": {
+      "description": "Parameters for an image-scoped query with no other arguments.",
+      "properties": {
+        "image_id": {
+          "description": "Image handle.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "image_id"
+      ],
+      "type": "object"
+    },
+    "ImportedModuleWire": {
+      "description": "An imported module on the wire.",
+      "properties": {
+        "name": {
+          "description": "Module name as written in the import descriptor.",
+          "type": "string"
+        },
+        "symbols": {
+          "description": "Symbols imported from this module.",
+          "items": {
+            "$ref": "#/definitions/ImportedSymbolWire"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "symbols"
+      ],
+      "type": "object"
+    },
+    "ImportedSymbolWire": {
+      "description": "An imported symbol on the wire.",
+      "properties": {
+        "iat_rva": {
+          "description": "RVA of the import address table slot a call site indirects through.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Symbol name, absent for imports by ordinal.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ordinal": {
+          "description": "Ordinal, present for imports by ordinal.",
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "iat_rva"
+      ],
+      "type": "object"
+    },
+    "InitializeResult": {
+      "description": "Response payload for `initialize`.",
+      "properties": {
+        "capabilities": {
+          "description": "Capabilities this provider exposes.",
+          "items": {
+            "$ref": "#/definitions/TargetCapabilityWire"
+          },
+          "type": "array"
+        },
+        "protocol_version": {
+          "description": "Protocol version supported by the provider.",
+          "type": "string"
+        },
+        "spaces": {
+          "description": "Address spaces exposed by the target.",
+          "items": {
+            "$ref": "#/definitions/AddressSpaceWire"
+          },
+          "type": "array"
+        },
+        "target": {
+          "$ref": "#/definitions/TargetDescriptorWire",
+          "description": "High-level target descriptor."
+        }
+      },
+      "required": [
+        "capabilities",
+        "protocol_version",
+        "spaces",
+        "target"
+      ],
+      "type": "object"
+    },
+    "ListSpacesResult": {
+      "description": "Response payload for `listSpaces`.",
+      "properties": {
+        "spaces": {
+          "description": "Address spaces exposed by the target.",
+          "items": {
+            "$ref": "#/definitions/AddressSpaceWire"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "spaces"
+      ],
+      "type": "object"
+    },
+    "ListingRowWire": {
+      "description": "One listing row on the wire.",
+      "properties": {
+        "branch_target": {
+          "description": "Statically known branch target, when there is one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flow": {
+          "$ref": "#/definitions/FlowKindWire",
+          "description": "How execution proceeds after this instruction."
+        },
+        "len": {
+          "description": "Encoded length in bytes.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "mnemonic": {
+          "description": "Formatted mnemonic.",
+          "type": "string"
+        },
+        "operands": {
+          "description": "Formatted operands. Empty when there are none.",
+          "type": "string"
+        },
+        "row": {
+          "description": "Row ordinal.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "rva": {
+          "description": "Instruction address.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "flow",
+        "len",
+        "mnemonic",
+        "operands",
+        "row",
+        "rva"
+      ],
+      "type": "object"
+    },
+    "ListingWindowParams": {
+      "description": "Parameters for `analysis/listingWindow`.",
+      "properties": {
+        "count": {
+          "description": "Maximum rows to return. Bounded server-side.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "image_id": {
+          "description": "Image handle.",
+          "type": "string"
+        },
+        "start_row": {
+          "description": "First row to return.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "count",
+        "image_id",
+        "start_row"
+      ],
+      "type": "object"
+    },
+    "ListingWindowResult": {
+      "description": "Response payload for `analysis/listingWindow`.",
+      "properties": {
+        "rows": {
+          "description": "Rows in the requested range.",
+          "items": {
+            "$ref": "#/definitions/ListingRowWire"
+          },
+          "type": "array"
+        },
+        "total_rows": {
+          "description": "Total rows available, so a client can size its scrollbar.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "rows",
+        "total_rows"
+      ],
+      "type": "object"
+    },
+    "MomentKindWire": {
+      "description": "Moment kind on the wire.",
+      "oneOf": [
+        {
+          "description": "Unchanging content.",
+          "enum": [
+            "static"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Captured snapshot.",
+          "enum": [
+            "snapshot"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Live target.",
+          "enum": [
+            "live"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "MomentWire": {
+      "description": "A moment on the wire.",
+      "properties": {
+        "epoch": {
+          "description": "Provider-defined epoch.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/definitions/MomentKindWire",
+          "description": "Kind of moment."
+        }
+      },
+      "required": [
+        "epoch",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "OpenImageParams": {
+      "description": "Parameters for `analysis/openImage`.",
+      "properties": {
+        "space": {
+          "description": "Address space to analyse. Defaults to the provider's file space.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "OpenImageResult": {
+      "description": "Response payload for `analysis/openImage`.",
+      "properties": {
+        "arch": {
+          "description": "Architecture the image was decoded as.",
+          "type": "string"
+        },
+        "function_count": {
+          "description": "Number of detected functions.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "image_id": {
+          "description": "Handle for subsequent analysis calls.",
+          "type": "string"
+        },
+        "instruction_count": {
+          "description": "Total decoded instructions — the listing's exact row count.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "string_count": {
+          "description": "Number of strings located.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "xref_count": {
+          "description": "Number of cross-references.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "arch",
+        "function_count",
+        "image_id",
+        "instruction_count",
+        "string_count",
+        "xref_count"
+      ],
+      "type": "object"
+    },
+    "RangeWire": {
+      "description": "A readable byte range.",
+      "properties": {
+        "end": {
+          "description": "Exclusive end.",
+          "type": "string"
+        },
+        "start": {
+          "description": "Inclusive start.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "end",
+        "start"
+      ],
+      "type": "object"
+    },
+    "ReadMemoryParams": {
+      "description": "Parameters for `readMemory`.",
+      "properties": {
+        "address": {
+          "description": "Start address.",
+          "type": "string"
+        },
+        "len": {
+          "description": "Number of bytes to read.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "moment": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MomentWire"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional moment; omit for the current moment."
+        },
+        "space": {
+          "description": "Address space id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "address",
+        "len",
+        "space"
+      ],
+      "type": "object"
+    },
+    "ReadMemoryResult": {
+      "description": "Response payload for `readMemory`.",
+      "properties": {
+        "data": {
+          "$ref": "#/definitions/FrameRef",
+          "description": "Reference to the binary frame that immediately follows this response."
+        },
+        "served_moment": {
+          "$ref": "#/definitions/MomentWire",
+          "description": "Moment that the data was captured at."
+        },
+        "valid": {
+          "description": "Ranges within the request that were actually readable.",
+          "items": {
+            "$ref": "#/definitions/RangeWire"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "data",
+        "served_moment",
+        "valid"
+      ],
+      "type": "object"
+    },
+    "Request": {
       "description": "A JSON-RPC style request.",
       "properties": {
         "id": {
@@ -25,112 +936,9 @@
         "id",
         "method"
       ],
-      "title": "Request",
       "type": "object"
     },
-    {
-      "$schema": "http://json-schema.org/draft-07/schema#",
-      "definitions": {
-        "ErrorData": {
-          "description": "Structured detail carried by a domain error.",
-          "properties": {
-            "detail": {
-              "description": "Provider-specific detail.",
-              "type": "string"
-            },
-            "kind": {
-              "allOf": [
-                {
-                  "$ref": "#/definitions/ErrorKind"
-                }
-              ],
-              "description": "Error kind."
-            }
-          },
-          "required": [
-            "detail",
-            "kind"
-          ],
-          "type": "object"
-        },
-        "ErrorKind": {
-          "description": "Domain-level error kinds.",
-          "oneOf": [
-            {
-              "description": "`initialize` reported an incompatible protocol version.",
-              "enum": [
-                "ProtocolVersionMismatch"
-              ],
-              "type": "string"
-            },
-            {
-              "description": "A method that requires an attached target was called before attachment.",
-              "enum": [
-                "NotAttached"
-              ],
-              "type": "string"
-            },
-            {
-              "description": "The supplied address is not valid in the requested space.",
-              "enum": [
-                "InvalidAddress"
-              ],
-              "type": "string"
-            },
-            {
-              "description": "No bytes were readable at the requested location.",
-              "enum": [
-                "UnreadableMemory"
-              ],
-              "type": "string"
-            },
-            {
-              "description": "The target does not support the requested capability.",
-              "enum": [
-                "UnsupportedCapability"
-              ],
-              "type": "string"
-            },
-            {
-              "description": "The target is temporarily busy and the request should be retried.",
-              "enum": [
-                "TargetBusy"
-              ],
-              "type": "string"
-            }
-          ]
-        },
-        "RpcError": {
-          "description": "JSON-RPC error object extended with Delver-specific error data.",
-          "properties": {
-            "code": {
-              "description": "JSON-RPC error code.",
-              "format": "int64",
-              "type": "integer"
-            },
-            "data": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/ErrorData"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Delver error kind and detail."
-            },
-            "message": {
-              "description": "Human-readable message.",
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "message"
-          ],
-          "type": "object"
-        }
-      },
+    "Response": {
       "description": "A JSON-RPC style response.",
       "properties": {
         "error": {
@@ -157,9 +965,400 @@
       "required": [
         "id"
       ],
-      "title": "Response",
+      "type": "object"
+    },
+    "RowForAddressParams": {
+      "description": "Parameters for `analysis/rowForAddress`.",
+      "properties": {
+        "containing": {
+          "default": false,
+          "description": "When true, return the row *containing* the address rather than requiring an exact instruction boundary.",
+          "type": "boolean"
+        },
+        "image_id": {
+          "description": "Image handle.",
+          "type": "string"
+        },
+        "rva": {
+          "description": "Address to locate.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "image_id",
+        "rva"
+      ],
+      "type": "object"
+    },
+    "RowForAddressResult": {
+      "description": "Response payload for `analysis/rowForAddress`.",
+      "properties": {
+        "row": {
+          "description": "Row ordinal, absent when the address is not in the index.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RpcError": {
+      "description": "JSON-RPC error object extended with Delver-specific error data.",
+      "properties": {
+        "code": {
+          "description": "JSON-RPC error code.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "data": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ErrorData"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Delver error kind and detail."
+        },
+        "message": {
+          "description": "Human-readable message.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "SectionWire": {
+      "description": "Image section on the wire.",
+      "properties": {
+        "name": {
+          "description": "Section name.",
+          "type": "string"
+        },
+        "raw_offset": {
+          "description": "Raw file offset.",
+          "type": "string"
+        },
+        "raw_size": {
+          "description": "Raw file size.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "virtual_address": {
+          "description": "Virtual address.",
+          "type": "string"
+        },
+        "virtual_size": {
+          "description": "Virtual size.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "raw_offset",
+        "raw_size",
+        "virtual_address",
+        "virtual_size"
+      ],
+      "type": "object"
+    },
+    "SeedSourceWire": {
+      "description": "Origin of a function seed, most authoritative first.",
+      "oneOf": [
+        {
+          "description": "From the exception directory. Compiler-emitted.",
+          "enum": [
+            "exceptionDirectory"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The image entry point.",
+          "enum": [
+            "entryPoint"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "An exported symbol.",
+          "enum": [
+            "export"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A TLS callback, which runs before the entry point.",
+          "enum": [
+            "tlsCallback"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "StringEncodingWire": {
+      "description": "String encoding on the wire.",
+      "oneOf": [
+        {
+          "description": "Printable single-byte characters.",
+          "enum": [
+            "ascii"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "UTF-16, little-endian.",
+          "enum": [
+            "utf16Le"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "StringWire": {
+      "description": "A located string on the wire.\n\n`text` is **attacker-controlled**. Consumers must escape it before display and must never treat it as markup or as instructions to a model.",
+      "properties": {
+        "encoding": {
+          "$ref": "#/definitions/StringEncodingWire",
+          "description": "How it was encoded."
+        },
+        "rva": {
+          "description": "RVA of the first character.",
+          "type": "string"
+        },
+        "text": {
+          "description": "Decoded text. Untrusted.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "encoding",
+        "rva",
+        "text"
+      ],
+      "type": "object"
+    },
+    "StringsResult": {
+      "description": "Response payload for `analysis/strings`.",
+      "properties": {
+        "strings": {
+          "description": "Strings located in the image.",
+          "items": {
+            "$ref": "#/definitions/StringWire"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "strings"
+      ],
+      "type": "object"
+    },
+    "TargetCapabilityWire": {
+      "description": "Target capability on the wire.",
+      "oneOf": [
+        {
+          "description": "Can list address spaces.",
+          "enum": [
+            "listSpaces"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Can return image metadata.",
+          "enum": [
+            "getImageInfo"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Can read memory.",
+          "enum": [
+            "readMemory"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Can enumerate imported modules and symbols.",
+          "enum": [
+            "getImports"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Can enumerate exported symbols.",
+          "enum": [
+            "getExports"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Can supply candidate function starts.",
+          "enum": [
+            "getFunctionSeeds"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Can analyse an image and serve listing rows, functions, and xrefs.",
+          "enum": [
+            "analyze"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "TargetDescriptorWire": {
+      "description": "High-level target descriptor on the wire.",
+      "properties": {
+        "kind": {
+          "description": "Target kind string, e.g. \"file\".",
+          "type": "string"
+        },
+        "name": {
+          "description": "Human-readable target name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "name"
+      ],
+      "type": "object"
+    },
+    "TlsWire": {
+      "description": "TLS directory on the wire.",
+      "properties": {
+        "callbacks": {
+          "description": "TLS callback RVAs, in loader invocation order.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "index_rva": {
+          "description": "RVA of the TLS index variable.",
+          "type": "string"
+        },
+        "raw_data_rva": {
+          "description": "RVA of the raw TLS template data.",
+          "type": "string"
+        },
+        "raw_data_size": {
+          "description": "Size of the raw TLS template data.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "callbacks",
+        "index_rva",
+        "raw_data_rva",
+        "raw_data_size"
+      ],
+      "type": "object"
+    },
+    "XrefKindWire": {
+      "description": "Kind of cross-reference on the wire.",
+      "oneOf": [
+        {
+          "description": "A direct call.",
+          "enum": [
+            "call"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "An unconditional direct branch.",
+          "enum": [
+            "jump"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A conditional branch.",
+          "enum": [
+            "conditionalJump"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A RIP-relative memory operand.",
+          "enum": [
+            "data"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "XrefWire": {
+      "description": "A cross-reference on the wire.",
+      "properties": {
+        "from": {
+          "description": "Referencing address.",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/XrefKindWire",
+          "description": "Kind of reference."
+        },
+        "to": {
+          "description": "Referenced address.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "kind",
+        "to"
+      ],
+      "type": "object"
+    },
+    "XrefsParams": {
+      "description": "Parameters for `analysis/xrefsTo` and `analysis/xrefsFrom`.",
+      "properties": {
+        "image_id": {
+          "description": "Image handle.",
+          "type": "string"
+        },
+        "rva": {
+          "description": "Address to look up.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "image_id",
+        "rva"
+      ],
+      "type": "object"
+    },
+    "XrefsResult": {
+      "description": "Response payload for the xref queries.",
+      "properties": {
+        "xrefs": {
+          "description": "Matching references.",
+          "items": {
+            "$ref": "#/definitions/XrefWire"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "xrefs"
+      ],
       "type": "object"
     }
-  ],
+  },
+  "description": "Request, response, and payload types for the Delver provider protocol.",
   "title": "Delver Protocol v0"
 }

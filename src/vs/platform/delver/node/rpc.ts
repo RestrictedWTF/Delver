@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Readable, Writable } from 'stream';
-import { IRequest, IResponse } from './protocol.generated.js';
+import { IRequest, IResponse } from '../common/protocol.generated.js';
 
 export interface IRpcMessage {
 	readonly json: IResponse;

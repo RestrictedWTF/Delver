@@ -5,8 +5,8 @@
 
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use delver_core::{AddressSpaceKind, MomentKind, SpaceId, TargetCapability};
 
@@ -124,6 +124,10 @@ pub struct ListSpacesResult {
 }
 
 /// Response payload for `getImageInfo`.
+///
+/// Deliberately a summary. Imports, exports, and function seeds are unbounded
+/// in principle — a large system DLL exports thousands of symbols — so they are
+/// fetched through their own methods rather than inflating every image open.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct GetImageInfoResult {
 	/// Architecture string, e.g. "x86_64".
@@ -138,6 +142,418 @@ pub struct GetImageInfoResult {
 	pub image_base: u64,
 	/// Loadable sections.
 	pub sections: Vec<SectionWire>,
+	/// Number of imported modules.
+	pub import_module_count: u64,
+	/// Total number of imported symbols across all modules.
+	pub import_symbol_count: u64,
+	/// Number of exported symbols.
+	pub export_count: u64,
+	/// Number of candidate function starts.
+	pub function_seed_count: u64,
+	/// Number of base relocation targets.
+	pub relocation_count: u64,
+	/// TLS directory, when the image has one.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub tls: Option<TlsWire>,
+}
+
+/// Response payload for `getImports`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GetImportsResult {
+	/// Imported modules.
+	pub modules: Vec<ImportedModuleWire>,
+}
+
+/// Response payload for `getExports`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GetExportsResult {
+	/// Exported symbols.
+	pub exports: Vec<ExportWire>,
+}
+
+/// Response payload for `getFunctionSeeds`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GetFunctionSeedsResult {
+	/// Candidate function starts, sorted by address.
+	pub seeds: Vec<FunctionSeedWire>,
+}
+
+// ---------------------------------------------------------------------------
+// Analysis server (v1).
+//
+// Served by `server-analysis`, not by providers. A provider serves bytes and
+// target state; the analysis server interprets them.
+// ---------------------------------------------------------------------------
+
+/// Parameters for `analysis/openImage`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct OpenImageParams {
+	/// Address space to analyse. Defaults to the provider's file space.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub space: Option<String>,
+}
+
+/// Response payload for `analysis/openImage`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct OpenImageResult {
+	/// Handle for subsequent analysis calls.
+	pub image_id: String,
+	/// Architecture the image was decoded as.
+	pub arch: String,
+	/// Total decoded instructions — the listing's exact row count.
+	pub instruction_count: u64,
+	/// Number of detected functions.
+	pub function_count: u64,
+	/// Number of cross-references.
+	pub xref_count: u64,
+	/// Number of strings located.
+	pub string_count: u64,
+}
+
+/// Parameters for `analysis/listingWindow`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ListingWindowParams {
+	/// Image handle.
+	pub image_id: String,
+	/// First row to return.
+	pub start_row: u64,
+	/// Maximum rows to return. Bounded server-side.
+	pub count: u64,
+}
+
+/// Response payload for `analysis/listingWindow`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ListingWindowResult {
+	/// Rows in the requested range.
+	pub rows: Vec<ListingRowWire>,
+	/// Total rows available, so a client can size its scrollbar.
+	pub total_rows: u64,
+}
+
+/// One listing row on the wire.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ListingRowWire {
+	/// Row ordinal.
+	pub row: u64,
+	/// Instruction address.
+	#[serde(with = "crate::hex")]
+	#[schemars(with = "String")]
+	pub rva: u64,
+	/// Encoded length in bytes.
+	pub len: u32,
+	/// Formatted mnemonic.
+	pub mnemonic: String,
+	/// Formatted operands. Empty when there are none.
+	pub operands: String,
+	/// How execution proceeds after this instruction.
+	pub flow: FlowKindWire,
+	/// Statically known branch target, when there is one.
+	#[serde(
+		default,
+		skip_serializing_if = "Option::is_none",
+		with = "crate::hex::option"
+	)]
+	#[schemars(with = "Option<String>")]
+	pub branch_target: Option<u64>,
+}
+
+/// Control-flow classification on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum FlowKindWire {
+	/// Falls through to the next instruction.
+	Sequential,
+	/// Unconditional direct branch.
+	Jump,
+	/// Conditional branch.
+	ConditionalJump,
+	/// Direct call.
+	Call,
+	/// Branch or call through a register or memory operand.
+	Indirect,
+	/// Returns from the current function.
+	Return,
+	/// Interrupt or syscall.
+	Interrupt,
+	/// Not a valid instruction.
+	Invalid,
+}
+
+/// Parameters for `analysis/rowForAddress`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RowForAddressParams {
+	/// Image handle.
+	pub image_id: String,
+	/// Address to locate.
+	#[serde(with = "crate::hex")]
+	#[schemars(with = "String")]
+	pub rva: u64,
+	/// When true, return the row *containing* the address rather than
+	/// requiring an exact instruction boundary.
+	#[serde(default)]
+	pub containing: bool,
+}
+
+/// Response payload for `analysis/rowForAddress`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RowForAddressResult {
+	/// Row ordinal, absent when the address is not in the index.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub row: Option<u64>,
+}
+
+/// Parameters for `analysis/addressForRow`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AddressForRowParams {
+	/// Image handle.
+	pub image_id: String,
+	/// Row ordinal.
+	pub row: u64,
+}
+
+/// Response payload for `analysis/addressForRow`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AddressForRowResult {
+	/// Address of the row, absent when the row is out of range.
+	#[serde(
+		default,
+		skip_serializing_if = "Option::is_none",
+		with = "crate::hex::option"
+	)]
+	#[schemars(with = "Option<String>")]
+	pub rva: Option<u64>,
+}
+
+/// Parameters for an image-scoped query with no other arguments.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ImageQueryParams {
+	/// Image handle.
+	pub image_id: String,
+}
+
+/// Response payload for `analysis/functions`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FunctionsResult {
+	/// Detected functions, sorted by address.
+	pub functions: Vec<FunctionWire>,
+}
+
+/// A detected function on the wire.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FunctionWire {
+	/// Entry RVA.
+	#[serde(with = "crate::hex")]
+	#[schemars(with = "String")]
+	pub rva: u64,
+	/// Exclusive end, when known.
+	#[serde(
+		default,
+		skip_serializing_if = "Option::is_none",
+		with = "crate::hex::option"
+	)]
+	#[schemars(with = "Option<String>")]
+	pub end_rva: Option<u64>,
+	/// Where the boundary came from.
+	pub source: FunctionSourceWire,
+	/// Whether the image itself vouches for this boundary. Consumers must
+	/// render an inferred boundary differently from a confirmed one.
+	pub authoritative: bool,
+}
+
+/// Origin of a detected function, most authoritative first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum FunctionSourceWire {
+	/// From the exception directory. Compiler-emitted.
+	ExceptionDirectory,
+	/// The image entry point.
+	EntryPoint,
+	/// An exported symbol.
+	Export,
+	/// A TLS callback.
+	TlsCallback,
+	/// Reached by a direct call during recursive descent.
+	CallTarget,
+	/// Found by linear sweep. Nothing references it — a guess.
+	LinearSweep,
+}
+
+/// Parameters for `analysis/xrefsTo` and `analysis/xrefsFrom`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct XrefsParams {
+	/// Image handle.
+	pub image_id: String,
+	/// Address to look up.
+	#[serde(with = "crate::hex")]
+	#[schemars(with = "String")]
+	pub rva: u64,
+}
+
+/// Response payload for the xref queries.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct XrefsResult {
+	/// Matching references.
+	pub xrefs: Vec<XrefWire>,
+}
+
+/// A cross-reference on the wire.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct XrefWire {
+	/// Referencing address.
+	#[serde(with = "crate::hex")]
+	#[schemars(with = "String")]
+	pub from: u64,
+	/// Referenced address.
+	#[serde(with = "crate::hex")]
+	#[schemars(with = "String")]
+	pub to: u64,
+	/// Kind of reference.
+	pub kind: XrefKindWire,
+}
+
+/// Kind of cross-reference on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum XrefKindWire {
+	/// A direct call.
+	Call,
+	/// An unconditional direct branch.
+	Jump,
+	/// A conditional branch.
+	ConditionalJump,
+	/// A RIP-relative memory operand.
+	Data,
+}
+
+/// Response payload for `analysis/strings`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct StringsResult {
+	/// Strings located in the image.
+	pub strings: Vec<StringWire>,
+}
+
+/// A located string on the wire.
+///
+/// `text` is **attacker-controlled**. Consumers must escape it before display
+/// and must never treat it as markup or as instructions to a model.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct StringWire {
+	/// RVA of the first character.
+	#[serde(with = "crate::hex")]
+	#[schemars(with = "String")]
+	pub rva: u64,
+	/// Decoded text. Untrusted.
+	pub text: String,
+	/// How it was encoded.
+	pub encoding: StringEncodingWire,
+}
+
+/// String encoding on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum StringEncodingWire {
+	/// Printable single-byte characters.
+	Ascii,
+	/// UTF-16, little-endian.
+	Utf16Le,
+}
+
+/// An imported module on the wire.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ImportedModuleWire {
+	/// Module name as written in the import descriptor.
+	pub name: String,
+	/// Symbols imported from this module.
+	pub symbols: Vec<ImportedSymbolWire>,
+}
+
+/// An imported symbol on the wire.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ImportedSymbolWire {
+	/// Symbol name, absent for imports by ordinal.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub name: Option<String>,
+	/// Ordinal, present for imports by ordinal.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub ordinal: Option<u16>,
+	/// RVA of the import address table slot a call site indirects through.
+	#[serde(with = "crate::hex")]
+	#[schemars(with = "String")]
+	pub iat_rva: u64,
+}
+
+/// An exported symbol on the wire.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ExportWire {
+	/// Symbol name, absent for exports by ordinal only.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub name: Option<String>,
+	/// Export ordinal.
+	pub ordinal: u32,
+	/// RVA of the export target, absent when forwarded.
+	#[serde(
+		default,
+		skip_serializing_if = "Option::is_none",
+		with = "crate::hex::option"
+	)]
+	#[schemars(with = "Option<String>")]
+	pub rva: Option<u64>,
+	/// Forward target, e.g. "NTDLL.RtlAllocateHeap".
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub forwarded_to: Option<String>,
+}
+
+/// A candidate function start on the wire.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FunctionSeedWire {
+	/// Function start as an RVA.
+	#[serde(with = "crate::hex")]
+	#[schemars(with = "String")]
+	pub rva: u64,
+	/// Exclusive end as an RVA, when the source records one.
+	#[serde(
+		default,
+		skip_serializing_if = "Option::is_none",
+		with = "crate::hex::option"
+	)]
+	#[schemars(with = "Option<String>")]
+	pub end_rva: Option<u64>,
+	/// Where the seed came from. Consumers must render inferred boundaries
+	/// differently from compiler-emitted ones.
+	pub source: SeedSourceWire,
+}
+
+/// Origin of a function seed, most authoritative first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum SeedSourceWire {
+	/// From the exception directory. Compiler-emitted.
+	ExceptionDirectory,
+	/// The image entry point.
+	EntryPoint,
+	/// An exported symbol.
+	Export,
+	/// A TLS callback, which runs before the entry point.
+	TlsCallback,
+}
+
+/// TLS directory on the wire.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TlsWire {
+	/// RVA of the TLS index variable.
+	#[serde(with = "crate::hex")]
+	#[schemars(with = "String")]
+	pub index_rva: u64,
+	/// RVA of the raw TLS template data.
+	#[serde(with = "crate::hex")]
+	#[schemars(with = "String")]
+	pub raw_data_rva: u64,
+	/// Size of the raw TLS template data.
+	pub raw_data_size: u64,
+	/// TLS callback RVAs, in loader invocation order.
+	#[serde(with = "crate::hex::vec")]
+	#[schemars(with = "Vec<String>")]
+	pub callbacks: Vec<u64>,
 }
 
 /// Parameters for `readMemory`.
@@ -231,6 +647,14 @@ pub enum TargetCapabilityWire {
 	GetImageInfo,
 	/// Can read memory.
 	ReadMemory,
+	/// Can enumerate imported modules and symbols.
+	GetImports,
+	/// Can enumerate exported symbols.
+	GetExports,
+	/// Can supply candidate function starts.
+	GetFunctionSeeds,
+	/// Can analyse an image and serve listing rows, functions, and xrefs.
+	Analyze,
 }
 
 /// Address space on the wire.
@@ -242,6 +666,15 @@ pub struct AddressSpaceWire {
 	pub kind: AddressSpaceKindWire,
 	/// Pointer width in bits.
 	pub pointer_width: u8,
+	/// Extent of the space in bytes.
+	///
+	/// A client that needs the whole space — the analysis server pulling an
+	/// image through the provider, or a hex view sizing its scrollbar — would
+	/// otherwise have to probe for the end by reading until it gets a short
+	/// answer.
+	#[serde(with = "crate::hex")]
+	#[schemars(with = "String")]
+	pub size: u64,
 	/// Id of the space this translates to, if any.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub translates_to: Option<String>,
@@ -323,6 +756,10 @@ impl From<TargetCapabilityWire> for TargetCapability {
 			TargetCapabilityWire::ListSpaces => TargetCapability::ListSpaces,
 			TargetCapabilityWire::GetImageInfo => TargetCapability::GetImageInfo,
 			TargetCapabilityWire::ReadMemory => TargetCapability::ReadMemory,
+			TargetCapabilityWire::GetImports => TargetCapability::GetImports,
+			TargetCapabilityWire::GetExports => TargetCapability::GetExports,
+			TargetCapabilityWire::GetFunctionSeeds => TargetCapability::GetFunctionSeeds,
+			TargetCapabilityWire::Analyze => TargetCapability::Analyze,
 		}
 	}
 }
@@ -333,6 +770,10 @@ impl From<TargetCapability> for TargetCapabilityWire {
 			TargetCapability::ListSpaces => TargetCapabilityWire::ListSpaces,
 			TargetCapability::GetImageInfo => TargetCapabilityWire::GetImageInfo,
 			TargetCapability::ReadMemory => TargetCapabilityWire::ReadMemory,
+			TargetCapability::GetImports => TargetCapabilityWire::GetImports,
+			TargetCapability::GetExports => TargetCapabilityWire::GetExports,
+			TargetCapability::GetFunctionSeeds => TargetCapabilityWire::GetFunctionSeeds,
+			TargetCapability::Analyze => TargetCapabilityWire::Analyze,
 		}
 	}
 }
@@ -361,6 +802,7 @@ impl From<AddressSpaceWire> for delver_core::AddressSpace {
 			id: SpaceId::new(w.id),
 			kind: w.kind.into(),
 			pointer_width: w.pointer_width,
+			size: w.size,
 			translates_to: w.translates_to.map(SpaceId::new),
 		}
 	}
@@ -372,6 +814,7 @@ impl From<delver_core::AddressSpace> for AddressSpaceWire {
 			id: s.id.as_str().to_owned(),
 			kind: s.kind.into(),
 			pointer_width: s.pointer_width,
+			size: s.size,
 			translates_to: s.translates_to.map(|id| id.as_str().to_owned()),
 		}
 	}
@@ -390,6 +833,7 @@ mod tests {
 				id: "Image".to_string(),
 				kind: AddressSpaceKindWire::Image,
 				pointer_width: 64,
+				size: 0x1000,
 				translates_to: None,
 			}],
 			target: TargetDescriptorWire {

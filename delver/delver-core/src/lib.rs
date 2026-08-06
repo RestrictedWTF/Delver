@@ -48,6 +48,8 @@ pub struct AddressSpace {
 	pub kind: AddressSpaceKind,
 	/// Pointer width in bits for this space (e.g. 32 or 64).
 	pub pointer_width: u8,
+	/// Extent of the space in bytes.
+	pub size: u64,
 	/// If present, addresses in this space translate to the target space.
 	pub translates_to: Option<SpaceId>,
 }
@@ -58,12 +60,14 @@ impl AddressSpace {
 		id: impl Into<String>,
 		kind: AddressSpaceKind,
 		pointer_width: u8,
+		size: u64,
 		translates_to: Option<impl Into<String>>,
 	) -> Self {
 		Self {
 			id: SpaceId::new(id),
 			kind,
 			pointer_width,
+			size,
 			translates_to: translates_to.map(Into::into).map(SpaceId::new),
 		}
 	}
@@ -148,6 +152,14 @@ pub enum TargetCapability {
 	GetImageInfo,
 	/// The target can read memory at a location and moment.
 	ReadMemory,
+	/// The target can enumerate imported modules and symbols.
+	GetImports,
+	/// The target can enumerate exported symbols.
+	GetExports,
+	/// The target can supply candidate function starts.
+	GetFunctionSeeds,
+	/// The target can analyse an image and serve listing rows, functions, and xrefs.
+	Analyze,
 }
 
 #[cfg(test)]
