@@ -1,0 +1,320 @@
+# Roadmap
+
+Two tracks, run in this order of priority:
+
+- **Core track** — the shortest path to something you and the team actually use.
+  Every phase ends with a working tool, not a layer.
+- **Depth track** — the deep and complex work in the same areas, deliberately
+  deferred so it never blocks the prototype.
+
+**Priority: static reverse engineering with decompilation and AI, first.**
+Runtime and the debugger come after. The reasoning is that decompiled C is what
+makes AI grounding work (see §"Why decompilation before runtime" below), and
+static file analysis is the team's day-to-day need.
+
+Sizes are relative effort (S / M / L / XL), not calendar time — team size and
+availability decide that.
+
+---
+
+## Phase map
+
+| Phase | Core deliverable | Notes |
+| --- | --- | --- |
+| **P0** Skeleton | End-to-end pipe: IDE ↔ provider ↔ a real PE | |
+| **P1** Static core | **The prototype.** Listing, navigation, annotation | Prerequisite for P2 — the decompiler needs it |
+| **P2** Decompilation & p-code | Pseudocode synced to the listing | Largest single integration in the roadmap |
+| **P3** AI core | Grounded tools, proposals, evidence, notebooks | The payoff for P2 |
+| **P4** Runtime & debugger | Live attach, basic debugger, memory-vs-disk diff | [09-Debugger-PoC.md](../architecture/debugger-provider.md) |
+| **P5** Analysis depth | Types, CFG, ELF/Mach-O, signatures | Depth track |
+| **P6** Scale & knowledge | Recipes, graphs, more providers, hardening | |
+| **P7** Kernel & hypervisor | **PARKED** until the abstraction has survived 3+ providers | |
+
+---
+
+# P0 — Walking skeleton
+
+Prove the whole pipe end to end with the least code possible. Nothing
+user-facing beyond a debug view.
+
+## Core
+
+| Item | Size | Notes |
+| --- | --- | --- |
+| `delver/` Rust workspace | S | Mirrors the existing `cli/` crate. See [08-Project-Structure.md](../architecture/project-structure.md) |
+| `delver-protocol` + codegen to TS | M | Rust is the source of truth; TS is generated and checked in |
+| `delver-rpc` transport (JSON-RPC + binary frames) | M | stdio first |
+| `provider-file`: open a PE, return headers/sections | M | `goblin` or `object` crate |
+| `providerProcess.ts` host in the workbench | M | Modelled on how debug adapters are spawned |
+| One throwaway view listing sections | S | Proof of life, deleted in P1 |
+| `delverctl` headless harness | S | Drives the protocol without the IDE |
+| Branding, telemetry off, CI (build + typecheck + layers) | M | |
+
+**`delverctl` matters more than it looks.** It lets the analysis engine be
+developed and tested with zero IDE involvement, makes the golden corpus runnable
+in CI, and gives the team headless triage for free.
+
+## Load-bearing decisions (cheap now, brutal later)
+
+- `ILocation` / `IMoment` in every read signature, including the file provider
+  where the Moment is constant.
+- The **process boundary** between renderer and parser. Keep it from day one.
+- **Sandboxing that boundary is not required in P0.** Hardening is a token/flag
+  change you add in P4. The boundary is architectural; the sandbox is
+  configuration. Don't conflate them and slow yourself down.
+- Fact vs. interpretation as separate stores, even when interpretation is empty.
+- `Anchor` as `(contentHash, rva)`, never absolute addresses.
+
+**Exit:** `delverctl sections notepad.exe` and the IDE both get the same data
+from the same provider process.
+
+---
+
+# P1 — Static core · **the prototype**
+
+Everything the decompiler needs, plus a tool that stands on its own if P2 slips.
+
+Do not try to skip this to reach decompilation faster. The Ghidra decompiler
+queries back for **bytes, function boundaries, and symbols** — the responder in
+P2 is built on exactly what P1 produces.
+
+## Core
+
+| Item | Size | Notes |
+| --- | --- | --- |
+| PE loader: sections, imports, exports, relocs, resources, TLS, entry | M | ELF/Mach-O deferred to P5 |
+| `server-analysis` process | M | Separate from providers |
+| Disassembly via `iced-x86`, windowed decode | M | Never decode a whole module |
+| **Function detection** — linear + recursive descent, exports and exception-directory entries as seeds | M | **P2 depends on this** |
+| **Listing editor** — `EditorPane` + `WorkbenchTable` | L | Copy the pattern from `contrib/debug/browser/disassemblyView.ts` |
+| Xrefs (code + data), both directions | M | Sorted index tables, not objects |
+| Strings view | S | ASCII + UTF-16; filter, sort, xref-to |
+| Imports/exports/sections trees | S | |
+| Quick access: go to address / symbol / string | S | Very high value per line of code |
+| Address history on Alt+Left / Alt+Right | S | Free once views are `EditorInput`s |
+| Focus bus with `origin` tagging + per-view pin | M | Prevents update loops from day one |
+| Rename, comment, tag — anchored, attributed, undoable | M | The append-only edit log. **P2 writes through this** |
+| `.delver` SQLite project; opens with no target attached | M | |
+| Outline view = function list | S | |
+| Golden corpus + regression suite in CI | M | Start it here or it never starts |
+
+## Can slide out of P1 if you want P2 sooner
+
+- **Hex view** (M) — genuinely useful, but nothing in P2 needs it. Slide to P4
+  where it pairs with live memory.
+- Resource and TLS parsing — entry points and code matter first.
+
+## Explicitly not in P1
+
+Types/structs · CFG or any graph · signature matching · ELF/Mach-O ·
+demangling beyond MSVC basics · multi-architecture · YARA search · any AI ·
+capability-negotiation UI · the graph query API · recipes beyond a schema stub ·
+sandboxing.
+
+**Exit:** an analyst opens an unknown PE, navigates it by symbol and address,
+reads the disassembly, names 30 functions, writes comments, closes it, reopens it
+tomorrow, and everything is there.
+
+---
+
+# P2 — Decompilation and p-code · **the new priority**
+
+The largest single integration in the roadmap. Staged so the product questions
+get answered before the expensive engineering.
+
+## Why this is staged
+
+Ghidra's decompiler is a native process that **queries the frontend back** for
+bytes, symbols, and types — you implement the responder, and that responder
+protocol is an internal Ghidra interface, not a stable public API. It changes
+between versions. Plan to **pin a Ghidra version and vendor the decompiler
+source.**
+
+So: prove the value with a scaffold, then build the real thing.
+
+## P2a — Scaffold (Ghidra headless)
+
+| Item | Size | Notes |
+| --- | --- | --- |
+| Headless Ghidra script → `{C text, address↔line map, variables}` as JSON | S | Days, not weeks |
+| `IDecompilerService` interface + headless backend behind it | M | The interface is what survives |
+| `delver-pseudo:` scheme + `delver-c` language in Monaco | M | Free highlighting, folding, find, peek |
+| **Line ↔ address map**, bidirectional sync with the listing | M | This is the feature; text rendering is free |
+| Rename/comment in pseudocode writes through to the interpretation layer | M | |
+
+**Hard constraint: the JVM must never reach a shipped build.** P2a is a scaffold
+you delete. If it starts looking permanent, that's a schedule problem, not an
+architecture decision.
+
+**Exit of P2a:** click a pseudocode line, the listing highlights the matching
+instructions; rename in either view and both update. You now know whether
+AI-on-decompilation works for your samples — before paying for P2b.
+
+## P2b — Native decompiler process
+
+| Item | Size | Notes |
+| --- | --- | --- |
+| Vendor + build Ghidra's `decompile` at a pinned version | M | Document the pin and the update procedure |
+| `delver-decompile` responder: bytes, functions, symbols, comments, types | L | Fed by P1's fact store |
+| Swap the backend behind `IDecompilerService`; delete the JVM path | M | A second integration, not a continuation |
+| Caching + invalidation keyed by content hash and the edit log | M | Renames must not force a full re-decompile |
+| Decompiler timeout / failure handling as first-class UI state | S | Big obfuscated functions will fail. Say so, don't hang |
+
+## p-code
+
+| Item | Size | Notes |
+| --- | --- | --- |
+| Expose raw p-code per instruction/block | M | SLEIGH lifting; a C++ FFI dependency if done natively |
+| Expose refined p-code from the decompiler | S | Comes with P2b for free |
+| p-code query surface for semantic passes | M | |
+
+**Ranking for AI grounding: C ≫ refined p-code > assembly ≫ raw p-code.**
+Raw p-code is verbose and low-level — useful for your own analysis passes, bad
+as a model input. Do not feed it to an LLM.
+
+## Cheap insurance — a second provider
+
+| Item | Size | Notes |
+| --- | --- | --- |
+| **Minidump provider** | M | A file parser: no debug loop, no thread affinity |
+
+With the debugger deferred to P4, `ITargetProvider` would otherwise go unvalidated
+until late — and a one-implementation abstraction is always wrong. Minidump is
+the cheapest fix: it exercises threads, registers, modules, and multiple address
+spaces, and "open a crash dump" is a real static workflow on its own.
+
+**Exit of P2:** decompiled C for an arbitrary function, synced to the listing,
+with renames flowing both ways, produced by a shipped binary with no JVM.
+
+---
+
+# P3 — AI core
+
+Now the model has something worth reading. See [05-AI-Analyst.md](../architecture/ai-analyst.md).
+
+| Item | Size |
+| --- | --- |
+| Tools registered with `ILanguageModelToolsService`, bounded and Moment-tagged | M |
+| Decompilation as the primary AI input, with the listing as backup | S |
+| Proposal layer + batch review surface | L |
+| Evidence chain UI — click a claim, see tool calls and byte ranges | M |
+| Local DTP endpoint + `DELVER_SESSION` handoff, token-authed | M |
+| **Python client** (`delver` package) | M |
+| Investigation notebooks (`.delvernb`) | L |
+| UI ops over the protocol (`report_finding`, `focus`, `annotate`) | S |
+| Untrusted-content handling + injection detection | M |
+| Eval harness on the golden corpus, in CI | M |
+
+**Exit:** the model reads decompiled output for an unfamiliar routine, proposes
+30 renames and a finding, the analyst reviews them in one pass, and every
+accepted claim traces to bytes. Grounding and hallucination rates are measured,
+not asserted.
+
+---
+
+# P4 — Runtime and debugger
+
+Deferred, not dropped. This is where packed samples become tractable.
+
+| Item | Size | Notes |
+| --- | --- | --- |
+| **D0** — non-invasive attach: memory, modules, threads, regions, registers | M | ~300 lines. [09-Debugger-PoC.md](../architecture/debugger-provider.md) |
+| **Memory-vs-disk image diff** in the diff editor | M | Needs only D0. Finds inline hooks and unpacked sections |
+| Image normalization (undo relocs, zero IAT) | M | Powers the diff and anchor matching |
+| Hex view (if slid from P1) | M | |
+| Real `Moment` handling: Live vs. Frozen, staleness indicators | M | First time this is exercised for real |
+| Runtime views: processes, threads, modules, regions, handles | M | |
+| **D1** — invasive debug loop, halt/resume, module + thread events | M | Thread-affine loop |
+| **D2** — software breakpoints, single step, call stack | L | |
+| Region lifecycle recording → Timeline (alloc → write → +X → exec) | M | |
+| Provider sandboxing + restart-on-crash | M | |
+| Capability gating for real, with `when` clauses | S | Three providers makes this concrete |
+
+## Deferred to P6
+
+Hardware breakpoints · conditional breakpoints · watchpoints · WOW64 / 32-bit
+targets · trace recording · anti-anti-debug · DAP shim.
+
+**Exit:** attach to a running process, freeze it, diff a loaded module against
+its file on disk, and land on a real inline hook. Adding providers required
+**zero changes** to `ITargetProvider` — if it did, fix the abstraction before P5.
+
+---
+
+# P5 — Analysis depth
+
+| Item | Size |
+| --- | --- |
+| Type system: structs, enums, function signatures, propagation | XL |
+| Type application feeding back into the decompiler responder | L |
+| CFG per function with layered layout | L |
+| Stack frame / local variable recovery beyond what the decompiler gives | L |
+| ELF and Mach-O loaders | L |
+| Signature matching for library code | L |
+| Demangling (MSVC, Itanium) | M |
+
+---
+
+# P6 — Scale, knowledge, hardening
+
+| Item | Size |
+| --- | --- |
+| Recipes: compile an investigation into a re-runnable rule | XL |
+| Call graph (neighborhood-first) and object graph | L |
+| Byte / regex / YARA search viewlet | M |
+| Emulator provider | L |
+| Debugger depth items deferred from P4 | L |
+| Fuzzing all parsers, continuously in CI | M |
+| Remote-provider deployment mode documented and supported | M |
+| Script-runner contrib: registered Python scripts on workspace events | M |
+| TypeScript extension API — **only** if a UI-contributing plugin is genuinely needed | L |
+
+---
+
+# P7 — Kernel and hypervisor · **PARKED**
+
+Kernel debugger provider first (validates virtual↔physical translation and kernel
+object enumeration), then the hypervisor.
+
+**Exit:** the hypervisor provider is added without changing `ITargetProvider`.
+`MomentKind.Replay` activates for time travel with no data-model change — it was
+designed in at P0.
+
+---
+
+## Why decompilation before runtime
+
+The case for this ordering:
+
+- **AI grounding depends on it.** A model reasoning over decompiled C is a
+  different product from one reasoning over disassembly. Since the AI analyst is
+  the differentiator, the input quality gates everything downstream.
+- **It matches the team's actual work** — static analysis of files on disk.
+- **P1 + P2 is a complete tool.** Runtime adds a capability; it isn't a
+  prerequisite for value.
+
+The honest cost:
+
+- **Packed malware stays hard until P4.** Decompiled C for a packed sample is
+  garbage until you've dumped it unpacked, and the memory-vs-disk diff and
+  unpacking timeline are the features that make that tractable. If the team's
+  work turns out to be mostly packers and injectors rather than general RE, pull
+  D0 and the diff forward out of P4 — they're M-sized and depend on nothing in
+  P2 or P3.
+- **P2 is the hardest phase and it's early.** Mitigated by P1 standing on its
+  own and by the P2a scaffold getting value out before the expensive part.
+
+## Three decisions that carry the most weight
+
+1. **`Moment` in P0.** Retrofitting a time axis touches every service signature
+   and every cache key. Free now, near-impossible later.
+2. **A second provider before P7.** Minidump in P2 is the cheap way to keep this
+   honest while the debugger is deferred.
+3. **Finding / Recipe schemas in P1, unused.** The knowledge base is the moat and
+   can only be built from data captured all along.
+
+## Anti-goals
+
+Not competing on best-in-class decompilation (integrate it), breadth of
+architectures (x86/x64 deeply first), plugin count, or being a general-purpose
+debugger.
