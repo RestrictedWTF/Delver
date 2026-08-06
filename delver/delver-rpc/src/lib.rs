@@ -18,7 +18,7 @@ mod listener_windows;
 
 pub use client::Client;
 pub use framed::{Message, Transport};
-pub use listener::{Endpoint, Listener, ListenerError};
+pub use listener::{connect, Endpoint, Listener, ListenerError};
 pub use server::Server;
 
 use std::io;

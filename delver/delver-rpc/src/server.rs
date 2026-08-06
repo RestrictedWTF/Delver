@@ -4,8 +4,8 @@ use std::io::{Read, Write};
 
 use delver_protocol::{Request, Response};
 
-use crate::TransportError;
 use crate::framed::{Message, Transport};
+use crate::TransportError;
 
 /// Server that reads requests and sends responses over a framed transport.
 pub struct Server<R: Read, W: Write> {

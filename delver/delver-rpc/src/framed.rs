@@ -67,7 +67,10 @@ impl<R: Read, W: Write> Transport<R, W> {
 		self.reader.read_exact(&mut body)?;
 
 		match headers.frame_id {
-			Some(frame_id) => Ok(Message::Binary { frame_id, data: body }),
+			Some(frame_id) => Ok(Message::Binary {
+				frame_id,
+				data: body,
+			}),
 			None => {
 				let text = String::from_utf8(body)?;
 				Ok(Message::Json(text))
@@ -77,11 +80,7 @@ impl<R: Read, W: Write> Transport<R, W> {
 
 	/// Writes a JSON frame.
 	pub fn write_json(&mut self, payload: &[u8]) -> Result<(), TransportError> {
-		write!(
-			self.writer,
-			"Content-Length: {}\r\n\r\n",
-			payload.len()
-		)?;
+		write!(self.writer, "Content-Length: {}\r\n\r\n", payload.len())?;
 		self.writer.write_all(payload)?;
 		self.writer.flush()?;
 		Ok(())
@@ -136,7 +135,9 @@ fn parse_headers(header: &[u8]) -> Result<Headers, TransportError> {
 		match key {
 			"Content-Length" => {
 				headers.content_length = Some(value.parse().map_err(|e| {
-					TransportError::MalformedHeader(format!("invalid Content-Length '{value}': {e}"))
+					TransportError::MalformedHeader(format!(
+						"invalid Content-Length '{value}': {e}"
+					))
 				})?);
 			}
 			"Delver-Frame" => {
@@ -168,7 +169,10 @@ mod tests {
 		let input = b"Content-Length: 2\r\n\r\n{}Delver-Frame: 7\r\nContent-Length: 4\r\n\r\nABCD";
 		let mut transport = Transport::new(&input[..], Vec::new());
 
-		assert_eq!(transport.read_message().unwrap(), Message::Json("{}".into()));
+		assert_eq!(
+			transport.read_message().unwrap(),
+			Message::Json("{}".into())
+		);
 		assert_eq!(
 			transport.read_message().unwrap(),
 			Message::Binary {
