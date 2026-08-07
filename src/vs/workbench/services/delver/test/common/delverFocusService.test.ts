@@ -6,10 +6,12 @@
 import * as assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { ILocation } from '../../../../../platform/delver/common/address.js';
+import { getSingletonServiceDescriptors } from '../../../../../platform/instantiation/common/extensions.js';
 import {
 	DelverFocusService,
 	FocusReason,
 	IDelverFocusChangeEvent,
+	IDelverFocusService,
 } from '../../common/delverFocusService.js';
 
 function at(address: bigint): ILocation {
@@ -28,6 +30,16 @@ function hex(address: bigint | undefined): string {
 suite('DelverFocusService', () => {
 
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('is registered as a singleton', () => {
+		// Every other test builds the service directly, so none of them notices
+		// a missing `registerSingleton` — the first sign is a view failing to
+		// instantiate at runtime with "depends on UNKNOWN service".
+		assert.ok(
+			getSingletonServiceDescriptors().some(([id]) => id === IDelverFocusService),
+			'the focus service must be injectable, not just constructible'
+		);
+	});
 
 	function createService(): { service: DelverFocusService; events: IDelverFocusChangeEvent[] } {
 		const service = store.add(new DelverFocusService());

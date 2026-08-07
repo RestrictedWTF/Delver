@@ -11,6 +11,9 @@ import { DelverRpcClient } from './rpc.js';
 import {
 	IAddressForRowResult,
 	IFunctionsResult,
+	IGetExportsResult,
+	IGetImageInfoResult,
+	IGetImportsResult,
 	IListingWindowResult,
 	IOpenImageResult,
 	IRowForAddressResult,
@@ -35,6 +38,7 @@ export class DelverAnalysisSession extends Disposable {
 		private readonly provider: ChildProcess,
 		private readonly analysis: ChildProcess,
 		private readonly rpc: DelverRpcClient,
+		private readonly providerRpc: DelverRpcClient,
 		readonly image: IOpenImageResult,
 	) {
 		super();
@@ -75,7 +79,21 @@ export class DelverAnalysisSession extends Disposable {
 			await rpc.call('initialize', null);
 			const { json } = await rpc.call('analysis/openImage', null);
 
-			return new DelverAnalysisSession(provider, analysis, rpc, json.result as IOpenImageResult);
+			// A second client on the provider, alongside the analysis server's.
+			// Headers are a provider capability, not a derived fact — asking the
+			// analysis server to proxy them would put a parsing concern in the
+			// wrong process. Providers accept multiple clients precisely so this
+			// works (P1 decision E1).
+			const providerRpc = await DelverRpcClient.connect(providerEndpoint);
+			await providerRpc.call('initialize', null);
+
+			return new DelverAnalysisSession(
+				provider,
+				analysis,
+				rpc,
+				providerRpc,
+				json.result as IOpenImageResult,
+			);
 		} catch (e) {
 			analysis?.kill();
 			provider.kill();
@@ -120,6 +138,30 @@ export class DelverAnalysisSession extends Disposable {
 		});
 		const rva = (json.result as IAddressForRowResult).rva;
 		return rva === undefined ? undefined : BigInt(rva);
+	}
+
+	/**
+	 * Image headers, read from the provider rather than the analysis server.
+	 */
+	async getImageInfo(): Promise<IGetImageInfoResult> {
+		const { json } = await this.providerRpc.call('getImageInfo', null);
+		return json.result as IGetImageInfoResult;
+	}
+
+	/**
+	 * Imported modules and symbols, read from the provider.
+	 */
+	async getImports(): Promise<IGetImportsResult> {
+		const { json } = await this.providerRpc.call('getImports', null);
+		return json.result as IGetImportsResult;
+	}
+
+	/**
+	 * Exported symbols, read from the provider.
+	 */
+	async getExports(): Promise<IGetExportsResult> {
+		const { json } = await this.providerRpc.call('getExports', null);
+		return json.result as IGetExportsResult;
 	}
 
 	async functions(): Promise<IFunctionsResult> {

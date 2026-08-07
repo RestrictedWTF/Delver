@@ -8,6 +8,7 @@ import { Disposable } from '../../../../base/common/lifecycle.js';
 
 import { ILocation, IRange } from '../../../../platform/delver/common/address.js';
 import { IMoment, STATIC_MOMENT } from '../../../../platform/delver/common/moment.js';
+import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 
 export const IDelverFocusService = createDecorator<IDelverFocusService>('delverFocusService');
@@ -101,6 +102,14 @@ const HISTORY_COALESCE_BYTES = 0x40n;
  */
 const HISTORY_LIMIT = 200;
 
+/**
+ * Origin reported for a replayed history entry.
+ *
+ * Exported because views distinguish it from an ordinary change: stepping back
+ * is something the user asked for, not another view moving them.
+ */
+export const FOCUS_HISTORY_ORIGIN = 'history';
+
 export class DelverFocusService extends Disposable implements IDelverFocusService {
 	readonly _serviceBrand: undefined;
 
@@ -168,7 +177,7 @@ export class DelverFocusService extends Disposable implements IDelverFocusServic
 		const entry = this.history[this.index];
 		this.navigating = true;
 		try {
-			this.setFocus(entry, 'history', FocusReason.Navigation);
+			this.setFocus(entry, FOCUS_HISTORY_ORIGIN, FocusReason.Navigation);
 		} finally {
 			this.navigating = false;
 		}
@@ -218,6 +227,8 @@ function sameRange(a: IRange | undefined, b: IRange | undefined): boolean {
 	}
 	return a.start === b.start && a.end === b.end;
 }
+
+registerSingleton(IDelverFocusService, DelverFocusService, InstantiationType.Delayed);
 
 /**
  * Whether `next` is close enough to `current` to be the same navigation.

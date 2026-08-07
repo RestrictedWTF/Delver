@@ -75,6 +75,43 @@ suite('DelverAnalysisSession', () => {
 		}
 	});
 
+	test('serves image headers alongside analysis, from one session', async function () {
+		this.timeout(30_000);
+
+		// One open has to populate everything. Headers come from the provider on
+		// a second client rather than through the analysis server, so this also
+		// covers a provider serving two clients at once (P1 decision E1).
+		const session = await DelverAnalysisSession.start({ kind: 'file', path });
+		try {
+			const [info, window] = await Promise.all([
+				session.getImageInfo(),
+				session.listingWindow(0, 1),
+			]);
+
+			assert.deepStrictEqual(
+				{ arch: info.arch, sections: info.sections.map(s => s.name), rows: window.rows.length },
+				{ arch: 'X86_64', sections: ['.text'], rows: 1 },
+			);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	test('serves imports grouped by module', async function () {
+		this.timeout(30_000);
+
+		const session = await DelverAnalysisSession.start({ kind: 'file', path });
+		try {
+			const { modules } = await session.getImports();
+			// The generated PE has no import directory. An empty list is the
+			// correct answer and must not be an error — plenty of real images,
+			// including shellcode-style payloads, import nothing statically.
+			assert.deepStrictEqual(modules, []);
+		} finally {
+			session.dispose();
+		}
+	});
+
 	test('reports functions with their confidence', async function () {
 		this.timeout(30_000);
 

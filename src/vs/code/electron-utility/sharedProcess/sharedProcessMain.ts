@@ -129,6 +129,8 @@ import { DefaultExtensionsInitializer } from './contrib/defaultExtensionsInitial
 import { AllowedExtensionsService } from '../../../platform/extensionManagement/common/allowedExtensionsService.js';
 import { IDelverProcessService } from '../../../platform/delver/common/delverProcessService.js';
 import { DelverProcessService } from '../../../platform/delver/node/delverProcessService.js';
+import { IDelverAnalysisService } from '../../../platform/delver/common/delverAnalysisService.js';
+import { DelverAnalysisService } from '../../../platform/delver/node/delverAnalysisService.js';
 import { IExtensionGalleryManifestService } from '../../../platform/extensionManagement/common/extensionGalleryManifest.js';
 import { ExtensionGalleryManifestIPCService } from '../../../platform/extensionManagement/common/extensionGalleryManifestServiceIpc.js';
 import { ISharedWebContentExtractorService } from '../../../platform/webContentExtractor/common/webContentExtractor.js';
@@ -422,6 +424,7 @@ class SharedProcessMain extends Disposable implements IClientConnectionFilter {
 
 		// Delver
 		services.set(IDelverProcessService, new SyncDescriptor(DelverProcessService));
+		services.set(IDelverAnalysisService, new SyncDescriptor(DelverAnalysisService));
 
 		// SSH Remote Agent Host
 		services.set(ISSHRemoteAgentHostMainService, new SyncDescriptor(SSHRemoteAgentHostMainService, undefined, true));
@@ -493,6 +496,9 @@ class SharedProcessMain extends Disposable implements IClientConnectionFilter {
 		// Delver
 		const delverChannel = ProxyChannel.fromService(accessor.get(IDelverProcessService), this._store);
 		this.server.registerChannel('delver', delverChannel);
+
+		const delverAnalysisChannel = ProxyChannel.fromService(accessor.get(IDelverAnalysisService), this._store);
+		this.server.registerChannel('delverAnalysis', delverAnalysisChannel);
 
 		// Tunnel
 		const sharedProcessTunnelChannel = ProxyChannel.fromService(accessor.get(ISharedProcessTunnelService), this._store);
