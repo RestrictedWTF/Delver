@@ -7,14 +7,23 @@ import { onUnexpectedError } from '../../../../base/common/errors.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { IDelverAnalysisService } from '../../../../platform/delver/common/delverAnalysisService.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
-import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
+import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
+import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { TreeView, TreeViewPane } from '../../../browser/parts/views/treeView.js';
 import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { Extensions as ViewExtensions, ITreeViewDescriptor, IViewsRegistry } from '../../../common/views.js';
 import { registerDelverView } from '../../../services/delver/browser/delverViewContainer.js';
+import {
+	FocusReason,
+	IDelverFocusService,
+} from '../../../services/delver/common/delverFocusService.js';
 import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
-import { DelverSectionsTreeDataProvider, DELVER_SECTIONS_VIEW_ID } from './delverSectionsView.js';
+import {
+	DELVER_SECTIONS_OPEN_COMMAND,
+	DELVER_SECTIONS_VIEW_ID,
+	DelverSectionsTreeDataProvider,
+} from './delverSectionsView.js';
 
 const viewName = localize2('delverSections', "Sections");
 
@@ -105,3 +114,11 @@ registerWorkbenchContribution2(
 	DelverSectionsViewContribution,
 	WorkbenchPhase.AfterRestored
 );
+
+CommandsRegistry.registerCommand(DELVER_SECTIONS_OPEN_COMMAND, (accessor: ServicesAccessor, rva: string) => {
+	accessor.get(IDelverFocusService).setFocus(
+		{ location: { space: 'Image', address: BigInt(rva) } },
+		'delver.view.sections',
+		FocusReason.User,
+	);
+});

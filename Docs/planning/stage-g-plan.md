@@ -86,13 +86,25 @@ nothing.
 
 Still wanted: a filter box, and an encoding column rather than a suffix.
 
-### G6 · Polish — M
+### G6 · Polish — **partly done**
 
-- Icons per row kind, so panes are scannable rather than uniform text.
-- Section permissions (R/W/X) and entropy — entropy is what makes a packed
-  section obvious at a glance.
+Done:
+
+- Icons per row kind across every pane.
 - Welcome content on every pane.
-- Container title actions.
+- **Section permissions and entropy.** `SectionWire` now carries `readable`,
+  `writable`, `executable`, and Shannon entropy of the raw bytes. A section that
+  is writable *and* executable, or executable with entropy above 7.0, is flagged
+  — the first because compilers do not emit it and packers need it, the second
+  because compiled instructions are not that random unless something has
+  compressed them. Surfaced as a flag with a reason in the tooltip, never as a
+  verdict: a section full of compressed resources trips the same test.
+- Container title actions for Open Target and Reset Views.
+
+Still wanted:
+
+- Filter boxes on Functions, Imports, and Strings.
+- Full virtualization for Functions, replacing the 1,000-row cap.
 
 ## Deliberately not here
 

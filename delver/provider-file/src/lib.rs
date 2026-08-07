@@ -130,6 +130,10 @@ impl FileProvider {
 					raw_offset: s.raw_offset,
 					virtual_size: s.virtual_size,
 					raw_size: s.raw_size,
+					readable: s.is_readable(),
+					writable: s.is_writable(),
+					executable: s.is_executable(),
+					entropy: s.entropy(&self.mmap),
 				})
 				.collect(),
 			import_module_count: self.image.imports.len() as u64,

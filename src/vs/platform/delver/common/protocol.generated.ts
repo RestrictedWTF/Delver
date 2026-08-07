@@ -706,6 +706,16 @@ export interface IRpcError {
  */
 export interface ISectionWire {
 	/**
+	 * Shannon entropy of the raw bytes, in bits per byte (0..=8).
+	 * 
+	 * The cheapest signal available for compressed or encrypted content: machine code sits near 6, packed or ciphered data crowds 8.
+	 */
+	entropy: number;
+	/**
+	 * Marked executable (`IMAGE_SCN_MEM_EXECUTE`).
+	 */
+	executable: boolean;
+	/**
 	 * Section name.
 	 */
 	name: string;
@@ -718,6 +728,10 @@ export interface ISectionWire {
 	 */
 	raw_size: number;
 	/**
+	 * Marked readable (`IMAGE_SCN_MEM_READ`).
+	 */
+	readable: boolean;
+	/**
 	 * Virtual address.
 	 */
 	virtual_address: string;
@@ -725,6 +739,10 @@ export interface ISectionWire {
 	 * Virtual size.
 	 */
 	virtual_size: number;
+	/**
+	 * Marked writable (`IMAGE_SCN_MEM_WRITE`).
+	 */
+	writable: boolean;
 }
 
 /**

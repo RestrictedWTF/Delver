@@ -1038,6 +1038,15 @@
     "SectionWire": {
       "description": "Image section on the wire.",
       "properties": {
+        "entropy": {
+          "description": "Shannon entropy of the raw bytes, in bits per byte (0..=8).\n\nThe cheapest signal available for compressed or encrypted content: machine code sits near 6, packed or ciphered data crowds 8.",
+          "format": "double",
+          "type": "number"
+        },
+        "executable": {
+          "description": "Marked executable (`IMAGE_SCN_MEM_EXECUTE`).",
+          "type": "boolean"
+        },
         "name": {
           "description": "Section name.",
           "type": "string"
@@ -1052,6 +1061,10 @@
           "minimum": 0.0,
           "type": "integer"
         },
+        "readable": {
+          "description": "Marked readable (`IMAGE_SCN_MEM_READ`).",
+          "type": "boolean"
+        },
         "virtual_address": {
           "description": "Virtual address.",
           "type": "string"
@@ -1061,14 +1074,22 @@
           "format": "uint64",
           "minimum": 0.0,
           "type": "integer"
+        },
+        "writable": {
+          "description": "Marked writable (`IMAGE_SCN_MEM_WRITE`).",
+          "type": "boolean"
         }
       },
       "required": [
+        "entropy",
+        "executable",
         "name",
         "raw_offset",
         "raw_size",
+        "readable",
         "virtual_address",
-        "virtual_size"
+        "virtual_size",
+        "writable"
       ],
       "type": "object"
     },

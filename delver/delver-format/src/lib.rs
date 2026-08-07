@@ -89,6 +89,31 @@ pub struct Section {
 	pub characteristics: u32,
 }
 
+/// Shannon entropy of `bytes`, in bits per byte.
+///
+/// Returns zero for an empty slice: no data carries no information, and any
+/// other answer would be an invention.
+pub fn shannon_entropy(bytes: &[u8]) -> f64 {
+	if bytes.is_empty() {
+		return 0.0;
+	}
+
+	let mut counts = [0u64; 256];
+	for &byte in bytes {
+		counts[byte as usize] += 1;
+	}
+
+	let len = bytes.len() as f64;
+	-counts
+		.iter()
+		.filter(|&&count| count > 0)
+		.map(|&count| {
+			let p = count as f64 / len;
+			p * p.log2()
+		})
+		.sum::<f64>()
+}
+
 impl Section {
 	/// Exclusive end of the virtual range.
 	pub fn virtual_end(&self) -> u64 {
@@ -103,6 +128,31 @@ impl Section {
 	/// Whether the section is marked executable (`IMAGE_SCN_MEM_EXECUTE`).
 	pub fn is_executable(&self) -> bool {
 		self.characteristics & 0x2000_0000 != 0
+	}
+
+	/// Whether the section is marked readable (`IMAGE_SCN_MEM_READ`).
+	pub fn is_readable(&self) -> bool {
+		self.characteristics & 0x4000_0000 != 0
+	}
+
+	/// Whether the section is marked writable (`IMAGE_SCN_MEM_WRITE`).
+	///
+	/// Writable **and** executable together is worth surfacing: legitimate
+	/// compilers do not emit it, and packers routinely do.
+	pub fn is_writable(&self) -> bool {
+		self.characteristics & 0x8000_0000 != 0
+	}
+
+	/// Shannon entropy of the section's raw bytes, in bits per byte (0..=8).
+	///
+	/// This is the cheapest signal there is for compressed or encrypted
+	/// content: English text sits near 4.5, machine code near 6, and packed or
+	/// ciphered data crowds 8. It measures the bytes **as stored**, so a
+	/// section with no raw data reports zero rather than guessing.
+	pub fn entropy(&self, file: &[u8]) -> f64 {
+		let start = (self.raw_offset as usize).min(file.len());
+		let end = (self.raw_end() as usize).min(file.len());
+		shannon_entropy(&file[start..end])
 	}
 }
 
@@ -192,4 +242,68 @@ pub struct TlsInfo {
 	pub raw_data_size: u64,
 	/// TLS callback RVAs, in the order the loader invokes them.
 	pub callbacks: Vec<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn entropy_of_nothing_is_zero_not_a_guess() {
+		assert_eq!(shannon_entropy(&[]), 0.0);
+	}
+
+	#[test]
+	fn entropy_spans_zero_to_eight() {
+		// One repeated byte carries no information; every byte exactly once
+		// carries the maximum a byte can. These are the ends of the scale a
+		// reader is judging "is this packed?" against.
+		assert_eq!(shannon_entropy(&[0xCC; 4096]), 0.0);
+
+		let every_byte: Vec<u8> = (0..=255).collect();
+		assert!((shannon_entropy(&every_byte) - 8.0).abs() < 1e-9);
+	}
+
+	#[test]
+	fn entropy_of_two_equally_common_bytes_is_one_bit() {
+		let bytes: Vec<u8> = (0..1000)
+			.map(|i| if i % 2 == 0 { b'a' } else { b'b' })
+			.collect();
+		assert!((shannon_entropy(&bytes) - 1.0).abs() < 1e-9);
+	}
+
+	#[test]
+	fn a_section_reports_entropy_of_its_raw_bytes_only() {
+		// Virtual size exceeds raw size, so the loader zero-fills the tail. That
+		// tail is not in the file and must not drag the measurement down.
+		let section = Section {
+			name: ".text".to_string(),
+			virtual_address: 0x1000,
+			virtual_size: 0x2000,
+			raw_offset: 4,
+			raw_size: 4,
+			characteristics: 0x6000_0020,
+		};
+		let file = vec![0x00, 0x00, 0x00, 0x00, b'a', b'b', b'a', b'b', 0x00, 0x00];
+
+		assert!((section.entropy(&file) - 1.0).abs() < 1e-9);
+	}
+
+	#[test]
+	fn permissions_come_from_the_characteristics_bits() {
+		let wx = Section {
+			name: ".packed".to_string(),
+			virtual_address: 0x1000,
+			virtual_size: 0x10,
+			raw_offset: 0,
+			raw_size: 0,
+			// READ | WRITE | EXECUTE — what a packer needs and a compiler avoids.
+			characteristics: 0x4000_0000 | 0x8000_0000 | 0x2000_0000,
+		};
+
+		assert_eq!(
+			(wx.is_readable(), wx.is_writable(), wx.is_executable()),
+			(true, true, true)
+		);
+	}
 }

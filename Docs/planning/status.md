@@ -479,7 +479,19 @@ DTP. The backend ran ahead of the interface and the gap is now the whole
 experience.
 
 Order: ~~Imports~~ → ~~Functions~~ → ~~Overview~~ → ~~Exports~~ → ~~Strings~~ →
-**polish (G6) is all that remains.**
+**polish (G6), most of it done.**
+
+**G6 so far:** icons everywhere, welcome content on every pane, container title
+actions, and **section permissions and entropy**. A section that is writable and
+executable, or executable with entropy above 7.0, is flagged with the reason in
+its tooltip — the first because compilers do not emit it and packers need it,
+the second because compiled instructions are not that random unless something
+compressed them. It is a flag to look at, never a verdict: a section full of
+compressed resources trips the same test, and saying "packed" there would be a
+lie the tool cannot back up.
+
+Left: filter boxes on Functions, Imports, and Strings, and full virtualization
+for Functions in place of its 1,000-row cap.
 
 **G4 · Exports** — flat list. A forwarded export has no address in this image at
 all; it shows where it resolves to and is deliberately **not** navigable,

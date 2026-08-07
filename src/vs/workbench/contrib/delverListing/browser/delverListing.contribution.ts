@@ -5,8 +5,10 @@
 
 import './media/delverListing.css';
 
+import { Codicon } from '../../../../base/common/codicons.js';
 import { localize2 } from '../../../../nls.js';
-import { Action2, registerAction2 } from '../../../../platform/actions/common/actions.js';
+import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
+import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
 import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
@@ -58,6 +60,16 @@ class OpenTargetAction extends Action2 {
 			title: localize2('delverOpenTarget', 'Open Target'),
 			category: localize2('delverCategory', 'Delver'),
 			f1: true,
+			icon: Codicon.folderOpened,
+			// On the container's title bar, not just in the palette: this is the
+			// one thing every session starts with, and a workspace whose primary
+			// action is only reachable by typing its name is not discoverable.
+			menu: [{
+				id: MenuId.ViewContainerTitle,
+				when: ContextKeyExpr.equals('viewContainer', DELVER_VIEW_CONTAINER_ID),
+				group: 'navigation',
+				order: 1,
+			}],
 		});
 	}
 
@@ -101,6 +113,13 @@ class ResetViewsAction extends Action2 {
 			title: localize2('delverResetViews', 'Reset Views'),
 			category: localize2('delverCategory', 'Delver'),
 			f1: true,
+			icon: Codicon.refresh,
+			menu: [{
+				id: MenuId.ViewContainerTitle,
+				when: ContextKeyExpr.equals('viewContainer', DELVER_VIEW_CONTAINER_ID),
+				group: 'navigation',
+				order: 2,
+			}],
 		});
 	}
 

@@ -704,6 +704,17 @@ pub struct SectionWire {
 	pub raw_offset: u64,
 	/// Raw file size.
 	pub raw_size: u64,
+	/// Marked readable (`IMAGE_SCN_MEM_READ`).
+	pub readable: bool,
+	/// Marked writable (`IMAGE_SCN_MEM_WRITE`).
+	pub writable: bool,
+	/// Marked executable (`IMAGE_SCN_MEM_EXECUTE`).
+	pub executable: bool,
+	/// Shannon entropy of the raw bytes, in bits per byte (0..=8).
+	///
+	/// The cheapest signal available for compressed or encrypted content:
+	/// machine code sits near 6, packed or ciphered data crowds 8.
+	pub entropy: f64,
 }
 
 /// High-level target descriptor on the wire.
