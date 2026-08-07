@@ -13,7 +13,8 @@ import {
 	IOpenImageResult,
 } from '../../../../platform/delver/common/protocol.generated.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
-import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
+import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
+import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { TreeView, TreeViewPane } from '../../../browser/parts/views/treeView.js';
 import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
@@ -26,11 +27,26 @@ import {
 	TreeItemCollapsibleState,
 } from '../../../common/views.js';
 import { registerDelverView } from '../../../services/delver/browser/delverViewContainer.js';
-import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
+import { DELVER_TARGET_OPEN, IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
+import {
+	FocusReason,
+	IDelverFocusService,
+} from '../../../services/delver/common/delverFocusService.js';
+import { IViewsService } from '../../../services/views/common/viewsService.js';
 
 export const DELVER_OVERVIEW_VIEW_ID = 'delver.view.overview';
 
+const DELVER_OVERVIEW_GO_TO_COMMAND = 'delver.overview.goTo';
+const DELVER_OVERVIEW_REVEAL_COMMAND = 'delver.overview.revealView';
+
 const viewName = localize2('delverOverview', "Overview");
+
+interface IOverviewRow {
+	readonly label: string;
+	readonly value: string;
+	readonly icon: string;
+	readonly command?: { readonly id: string; readonly args: unknown[] };
+}
 
 /**
  * What the open image is, in one glance.
@@ -54,25 +70,58 @@ class DelverOverviewTreeDataProvider implements ITreeViewDataProvider {
 			return [];
 		}
 
-		const rows: [string, string, ThemeIcon][] = [
-			[localize('delverOverviewFile', "File"), basename(this.targetPath ?? ''), ThemeIcon.fromId(Codicon.fileBinary.id)],
-			[localize('delverOverviewArch', "Architecture"), this.info.arch, ThemeIcon.fromId(Codicon.chip.id)],
+		// Every row that can lead somewhere does. Overview is the first thing you
+		// read after opening a target, so it works better as a table of contents
+		// than as a readout you look at once and never touch again.
+		const rows: IOverviewRow[] = [
+			{ label: localize('delverOverviewFile', "File"), value: basename(this.targetPath ?? ''), icon: Codicon.fileBinary.id },
+			{ label: localize('delverOverviewArch', "Architecture"), value: this.info.arch, icon: Codicon.chip.id },
 			// Addresses arrive as "0x..." strings (ADR 0001) and are shown as they
 			// arrived; re-formatting through a number would truncate above 2^53.
-			[localize('delverOverviewEntry', "Entry point"), this.info.entry, ThemeIcon.fromId(Codicon.debugStart.id)],
-			[localize('delverOverviewBase', "Image base"), this.info.image_base, ThemeIcon.fromId(Codicon.milestone.id)],
-			[localize('delverOverviewInstructions', "Instructions"), count(this.image.instruction_count), ThemeIcon.fromId(Codicon.listOrdered.id)],
-			[localize('delverOverviewFunctions', "Functions"), count(this.image.function_count), ThemeIcon.fromId(Codicon.symbolFunction.id)],
-			[localize('delverOverviewXrefs', "References"), count(this.image.xref_count), ThemeIcon.fromId(Codicon.references.id)],
-			[localize('delverOverviewStrings', "Strings"), count(this.image.string_count), ThemeIcon.fromId(Codicon.symbolString.id)],
+			{
+				label: localize('delverOverviewEntry', "Entry point"),
+				value: this.info.entry,
+				icon: Codicon.debugStart.id,
+				command: { id: DELVER_OVERVIEW_GO_TO_COMMAND, args: [this.info.entry] },
+			},
+			{ label: localize('delverOverviewBase', "Image base"), value: this.info.image_base, icon: Codicon.milestone.id },
+			{
+				label: localize('delverOverviewInstructions', "Instructions"),
+				value: count(this.image.instruction_count),
+				icon: Codicon.listOrdered.id,
+				command: { id: 'delver.listing.openCurrent', args: [] },
+			},
+			{
+				label: localize('delverOverviewFunctions', "Functions"),
+				value: count(this.image.function_count),
+				icon: Codicon.symbolFunction.id,
+				command: { id: DELVER_OVERVIEW_REVEAL_COMMAND, args: ['delver.view.functions'] },
+			},
+			{
+				label: localize('delverOverviewXrefs', "References"),
+				value: count(this.image.xref_count),
+				icon: Codicon.references.id,
+				command: { id: DELVER_OVERVIEW_REVEAL_COMMAND, args: ['delver.view.xrefs'] },
+			},
+			{
+				label: localize('delverOverviewStrings', "Strings"),
+				value: count(this.image.string_count),
+				icon: Codicon.symbolString.id,
+				command: { id: 'delver.strings.open', args: [] },
+			},
 		];
 
-		return rows.map(([label, value, icon], index) => ({
+		return rows.map((row, index) => ({
 			handle: `delver.overview.${index}`,
-			label: { label },
-			description: value,
-			themeIcon: icon,
+			label: { label: row.label },
+			description: row.value,
+			themeIcon: ThemeIcon.fromId(row.icon),
 			collapsibleState: TreeItemCollapsibleState.None,
+			command: row.command === undefined ? undefined : {
+				id: row.command.id,
+				title: row.label,
+				arguments: row.command.args,
+			},
 		}));
 	}
 }
@@ -115,7 +164,7 @@ class DelverOverviewViewContribution {
 					'delverOverviewWelcome',
 					"No target open.\n[Open Target](command:delver.target.open)",
 				),
-				when: 'default',
+				when: DELVER_TARGET_OPEN.toNegated(),
 			},
 		);
 
@@ -159,3 +208,17 @@ registerWorkbenchContribution2(
 	DelverOverviewViewContribution,
 	WorkbenchPhase.AfterRestored,
 );
+
+CommandsRegistry.registerCommand(DELVER_OVERVIEW_GO_TO_COMMAND, (accessor: ServicesAccessor, rva: string) => {
+	accessor.get(IDelverFocusService).setFocus(
+		{ location: { space: 'Image', address: BigInt(rva) } },
+		'delver.view.overview',
+		FocusReason.User,
+	);
+});
+
+CommandsRegistry.registerCommand(DELVER_OVERVIEW_REVEAL_COMMAND, async (accessor: ServicesAccessor, viewId: string) => {
+	// Reveals rather than toggles: a row that hides the pane you just asked for
+	// would be a trap, since Overview does not show whether it is already open.
+	await accessor.get(IViewsService).openView(viewId, false);
+});

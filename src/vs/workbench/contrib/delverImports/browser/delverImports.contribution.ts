@@ -18,7 +18,7 @@ import {
 	FocusReason,
 	IDelverFocusService,
 } from '../../../services/delver/common/delverFocusService.js';
-import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
+import { DELVER_TARGET_OPEN, IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 import {
 	DELVER_IMPORTS_OPEN_COMMAND,
 	DELVER_IMPORTS_VIEW_ID,
@@ -66,7 +66,17 @@ class DelverImportsViewContribution {
 					'delverImportsWelcome',
 					"No target open.\n[Open Target](command:delver.target.open)",
 				),
-				when: 'default',
+				when: DELVER_TARGET_OPEN.toNegated(),
+			},
+		);
+
+		// Importing nothing is unusual and worth saying plainly — a statically
+		// linked or shellcode-style payload looks exactly like this.
+		Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViewWelcomeContent(
+			DELVER_IMPORTS_VIEW_ID,
+			{
+				content: localize('delverImportsEmpty', "This image imports nothing."),
+				when: DELVER_TARGET_OPEN,
 			},
 		);
 

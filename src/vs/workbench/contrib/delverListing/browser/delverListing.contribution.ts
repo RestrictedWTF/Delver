@@ -8,7 +8,9 @@ import './media/delverListing.css';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { localize2 } from '../../../../nls.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
+import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
 import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
+import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
@@ -96,7 +98,7 @@ class OpenTargetAction extends Action2 {
 		// their choice. `Delver: Reset Views` is the way back from it.
 		await viewsService.openViewContainer(DELVER_VIEW_CONTAINER_ID, false);
 
-		await editorService.openEditor(new DelverListingInput(result[0].fsPath));
+		await editorService.openEditor(new DelverListingInput(result[0].fsPath), { pinned: true });
 	}
 }
 
@@ -149,6 +151,19 @@ class ResetViewsAction extends Action2 {
 		}
 	}
 }
+
+/**
+ * Opens the listing for the target already open, without a file dialog.
+ *
+ * The listing is a sibling tab to Strings, so getting back to it has to be as
+ * cheap as switching tabs — not a re-open of the same file.
+ */
+CommandsRegistry.registerCommand('delver.listing.openCurrent', async (accessor: ServicesAccessor) => {
+	const session = accessor.get(IDelverSessionService).activeSession;
+	if (session) {
+		await accessor.get(IEditorService).openEditor(new DelverListingInput(session.targetPath), { pinned: true });
+	}
+});
 
 registerAction2(OpenTargetAction);
 registerAction2(ResetViewsAction);

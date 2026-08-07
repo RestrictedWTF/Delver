@@ -6,26 +6,50 @@
 import * as assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { getSingletonServiceDescriptors } from '../../../../../platform/instantiation/common/extensions.js';
+import { IDelverAnalysisService } from '../../../../../platform/delver/common/delverAnalysisService.js';
+import { MockContextKeyService } from '../../../../../platform/keybinding/test/common/mockKeybindingService.js';
 import {
 	DelverSessionService,
-	IDelverSession,
 	IDelverSessionService,
 } from '../../common/delverSessionService.js';
 
-function session(sessionId: string): IDelverSession {
-	return {
-		sessionId,
-		targetPath: `C:\\samples\\${sessionId}.exe`,
-		contentHash: `hash-${sessionId}`,
-		image: {
-			image_id: 'image-0',
-			arch: 'X86_64',
-			instruction_count: 100,
-			function_count: 4,
-			xref_count: 8,
-			string_count: 2,
-		},
-	};
+/** Records opens and closes so lifetime can be asserted. */
+class FakeAnalysisService implements Partial<IDelverAnalysisService> {
+	readonly opened: string[] = [];
+	readonly closed: string[] = [];
+	private next = 1;
+
+	async openImage(config: { kind: 'file'; path: string }) {
+		this.opened.push(config.path);
+		return {
+			sessionId: `session-${this.next++}`,
+			image: {
+				image_id: 'image-0',
+				arch: 'X86_64',
+				instruction_count: 10,
+				function_count: 2,
+				xref_count: 3,
+				string_count: 4,
+			},
+		};
+	}
+
+	async imageInfo(sessionId: string) {
+		return { content_hash: `hash-of-${sessionId}` } as never;
+	}
+
+	async closeImage(sessionId: string) {
+		this.closed.push(sessionId);
+	}
+}
+
+function createService(store: Pick<ReturnType<typeof ensureNoDisposablesAreLeakedInTestSuite>, 'add'>) {
+	const analysis = new FakeAnalysisService();
+	const service = store.add(new DelverSessionService(
+		analysis as unknown as IDelverAnalysisService,
+		new MockContextKeyService(),
+	));
+	return { service, analysis };
 }
 
 suite('DelverSessionService', () => {
@@ -39,51 +63,75 @@ suite('DelverSessionService', () => {
 		);
 	});
 
-	test('publishing a session announces it', () => {
-		const service = store.add(new DelverSessionService());
+	test('opening a target publishes it with its content hash', async () => {
+		const { service } = createService(store);
 		const seen: (string | undefined)[] = [];
-		store.add(service.onDidChangeActiveSession(s => seen.push(s?.sessionId)));
+		store.add(service.onDidChangeActiveSession(s => seen.push(s?.targetPath)));
 
-		service.setActiveSession(session('a'));
+		const session = await service.openTarget('C:\\samples\\a.exe');
 
 		assert.deepStrictEqual(
-			{ active: service.activeSession?.sessionId, seen },
-			{ active: 'a', seen: ['a'] },
+			{ path: session.targetPath, hash: session.contentHash, seen },
+			{ path: 'C:\\samples\\a.exe', hash: 'hash-of-session-1', seen: ['C:\\samples\\a.exe'] },
 		);
 	});
 
-	test('republishing the same session is not a change', () => {
-		const service = store.add(new DelverSessionService());
-		service.setActiveSession(session('a'));
+	test('re-opening the same target reuses the session', async () => {
+		// This is what makes switching between the listing and strings tabs free.
+		// Re-analysing would take seconds and would throw away the session every
+		// other view is holding.
+		const { service, analysis } = createService(store);
+		const first = await service.openTarget('C:\\samples\\a.exe');
 
 		const seen: (string | undefined)[] = [];
-		store.add(service.onDidChangeActiveSession(s => seen.push(s?.sessionId)));
-		service.setActiveSession(session('a'));
+		store.add(service.onDidChangeActiveSession(s => seen.push(s?.targetPath)));
+		const second = await service.openTarget('C:\\samples\\a.exe');
 
-		assert.deepStrictEqual(seen, []);
+		assert.deepStrictEqual(
+			{ same: first.sessionId === second.sessionId, opens: analysis.opened.length, seen },
+			{ same: true, opens: 1, seen: [] },
+		);
 	});
 
-	test('a closing editor cannot clear the session that replaced its own', () => {
-		// Opening a second listing publishes 'b', and only then is the first
-		// editor disposed. Clearing unconditionally there would leave navigation
-		// with no session while a perfectly good listing is on screen.
-		const service = store.add(new DelverSessionService());
-		const first = session('a');
-		service.setActiveSession(first);
-		service.setActiveSession(session('b'));
+	test('opening a different target closes the previous one', async () => {
+		// A session owns two child processes; leaving the old one running would
+		// leak a provider pair per file opened.
+		const { service, analysis } = createService(store);
+		const first = await service.openTarget('C:\\samples\\a.exe');
+		await service.openTarget('C:\\samples\\b.exe');
 
-		service.setActiveSession(undefined, first);
-
-		assert.strictEqual(service.activeSession?.sessionId, 'b');
+		assert.deepStrictEqual(
+			{ closed: analysis.closed, active: service.activeSession?.targetPath },
+			{ closed: [first.sessionId], active: 'C:\\samples\\b.exe' },
+		);
 	});
 
-	test('a closing editor clears its own session', () => {
-		const service = store.add(new DelverSessionService());
-		const only = session('a');
-		service.setActiveSession(only);
+	test('closing clears the session and announces it', async () => {
+		const { service, analysis } = createService(store);
+		const session = await service.openTarget('C:\\samples\\a.exe');
 
-		service.setActiveSession(undefined, only);
+		const seen: (string | undefined)[] = [];
+		store.add(service.onDidChangeActiveSession(s => seen.push(s?.targetPath)));
+		await service.closeTarget();
 
-		assert.strictEqual(service.activeSession, undefined);
+		assert.deepStrictEqual(
+			{ active: service.activeSession, closed: analysis.closed, seen },
+			{ active: undefined, closed: [session.sessionId], seen: [undefined] },
+		);
+	});
+
+	test('concurrent opens of the same target do not start two sessions', async () => {
+		// Two editors restoring at once is the ordinary case, not an edge one.
+		const { service, analysis } = createService(store);
+
+		const [a, b] = await Promise.all([
+			service.openTarget('C:\\samples\\a.exe'),
+			service.openTarget('C:\\samples\\a.exe'),
+		]);
+
+		assert.deepStrictEqual(
+			{ same: a.sessionId === b.sessionId, opens: analysis.opened.length },
+			{ same: true, opens: 1 },
+		);
 	});
 });

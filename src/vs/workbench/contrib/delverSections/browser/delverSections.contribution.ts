@@ -18,7 +18,7 @@ import {
 	FocusReason,
 	IDelverFocusService,
 } from '../../../services/delver/common/delverFocusService.js';
-import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
+import { DELVER_TARGET_OPEN, IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 import {
 	DELVER_SECTIONS_OPEN_COMMAND,
 	DELVER_SECTIONS_VIEW_ID,
@@ -68,7 +68,7 @@ class DelverSectionsViewContribution {
 				'delverSectionsWelcome',
 				"No target open.\n[Open Target](command:delver.target.open)",
 			),
-			when: 'default',
+			when: DELVER_TARGET_OPEN.toNegated(),
 		});
 
 		/** Guards against a slow lookup overwriting a newer session's answer. */

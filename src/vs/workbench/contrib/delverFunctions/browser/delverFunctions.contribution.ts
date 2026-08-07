@@ -18,7 +18,7 @@ import {
 	FocusReason,
 	IDelverFocusService,
 } from '../../../services/delver/common/delverFocusService.js';
-import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
+import { DELVER_TARGET_OPEN, IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
 import { IFunctionWire } from '../../../../platform/delver/common/protocol.generated.js';
 import {
@@ -65,7 +65,7 @@ class DelverFunctionsViewContribution {
 					'delverFunctionsWelcome',
 					"No target open.\n[Open Target](command:delver.target.open)",
 				),
-				when: 'default',
+				when: DELVER_TARGET_OPEN.toNegated(),
 			},
 		);
 

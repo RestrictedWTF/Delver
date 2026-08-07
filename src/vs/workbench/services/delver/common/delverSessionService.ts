@@ -5,12 +5,26 @@
 
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
-import { AnalysisSessionId } from '../../../../platform/delver/common/delverAnalysisService.js';
+import {
+	AnalysisSessionId,
+	IDelverAnalysisService,
+} from '../../../../platform/delver/common/delverAnalysisService.js';
 import { IOpenImageResult } from '../../../../platform/delver/common/protocol.generated.js';
+import { IContextKey, IContextKeyService, RawContextKey } from '../../../../platform/contextkey/common/contextkey.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 
 export const IDelverSessionService = createDecorator<IDelverSessionService>('delverSessionService');
+
+/**
+ * True while a target is open.
+ *
+ * Views need this to tell "nothing is open" from "this image has none of those".
+ * An empty Exports pane saying "No target open" while a target is plainly open
+ * is not a cosmetic problem — it reports the tool's state wrongly, and the
+ * honest answer, that the binary exports nothing, is a real finding.
+ */
+export const DELVER_TARGET_OPEN = new RawContextKey<boolean>('delverTargetOpen', false);
 
 /** An analysis session that some editor is currently holding open. */
 export interface IDelverSession {
@@ -28,13 +42,13 @@ export interface IDelverSession {
 }
 
 /**
- * Tracks which analysis session the workbench is currently working in.
+ * Owns the analysis session for the target the workbench has open.
  *
- * The editor that opened a session owns its lifetime, but everything else —
- * navigation, quick access, and later the interpretation views — needs to reach
- * it without reaching into that editor. This is the seam between them.
- *
- * There is exactly one writer: whichever editor currently holds a session open.
+ * **The session belongs to the target, not to an editor.** It used to be owned
+ * by whichever editor opened it, which meant switching from the listing to the
+ * strings tab evicted the listing, tore its session down, and left every pane
+ * asking for a target that was still open. A session outlives any one view of
+ * it, exactly as the open file does.
  */
 export interface IDelverSessionService {
 	readonly _serviceBrand: undefined;
@@ -43,13 +57,15 @@ export interface IDelverSessionService {
 	readonly onDidChangeActiveSession: Event<IDelverSession | undefined>;
 
 	/**
-	 * Publishes the session an editor has opened, or clears it on close.
+	 * Opens `targetPath` for analysis, replacing whatever was open.
 	 *
-	 * Clearing is guarded by identity: an editor closing must not clear a
-	 * session another editor has since published, which is exactly what happens
-	 * when one listing replaces another and the old one is disposed afterwards.
+	 * Returns the existing session unchanged when the same target is already
+	 * open, so switching between the listing and strings tabs costs nothing.
 	 */
-	setActiveSession(session: IDelverSession | undefined, previous?: IDelverSession): void;
+	openTarget(targetPath: string): Promise<IDelverSession>;
+
+	/** Closes the open target, if any. */
+	closeTarget(): Promise<void>;
 }
 
 export class DelverSessionService extends Disposable implements IDelverSessionService {
@@ -60,19 +76,69 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 
 	private _activeSession: IDelverSession | undefined;
 
+	/** Tail of in-flight opens, so concurrent requests cannot race. */
+	private opening: Promise<IDelverSession | undefined> = Promise.resolve(undefined);
+
 	get activeSession(): IDelverSession | undefined {
 		return this._activeSession;
 	}
 
-	setActiveSession(session: IDelverSession | undefined, previous?: IDelverSession): void {
-		if (previous && this._activeSession && this._activeSession.sessionId !== previous.sessionId) {
-			return; // a later session already took over
+	private readonly targetOpenContext: IContextKey<boolean>;
+
+	constructor(
+		@IDelverAnalysisService private readonly analysisService: IDelverAnalysisService,
+		@IContextKeyService contextKeyService: IContextKeyService,
+	) {
+		super();
+		this.targetOpenContext = DELVER_TARGET_OPEN.bindTo(contextKeyService);
+		this._register({ dispose: () => { void this.closeTarget(); } });
+	}
+
+	async openTarget(targetPath: string): Promise<IDelverSession> {
+		const existing = this._activeSession;
+		if (existing?.targetPath === targetPath) {
+			return existing;
 		}
-		if (this._activeSession?.sessionId === session?.sessionId) {
+
+		// Serialized: two editors restoring at once must not each start a
+		// provider pair for the same file.
+		const result = this.opening.then(() => this.doOpen(targetPath), () => this.doOpen(targetPath));
+		// A failed open must not poison the queue for the next target.
+		this.opening = result.then(session => session, () => undefined);
+		return result;
+	}
+
+	private async doOpen(targetPath: string): Promise<IDelverSession> {
+		const existing = this._activeSession;
+		if (existing?.targetPath === targetPath) {
+			return existing;
+		}
+		await this.closeTarget();
+
+		const handle = await this.analysisService.openImage({ kind: 'file', path: targetPath });
+		const info = await this.analysisService.imageInfo(handle.sessionId);
+		const session: IDelverSession = {
+			sessionId: handle.sessionId,
+			targetPath,
+			image: handle.image,
+			contentHash: info.content_hash,
+		};
+
+		this._activeSession = session;
+		this.targetOpenContext.set(true);
+		this._onDidChangeActiveSession.fire(session);
+		return session;
+	}
+
+	async closeTarget(): Promise<void> {
+		const session = this._activeSession;
+		if (!session) {
 			return;
 		}
-		this._activeSession = session;
-		this._onDidChangeActiveSession.fire(session);
+		this._activeSession = undefined;
+		this.targetOpenContext.set(false);
+		this._onDidChangeActiveSession.fire(undefined);
+		await this.analysisService.closeImage(session.sessionId).catch(() => undefined);
 	}
 }
 

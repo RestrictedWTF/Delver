@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as dom from '../../../../base/browser/dom.js';
+import { Dimension } from '../../../../base/browser/dom.js';
 import { onUnexpectedError } from '../../../../base/common/errors.js';
 import { ITableRenderer, ITableVirtualDelegate } from '../../../../base/browser/ui/table/table.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
@@ -53,10 +54,11 @@ export class DelverListingEditor extends EditorPane {
 
 	private container!: HTMLElement;
 	private message!: HTMLElement;
+	private tableContainer!: HTMLElement;
 	private table: WorkbenchTable<IListingRow> | undefined;
 
 	private readonly sessionDisposables = this._register(new MutableDisposable<DisposableStore>());
-	private session: IAnalysisSessionHandle | undefined;
+	private session: IDelverSession | undefined;
 	private publishedSession: IDelverSession | undefined;
 	private model: DelverListingModel | undefined;
 
@@ -76,6 +78,9 @@ export class DelverListingEditor extends EditorPane {
 
 	/** Absolute ordinal of the row at the top of the viewport. */
 	private topRow = 0;
+
+	/** Last size the workbench gave this pane. */
+	private dimension: Dimension | undefined;
 
 	/** Re-splices the whole buffer, which is what forces heights to be recomputed. */
 	private respliceBuffer(): void {
@@ -126,6 +131,7 @@ export class DelverListingEditor extends EditorPane {
 	protected createEditor(parent: HTMLElement): void {
 		this.container = dom.append(parent, dom.$('.delver-listing'));
 		this.message = dom.append(this.container, dom.$('.delver-listing-message'));
+		this.tableContainer = dom.append(this.container, dom.$('.delver-listing-table'));
 		this.message.textContent = localize('delverListingAnalyzing', "Analyzing…");
 	}
 
@@ -141,9 +147,12 @@ export class DelverListingEditor extends EditorPane {
 		this.message.textContent = localize('delverListingAnalyzing', "Analyzing…");
 		this.message.style.display = '';
 
-		let handle: IAnalysisSessionHandle;
+		let handle: IDelverSession;
 		try {
-			handle = await this.analysisService.openImage({ kind: 'file', path: input.targetPath });
+			// The session service owns this. Opening it here would tie the
+			// analysis to this editor's lifetime, and switching to another tab
+			// would tear it down underneath every other view.
+			handle = await this.sessionService.openTarget(input.targetPath);
 		} catch (error) {
 			this.message.textContent = localize(
 				'delverListingFailed',
@@ -154,30 +163,15 @@ export class DelverListingEditor extends EditorPane {
 			return;
 		}
 
-		// The editor may have been closed or retargeted while analysis ran.
+		// The editor may have been closed or retargeted while analysis ran. The
+		// session is not disposed here — it belongs to the target, and something
+		// else may already be using it.
 		if (token.isCancellationRequested) {
-			this.analysisService.closeImage(handle.sessionId);
 			return;
 		}
 
-		// Fetched here rather than by each pane: the content hash is the identity
-		// every authored name is keyed to, and deriving it per consumer would
-		// invite two of them disagreeing about which image they are annotating.
-		let contentHash = '';
-		try {
-			contentHash = (await this.analysisService.imageInfo(handle.sessionId)).content_hash;
-		} catch (error) {
-			onUnexpectedError(error);
-		}
-
 		this.session = handle;
-		this.publishedSession = {
-			sessionId: handle.sessionId,
-			targetPath: input.targetPath,
-			image: handle.image,
-			contentHash,
-		};
-		this.sessionService.setActiveSession(this.publishedSession);
+		this.publishedSession = handle;
 		this.message.style.display = 'none';
 		this.createTable(handle);
 
@@ -201,6 +195,11 @@ export class DelverListingEditor extends EditorPane {
 	private createTable(handle: IAnalysisSessionHandle): void {
 		const store = new DisposableStore();
 		this.sessionDisposables.value = store;
+
+		// Disposing a list widget does not detach its DOM. Without this, every
+		// re-entry into the editor leaves a dead table behind and they stack up,
+		// pushing the live one out of view — which reads as a blank page.
+		dom.clearNode(this.tableContainer);
 
 		const model = new DelverListingModel(
 			{
@@ -227,7 +226,7 @@ export class DelverListingEditor extends EditorPane {
 		const table = store.add(this.instantiationService.createInstance(
 			WorkbenchTable,
 			'DelverListing',
-			this.container,
+			this.tableContainer,
 			delegate,
 			[
 				{
@@ -264,7 +263,9 @@ export class DelverListingEditor extends EditorPane {
 		this.table = table;
 
 		table.splice(0, table.length, model.rows);
-		table.layout(this.container.clientHeight, this.container.clientWidth);
+		if (this.dimension) {
+			table.layout(this.dimension.height, this.dimension.width);
+		}
 
 		store.add(model.onDidChangeRows(range => {
 			// The table copied these elements when they were spliced in, so
@@ -314,7 +315,7 @@ export class DelverListingEditor extends EditorPane {
 		// many rows are on screen. Over-estimating only prefetches a little wide,
 		// which is the harmless direction to be wrong in.
 		const first = model.bufferStart + Math.floor(table.scrollTop / ROW_HEIGHT);
-		const visibleRows = Math.max(1, Math.ceil(this.container.clientHeight / ROW_HEIGHT));
+		const visibleRows = Math.max(1, Math.ceil((this.dimension?.height ?? 0) / ROW_HEIGHT));
 		this.topRow = first;
 		model.setVisibleRange(first, first + visibleRows);
 	}
@@ -419,11 +420,32 @@ export class DelverListingEditor extends EditorPane {
 		this.updateVisibleRange();
 	}
 
-	override layout(): void {
-		const table = this.table;
-		if (table) {
-			table.layout(this.container.clientHeight, this.container.clientWidth);
-			this.updateVisibleRange();
+	/**
+	 * Sizes the table from the dimension the workbench supplies.
+	 *
+	 * Never from `clientHeight`: a hidden pane measures zero, so laying out from
+	 * the DOM leaves the table sized to nothing the moment another tab takes the
+	 * group — and it stays that way when this one comes back.
+	 */
+	override layout(dimension: Dimension): void {
+		this.dimension = dimension;
+		this.table?.layout(dimension.height, dimension.width);
+		this.updateVisibleRange();
+	}
+
+	/**
+	 * Re-lays out when this pane comes back into view.
+	 *
+	 * A pane is reused across tab switches, and it is laid out while hidden —
+	 * where a list widget measures zero and renders nothing. Sizing it again on
+	 * the way back in is what makes a returned-to tab show its rows, and it is
+	 * cheap enough to do unconditionally.
+	 */
+	protected override setEditorVisible(visible: boolean): void {
+		super.setEditorVisible(visible);
+		if (visible && this.table && this.dimension) {
+			this.table.layout(this.dimension.height, this.dimension.width);
+			this.table.rerender();
 		}
 	}
 
@@ -437,27 +459,20 @@ export class DelverListingEditor extends EditorPane {
 		super.dispose();
 	}
 
+	/**
+	 * Drops this editor's view of the session without ending it.
+	 *
+	 * The session belongs to the target and outlives any one editor — closing
+	 * this tab, or having it replaced by the strings tab, must not stop the rest
+	 * of the workbench from knowing what is open.
+	 */
 	private releaseSession(): void {
 		this.sessionDisposables.clear();
 		this.table = undefined;
 		this.model = undefined;
-
-		// Passed as `previous` so this cannot clear a session that a later
-		// listing already published — closing one editor must not blind
-		// navigation in the one that replaced it.
-		const published = this.publishedSession;
 		this.publishedSession = undefined;
-		if (published) {
-			this.sessionService.setActiveSession(undefined, published);
-		}
-
-		const session = this.session;
 		this.session = undefined;
-		if (session) {
-			// The session owns two child processes; leaving it open would leak
-			// them for the lifetime of the window.
-			this.analysisService.closeImage(session.sessionId).catch(() => undefined);
-		}
+		this.functionStarts = new Set();
 	}
 }
 

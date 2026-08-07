@@ -28,7 +28,7 @@ import {
 	FocusReason,
 	IDelverFocusService,
 } from '../../../services/delver/common/delverFocusService.js';
-import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
+import { DELVER_TARGET_OPEN, IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 
 export const DELVER_EXPORTS_VIEW_ID = 'delver.view.exports';
 
@@ -110,7 +110,18 @@ class DelverExportsViewContribution {
 					'delverExportsWelcome',
 					"No target open.\n[Open Target](command:delver.target.open)",
 				),
-				when: 'default',
+				when: DELVER_TARGET_OPEN.toNegated(),
+			},
+		);
+
+		// An executable exporting nothing is the normal case and a real answer.
+		// Reporting it as "no target open" told the user the tool had lost the
+		// file they were looking at.
+		Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViewWelcomeContent(
+			DELVER_EXPORTS_VIEW_ID,
+			{
+				content: localize('delverExportsEmpty', "This image exports nothing."),
+				when: DELVER_TARGET_OPEN,
 			},
 		);
 
