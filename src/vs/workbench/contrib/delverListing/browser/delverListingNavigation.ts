@@ -21,6 +21,7 @@ import {
 import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
 import { EditOp } from '../../../../platform/delver/common/interpretation.js';
+import { placeholderFunctionName } from '../../../../platform/delver/common/naming.js';
 import {
 	DELVER_LISTING_PINNED,
 	DELVER_NAVIGATION_ORIGIN,
@@ -332,10 +333,13 @@ export class RenameAction extends Action2 {
 			rva: location.address,
 		};
 
+		// The placeholder is shown, never prefilled: typing over `sub_140001000`
+		// is easy to skip, and an accidentally accepted placeholder would enter
+		// the log as though an analyst had chosen it.
 		const value = await quickInputService.input({
 			prompt: localize('delverRenamePrompt', "Name for {0}", toHex(location.address)),
 			value: interpretationService.nameAt(anchor) ?? '',
-			placeHolder: localize('delverRenamePlaceholder', "Leave empty to clear the name"),
+			placeHolder: placeholderFunctionName(location.address),
 		});
 
 		if (value === undefined) {

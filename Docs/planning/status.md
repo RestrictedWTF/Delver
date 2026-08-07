@@ -503,6 +503,17 @@ this is a demonstration rather than a tool. **That is the next thing to build.**
 Also missing: comments have an `EditOp` and no UI; the listing does not yet show
 names on rows; nothing renames from the Functions or Imports panes.
 
+## Requested and queued
+
+Three additions raised 2026-08-07, written up in
+[stage-g-plan.md](stage-g-plan.md) under "Requested, not yet built": navigable
+Overview rows, Strings as a searchable page, and possibly Imports as one too.
+
+They force a distinction worth naming before more views get built: **panes** are
+narrow and alive beside the listing, **pages** take the editor area and are
+where you go to look for something. Strings is plainly a page. Imports is
+plainly a pane that needs a filter, and only maybe also a page.
+
 ## Next up — Stage G, the workspace panes
 
 See **[stage-g-plan.md](stage-g-plan.md)**.

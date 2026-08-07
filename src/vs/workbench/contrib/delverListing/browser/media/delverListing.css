@@ -34,6 +34,56 @@
 	overflow: hidden;
 }
 
+/*
+ * A function's first instruction is two lines tall: the name on its own line,
+ * the instruction beneath it. That is a real header line sharing the row's
+ * address and ordinal, rather than an inserted row — inserting one would break
+ * the listing's row-to-address identity, which the sliding buffer depends on.
+ */
+.delver-listing-instruction.delver-listing-function-start {
+	display: block;
+	border-top: 1px solid var(--vscode-editorWidget-border);
+}
+
+.delver-listing-function-label {
+	display: block;
+	color: var(--vscode-symbolIcon-functionForeground);
+	font-weight: 600;
+	line-height: 22px;
+	white-space: pre;
+}
+
+/* Absent on every other row, and must not reserve space there. */
+.delver-listing-function-label:empty {
+	display: none;
+}
+
+/*
+ * Body instructions sit inside their function. The indent is what lets the eye
+ * find a boundary while scrolling, without reading a single address.
+ */
+.delver-listing-instruction {
+	padding-left: 2ch;
+}
+
+/* A header line is the function itself, so it sits at the outer level. */
+.delver-listing-instruction.delver-listing-function-start .delver-listing-function-label {
+	margin-left: -2ch;
+}
+
+/* The instruction under a header keeps the same indent as every other body row. */
+.delver-listing-instruction.delver-listing-function-start .delver-listing-mnemonic,
+.delver-listing-instruction.delver-listing-function-start .delver-listing-operands {
+	display: inline-block;
+	vertical-align: top;
+	line-height: 22px;
+}
+
+/* Push the address down beside the instruction rather than beside the name. */
+.delver-listing-address.delver-listing-second-line {
+	padding-top: 22px;
+}
+
 .delver-listing-mnemonic {
 	color: var(--vscode-debugTokenExpression-name);
 	min-width: 8ch;

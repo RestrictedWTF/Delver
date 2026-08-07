@@ -32,6 +32,8 @@ import {
 	IDelverSession,
 	IDelverSessionService,
 } from '../../../services/delver/common/delverSessionService.js';
+import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
+import { functionDisplayName } from '../../../../platform/delver/common/naming.js';
 import {
 	DELVER_LISTING_PINNED,
 	DELVER_NAVIGATION_ORIGIN,
@@ -64,6 +66,32 @@ export class DelverListingEditor extends EditorPane {
 	private _pinned = false;
 	private readonly pinnedContext: IContextKey<boolean>;
 
+	/**
+	 * Function entry addresses, in the `"0x..."` form rows carry.
+	 *
+	 * Held as the wire strings so a row lookup is a string hash rather than a
+	 * `BigInt` parse per rendered row.
+	 */
+	private functionStarts = new Set<string>();
+
+	/** Absolute ordinal of the row at the top of the viewport. */
+	private topRow = 0;
+
+	/** Re-splices the whole buffer, which is what forces heights to be recomputed. */
+	private respliceBuffer(): void {
+		const table = this.table;
+		const model = this.model;
+		if (!table || !model) {
+			return;
+		}
+		const top = this.topRow;
+		table.splice(0, table.length, model.rows);
+		const index = model.indexOf(top);
+		if (index !== -1) {
+			table.reveal(index, 0);
+		}
+	}
+
 	constructor(
 		group: IEditorGroup,
 		@ITelemetryService telemetryService: ITelemetryService,
@@ -73,6 +101,7 @@ export class DelverListingEditor extends EditorPane {
 		@IDelverAnalysisService private readonly analysisService: IDelverAnalysisService,
 		@IDelverFocusService private readonly focusService: IDelverFocusService,
 		@IDelverSessionService private readonly sessionService: IDelverSessionService,
+		@IDelverInterpretationService private readonly interpretationService: IDelverInterpretationService,
 		@IContextKeyService contextKeyService: IContextKeyService,
 	) {
 		super(DelverListingEditor.ID, group, telemetryService, themeService, storageService);
@@ -151,6 +180,22 @@ export class DelverListingEditor extends EditorPane {
 		this.sessionService.setActiveSession(this.publishedSession);
 		this.message.style.display = 'none';
 		this.createTable(handle);
+
+		// Loaded after the table so the listing is usable immediately; a large
+		// module has ~178k entries and the rows only gain their separators once
+		// this lands.
+		try {
+			const { functions } = await this.analysisService.functions(handle.sessionId);
+			if (this.session !== handle) {
+				return;
+			}
+			this.functionStarts = new Set(functions.map(f => f.rva));
+			// A splice, not a rerender: row heights change once starts are known,
+			// and heights are only recomputed when elements are spliced in.
+			this.respliceBuffer();
+		} catch (error) {
+			onUnexpectedError(error);
+		}
 	}
 
 	private createTable(handle: IAnalysisSessionHandle): void {
@@ -167,10 +212,15 @@ export class DelverListingEditor extends EditorPane {
 		store.add(model);
 		this.model = model;
 
+		// Height is per element, so a function's first instruction gets two lines:
+		// its name on one, the instruction on the next. That is a real header
+		// line sharing the row's address and ordinal, rather than an extra row
+		// that would break the listing's row-to-address identity.
+		const heightFor = (row: IListingRow) => this.isFunctionStart(row) ? ROW_HEIGHT * 2 : ROW_HEIGHT;
 		const delegate = new class implements ITableVirtualDelegate<IListingRow> {
 			readonly headerRowHeight = 0;
-			getHeight(): number {
-				return ROW_HEIGHT;
+			getHeight(row: IListingRow): number {
+				return heightFor(row);
 			}
 		}();
 
@@ -197,7 +247,13 @@ export class DelverListingEditor extends EditorPane {
 					project(row: IListingRow): IListingRow { return row; },
 				},
 			],
-			[new AddressRenderer(), new InstructionRenderer(target => this.followTarget(target))],
+			[
+				new AddressRenderer(row => this.isFunctionStart(row)),
+				new InstructionRenderer(
+					target => this.followTarget(target),
+					rva => this.functionLabelFor(rva),
+				),
+			],
 			{
 				horizontalScrolling: false,
 				multipleSelectionSupport: false,
@@ -219,15 +275,23 @@ export class DelverListingEditor extends EditorPane {
 			table.splice(range.start, range.count, model.rows.slice(range.start, range.start + range.count));
 		}));
 
-		store.add(model.onDidMoveBuffer(delta => {
-			const scrollTop = table.scrollTop;
+		store.add(model.onDidMoveBuffer(() => {
+			// Recentring replaces the buffer, so the view has to be put back where
+			// it was. Revealing the row that was on top is exact and does not
+			// assume a uniform row height — which stopped being true the moment
+			// function headers became two lines tall.
+			const top = this.topRow;
 			table.splice(0, table.length, model.rows);
-			// Every row that left the front of the buffer shifts content up by
-			// one row height. Without this correction the view jumps by half a
-			// buffer the moment it recentres.
-			table.scrollTop = Math.max(0, scrollTop - delta * ROW_HEIGHT);
+			const index = model.indexOf(top);
+			if (index !== -1) {
+				table.reveal(index, 0);
+			}
 			this.updateVisibleRange();
 		}));
+
+		// Renaming re-labels the listing immediately. Only visible rows repaint —
+		// the buffer's contents are unchanged, just their labels.
+		store.add(this.interpretationService.onDidChange(() => table.rerender()));
 
 		store.add(table.onDidScroll(() => this.updateVisibleRange()));
 		store.add(table.onDidChangeSelection(e => this.publishFocus(e.elements[0])));
@@ -246,9 +310,36 @@ export class DelverListingEditor extends EditorPane {
 		if (!table || !model) {
 			return;
 		}
+		// Approximate: function headers are taller, so this over-estimates how
+		// many rows are on screen. Over-estimating only prefetches a little wide,
+		// which is the harmless direction to be wrong in.
 		const first = model.bufferStart + Math.floor(table.scrollTop / ROW_HEIGHT);
 		const visibleRows = Math.max(1, Math.ceil(this.container.clientHeight / ROW_HEIGHT));
+		this.topRow = first;
 		model.setVisibleRange(first, first + visibleRows);
+	}
+
+	/**
+	 * Label for a row that begins a function, or `undefined` for every other row.
+	 *
+	 * Function starts are the landmarks in a listing — without them it is an
+	 * undifferentiated wall of instructions and there is no way to tell a
+	 * function's first line from its middle.
+	 */
+	private isFunctionStart(row: IListingRow): boolean {
+		return row.data !== undefined && this.functionStarts.has(row.data.rva);
+	}
+
+	private functionLabelFor(rva: string): string | undefined {
+		if (!this.functionStarts.has(rva)) {
+			return undefined;
+		}
+		const contentHash = this.publishedSession?.contentHash;
+		const address = BigInt(rva);
+		const authored = contentHash === undefined
+			? undefined
+			: this.interpretationService.nameAt({ kind: 'image', contentHash, rva: address });
+		return functionDisplayName(address, authored);
 	}
 
 	private shouldFollow(reason: FocusReason): boolean {
@@ -382,16 +473,24 @@ class AddressRenderer implements ITableRenderer<IListingRow, ICellTemplate> {
 		return { element: dom.append(container, dom.$('.delver-listing-address')) };
 	}
 
+	constructor(private readonly isFunctionStart: (row: IListingRow) => boolean) { }
+
 	renderElement(row: IListingRow, _index: number, template: ICellTemplate): void {
 		// Addresses arrive as "0x..." strings (ADR 0001) and are displayed as
 		// they arrived; reformatting through a number would truncate above 2^53.
 		template.element.textContent = row.data ? row.data.rva : '';
+		// A function's first row is two lines tall and the address belongs beside
+		// the instruction, not beside the name — the header line is about the
+		// function, and repeating the address there would read as a second row.
+		template.element.classList.toggle('delver-listing-second-line', this.isFunctionStart(row));
 	}
 
 	disposeTemplate(): void { }
 }
 
 interface IInstructionTemplate {
+	readonly row: HTMLElement;
+	readonly functionLabel: HTMLElement;
 	readonly mnemonic: HTMLElement;
 	readonly operands: HTMLElement;
 	readonly disposables: DisposableStore;
@@ -403,11 +502,16 @@ class InstructionRenderer implements ITableRenderer<IListingRow, IInstructionTem
 	static readonly TEMPLATE_ID = 'delver.listing.instruction';
 	readonly templateId = InstructionRenderer.TEMPLATE_ID;
 
-	constructor(private readonly onFollow: (target: string) => void) { }
+	constructor(
+		private readonly onFollow: (target: string) => void,
+		private readonly functionLabelFor: (rva: string) => string | undefined,
+	) { }
 
 	renderTemplate(container: HTMLElement): IInstructionTemplate {
 		const row = dom.append(container, dom.$('.delver-listing-instruction'));
 		const template: IInstructionTemplate = {
+			row,
+			functionLabel: dom.append(row, dom.$('.delver-listing-function-label')),
 			mnemonic: dom.append(row, dom.$('.delver-listing-mnemonic')),
 			operands: dom.append(row, dom.$('.delver-listing-operands')),
 			disposables: new DisposableStore(),
@@ -435,10 +539,19 @@ class InstructionRenderer implements ITableRenderer<IListingRow, IInstructionTem
 			template.mnemonic.textContent = '';
 			template.operands.textContent = '';
 			template.target = undefined;
+			template.functionLabel.textContent = '';
 			template.mnemonic.classList.add('delver-listing-pending');
 			template.operands.classList.remove('delver-listing-link');
+			template.row.classList.remove('delver-listing-function-start');
 			return;
 		}
+
+		// A function's first instruction carries its name and a rule above it.
+		// Without landmarks a listing is an undifferentiated wall and there is no
+		// way to tell where one function ends and the next begins.
+		const functionLabel = this.functionLabelFor(row.data.rva);
+		template.functionLabel.textContent = functionLabel ?? '';
+		template.row.classList.toggle('delver-listing-function-start', functionLabel !== undefined);
 
 		template.mnemonic.classList.remove('delver-listing-pending');
 		template.mnemonic.textContent = row.data.mnemonic;

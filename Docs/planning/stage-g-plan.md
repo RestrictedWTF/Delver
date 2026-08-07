@@ -106,6 +106,63 @@ Still wanted:
 - Filter boxes on Functions, Imports, and Strings.
 - Full virtualization for Functions, replacing the 1,000-row cap.
 
+## Requested, not yet built
+
+Raised 2026-08-07. Not started; recorded so the sequencing is a decision rather
+than whatever gets remembered.
+
+### The distinction these force: panes versus pages
+
+Everything so far is a **pane** — narrow, glanceable, alive beside the listing
+while you read it. The requests below are for **pages**: wide, columnar,
+searchable, and worth giving the editor area to.
+
+The test is what the surface is *for*. A pane answers a question you have while
+reading code, so it must be visible at the same time as the code. A page is
+somewhere you go to look for something, and while you are there the listing is
+not what you are doing. Getting this backwards produces either a cramped table
+or a sidebar you keep closing.
+
+Both can exist for one dataset, and for some of them both should.
+
+### R1 · Overview rows navigate — S
+
+Each Overview row becomes an action rather than a readout:
+
+- **Entry point** → navigate there through the focus bus.
+- **Instructions** → open the listing.
+- **Functions**, **References** → reveal those panes.
+
+Cheap, and it turns the pane from a label into a table of contents. The focus
+bus already carries every one of these.
+
+### R2 · Strings as a page — M
+
+Strings is the clearest case for a page: thousands of entries, and string
+hunting is a distinct activity rather than a question asked mid-read. It wants
+columns (address, encoding, text), a filter, and the room to show a long string
+without truncation.
+
+The sidebar pane goes away when this lands — a 2,000-row cap in a 300px column
+was always a stand-in.
+
+Needs the display cap lifted, since the point of the page is finding things.
+
+### R3 · Imports as a page — M, and **do R2 first**
+
+Same shape as R2, but the argument is weaker and the answer may be "not yet".
+Imports are consulted *while reading the listing* — "what does this call
+reach?" — which is pane behaviour, not page behaviour. A page competes with the
+listing for the same space and loses the side-by-side that makes it useful.
+
+What the current pane actually lacks is **width and a filter**, not a different
+home: `CreateRemoteThread` alongside its module and IAT address does not fit in
+a sidebar column.
+
+So: add a filter to the existing pane first. It is much cheaper and may be the
+whole fix. Promote to a page only if it still feels cramped afterwards — and if
+it does, keep the pane as well, because the two serve different activities.
+
 ## Deliberately not here
 
 - **Named symbols.** Everything is labelled by address until Stage F lands the

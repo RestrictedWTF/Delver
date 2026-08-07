@@ -6,6 +6,7 @@
 import { Codicon } from '../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { localize } from '../../../../nls.js';
+import { functionDisplayName } from '../../../../platform/delver/common/naming.js';
 import { FunctionSourceWire, IFunctionWire } from '../../../../platform/delver/common/protocol.generated.js';
 import { ITreeItem, ITreeViewDataProvider, TreeItemCollapsibleState } from '../../../common/views.js';
 
@@ -95,17 +96,16 @@ function group(handle: string, label: string, count: number, state: TreeItemColl
 }
 
 function functionItem(fn: IFunctionWire, id: string, name: string | undefined): ITreeItem {
-	// An authored name takes the label and pushes the address into the
-	// description — naming something is how you stop having to recognise it by
-	// address, so the name has to be what you actually read.
+	// Unnamed functions read as `sub_140001000` rather than a bare address, so
+	// the label is always a name-shaped thing and an authored name replaces it
+	// in place instead of changing what kind of row this is. The address stays
+	// in the description either way.
 	//
 	// Addresses arrive as "0x..." strings (ADR 0001) and are shown as they came.
 	return {
 		handle: `delver.function.${id}`,
-		label: { label: name ?? fn.rva },
-		description: name === undefined
-			? describe(fn.source)
-			: `${fn.rva}  ${describe(fn.source)}`,
+		label: { label: functionDisplayName(BigInt(fn.rva), name) },
+		description: `${fn.rva}  ${describe(fn.source)}`,
 		themeIcon: ThemeIcon.fromId(
 			fn.authoritative ? Codicon.symbolFunction.id : Codicon.symbolMisc.id,
 		),
