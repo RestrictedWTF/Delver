@@ -74,9 +74,9 @@ than a branch.
 | Session registry | `done` | `services/delver/common/delverSessionService.ts` | Multiple concurrent sessions — one active session at a time | |
 | Focus bus | `done` | `services/delver/common/delverFocusService.ts` | Thread/frame focus (P4) | |
 | Per-view pin | `done` | `contrib/delverListing/browser/delverListingContext.ts` | Not persisted across reloads; only the listing has one so far. Pin is per-view state, never bus state, and keys on focus *reason* — see status | |
-| Interpretation layer | `wip` | `platform/delver/common/interpretation.ts`, `services/delver/common/delverInterpretationService.ts` | **Persistence — names die with the window; the `.delver` store is next.** Comments have an op but no UI; listing rows do not show names; rename only from the listing. Types (P5); merge and conflict detection (P6) | |
+| Interpretation layer | `wip` | `platform/delver/common/interpretation.ts`, `services/delver/common/delverInterpretationService.ts` | **Persistence — names die with the window; the `.delverdb` store is next.** Comments have an op but no UI; listing rows do not show names; rename only from the listing. Types (P5); merge and conflict detection (P6) | |
 | Content hash (image identity) | `done` | `delver/provider-file` | Normalized hashing for in-memory images, which P4 needs so a loaded module matches its on-disk counterpart | |
-| `.delver` project | `planned` | `delver/delver-store` | | |
+| `.delverdb` project | `planned` | `delver/delver-store` | | |
 | Golden corpus | `done` | `delver/corpus` | Real-binary samples: F4 forbids non-redistributable ones, so samples are synthesised. Local-only real binaries by path are not wired up yet | |
 | Hex view | `planned` | `contrib/delverMemory` | **Slidable to P4** — nothing in P2/P3 needs it | |
 

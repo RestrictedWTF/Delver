@@ -94,7 +94,7 @@ P2 is built on exactly what P1 produces.
 | Address history on Alt+Left / Alt+Right | S | Free once views are `EditorInput`s |
 | Focus bus with `origin` tagging + per-view pin | M | Prevents update loops from day one |
 | Rename, comment, tag — anchored, attributed, undoable | M | The append-only edit log. **P2 writes through this** |
-| `.delver` SQLite project; opens with no target attached | M | |
+| `.delverdb` SQLite project; opens with no target attached | M | |
 | Outline view = function list | S | |
 | Golden corpus + regression suite in CI | M | Start it here or it never starts |
 

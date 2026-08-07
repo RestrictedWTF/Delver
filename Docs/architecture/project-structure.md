@@ -205,7 +205,7 @@ src/vs/workbench/services/delver/
 │   ├── focusService.ts         # IDelverFocusService (the sync bus)
 │   ├── analysisService.ts      # IDelverAnalysisService
 │   ├── interpretationService.ts
-│   └── projectService.ts       # .delver open/save
+│   └── projectService.ts       # .delverdb open/save
 ├── electron-browser/           # implementations that need Node
 └── test/…
 

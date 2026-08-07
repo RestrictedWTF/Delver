@@ -8,13 +8,23 @@ something is the way it is, see [adr/](../history/adr/).
 
 ---
 
-**Last updated:** 2026-08-07
-**Current phase:** P1 **Stage E complete** — focus bus, analysis session, listing editor, navigation, and per-view pin all done
+**Last updated:** 2026-08-08
+**Current phase:** Rebranding (identity + theme scaffold) — in progress
 
 ## In flight
 
-**Stage E** — E1t (focus bus) and the analysis session host are done. The
-listing editor (E2t) is next.
+**Rebranding** — non-artwork identity work from [rebranding-plan.md](rebranding-plan.md).
+`product.json` now carries Delver names, fresh GUIDs/mutexes, Open VSX gallery,
+telemetry off, and `.delver` data folder. `src/vs/platform/product/common/product.ts`
+fallback name updated. `extensions/theme-delver/` scaffolded with Delver Dark and
+Delver Light themes, and `configurationDefaults` sets Delver Dark as the default.
+Project file renamed to `.delverdb` across docs. `build/win32/code.iss` publisher
+and output filename updated, `.delverdb` association added; full source-file
+association trim still pending. Artwork (icons, installer images) intentionally
+out of scope per user.
+
+**Next:** transpile smoke check, commit, then return to P1 Stage E2t listing
+editor work.
 
 ### Fixed: "Open File Target" did nothing
 
@@ -497,7 +507,7 @@ what P3 needs and it exists now rather than being retrofitted.
 
 **Nothing is persisted.** Names live in memory and die with the window. The log
 is deliberately shaped so this is a serialization problem and not a redesign —
-`from(edits)` already reconstructs state — but until the `.delver` store lands,
+`from(edits)` already reconstructs state — but until the `.delverdb` store lands,
 this is a demonstration rather than a tool. **That is the next thing to build.**
 
 Also missing: comments have an `EditOp` and no UI; the listing does not yet show

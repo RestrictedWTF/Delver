@@ -246,7 +246,7 @@ byte/YARA pattern, a structural graph query, or a behavioral event sequence, plu
 the findings that justified it. Capture the schema in P1 even if nothing consumes
 it until P6.
 
-## 7. Persistence — the `.delver` project
+## 7. Persistence — the `.delverdb` project
 
 One SQLite database per project (WAL mode), holding:
 

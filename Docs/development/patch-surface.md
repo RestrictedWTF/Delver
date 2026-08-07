@@ -23,7 +23,9 @@ one-day monthly merge and a one-week one.
 
 | File | Nature of change | Conflict risk | Owner | Notes |
 | --- | --- | --- | --- | --- |
-| `product.json` | Branding, app IDs, gallery URL, telemetry defaults | Medium | — | Upstream changes this often; expect to re-apply |
+| `product.json` | Branding, app IDs, gallery URL, telemetry defaults | Medium | — | Active: Delver identity, fresh GUIDs/mutexes, Open VSX gallery, telemetry off, empty issue/update URLs. Upstream changes this often; expect to re-apply |
+| `src/vs/platform/product/common/product.ts` | Fallback product name and telemetry defaults | Low | — | Active: fallback identity set to Delver; report/issue URLs cleared |
+| `build/win32/code.iss` | Publisher, output filename, `.delverdb` association | Low | — | Active: Delver publisher; OutputBaseFilename changed; `.delverdb` file-association block added. Full source-file association trim still pending |
 | `src/vs/workbench/workbench.common.main.ts` | One import line per Delver contribution | **High** | — | Active: Delver service and contribution imports under the `// DELVER:` marker — focus/session services, view container, and the `delverSections`, `delverImports`, `delverListing`, `delverXrefs` contributions. Keep all Delver imports contiguous. |
 | `src/vs/workbench/services/environment/…` *(TBD)* | Inject `DELVER_SESSION` into terminal + kernel environments | Low | — | Prefer an existing env-contribution point over a direct edit |
 | `.eslint-plugin-local/code-import-patterns.ts` | Layer rules for `delver` folders | Low | — | Only if new layer boundaries are introduced |

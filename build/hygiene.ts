@@ -93,8 +93,11 @@ export function hygiene(some: NodeJS.ReadWriteStream | string[] | undefined, run
 		const product = JSON.parse(file.contents!.toString('utf8'));
 
 		if (product.extensionsGallery) {
-			console.error(`product.json: Contains 'extensionsGallery'`);
-			errorCount++;
+			const galleryJson = JSON.stringify(product.extensionsGallery);
+			if (galleryJson.includes('marketplace.visualstudio.com')) {
+				console.error(`product.json: Contains Microsoft marketplace extensionsGallery`);
+				errorCount++;
+			}
 		}
 
 		this.emit('data', file);

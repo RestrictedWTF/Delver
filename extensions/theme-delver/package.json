@@ -1,0 +1,37 @@
+{
+  "name": "theme-delver",
+  "displayName": "%displayName%",
+  "description": "%description%",
+  "categories": [
+    "Themes"
+  ],
+  "version": "1.0.0",
+  "publisher": "delver",
+  "license": "MIT",
+  "engines": {
+    "vscode": "*"
+  },
+  "contributes": {
+    "themes": [
+      {
+        "id": "Delver Dark",
+        "label": "%delverDarkThemeLabel%",
+        "uiTheme": "vs-dark",
+        "path": "./themes/delver-dark.json"
+      },
+      {
+        "id": "Delver Light",
+        "label": "%delverLightThemeLabel%",
+        "uiTheme": "vs",
+        "path": "./themes/delver-light.json"
+      }
+    ],
+    "configurationDefaults": {
+      "workbench.colorTheme": "Delver Dark"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/microsoft/vscode.git"
+  }
+}

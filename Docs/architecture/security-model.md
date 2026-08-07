@@ -17,7 +17,7 @@ malformed header.
 | T3 | Renderer injection | Sample strings rendered as HTML/markdown/terminal escapes |
 | T4 | Prompt injection | Sample text steering the AI's conclusions ([05-AI-Analyst.md](ai-analyst.md) §5) |
 | T5 | Exfiltration | Sample or analysis data leaving the host — telemetry, AI provider, extension |
-| T6 | Accidental redistribution | Sharing a `.delver` project that embeds live malware |
+| T6 | Accidental redistribution | Sharing a `.delverdb` project that embeds live malware |
 | T7 | Scripting endpoint abuse | Any local process reaching the DTP session endpoint gains memory read/write on the attached target |
 | T8 | Anti-analysis / target escape | The sample detecting or attacking the provider |
 
@@ -95,8 +95,8 @@ markers, chat, notebook output, and hovers.
   configuration for classified work. Getting this wrong is an existential
   product risk, not a feature gap.
 - **Separate analysis from samples on disk.** Keep captured bytes in a distinct
-  file from the analysis database, so `project.delver` can be shared without
-  shipping `project.delver.samples`. Sharing a project must never silently
+  file from the analysis database, so `project.delverdb` can be shared without
+  shipping `project.delverdb.samples`. Sharing a project must never silently
   redistribute malware.
 - Any embedded sample bytes in an exported artifact should be encrypted or
   password-protected by default, following existing malware-sharing convention.
