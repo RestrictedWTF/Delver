@@ -407,8 +407,11 @@ fn strings(request: &Request, state: &Arc<Mutex<State>>) -> Result<serde_json::V
 			})
 			.collect();
 
-		serde_json::to_value(StringsResult { strings })
-			.map_err(|e| RpcError::protocol(-32603, format!("serialising result: {e}")))
+		serde_json::to_value(StringsResult {
+			strings,
+			truncated: image.analysis.strings_truncated,
+		})
+		.map_err(|e| RpcError::protocol(-32603, format!("serialising result: {e}")))
 	})
 }
 

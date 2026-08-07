@@ -791,6 +791,12 @@ export interface IStringsResult {
 	 * Strings located in the image.
 	 */
 	strings: IStringWire[];
+	/**
+	 * Whether the scan hit its cap and dropped results.
+	 * 
+	 * The cap stops a hostile file turning string extraction into an allocation attack, but a truncated list that does not say so is worse than none: a client cannot otherwise tell a complete answer from a partial one, and would present a partial one as complete.
+	 */
+	truncated: boolean;
 }
 
 /**

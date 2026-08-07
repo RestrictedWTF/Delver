@@ -31,6 +31,14 @@ for display, plus the structured facts D5 needs:
 
 `delver-analysis` consumes the structure; only the listing touches the text.
 
+**Amended 2026-08-07.** The rule this encodes is *structure is never recovered
+by parsing text* — not *text is always produced*. Whole-image analysis decodes
+millions of instructions and displays none of them, and formatting each one was
+the single largest cost in the pass. `decode_facts_at` returns the structure
+alone; `decode_count` still returns both in one pass for callers that render.
+Both derive the structure from the same function, so they cannot disagree about
+where a branch goes.
+
 ### F2 — Windowed decode never starts mid-instruction on its own authority
 
 x86 is variable-length and not self-synchronising. Decoding from an arbitrary

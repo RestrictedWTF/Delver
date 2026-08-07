@@ -19,6 +19,21 @@ edition = "2021"
 authors = ["Delver Contributors"]
 license = "MIT"
 
+# Analysis decodes millions of instructions per image. At `opt-level = 0` an
+# unoptimized `iced-x86` turns opening a large target into a minutes-long wait,
+# and the IDE runs whatever plain `cargo build` produced — so an unusable debug
+# build is an unusable IDE.
+#
+# Dependencies are optimized even in dev builds: nobody steps through the
+# decoder, and they are compiled once and then cached.
+[profile.dev.package."*"]
+opt-level = 3
+
+# The descent loop itself is hot enough to matter. `opt-level = 1` keeps debug
+# info and fast rebuilds while removing the worst of the unoptimized overhead.
+[profile.dev]
+opt-level = 1
+
 [workspace.dependencies]
 serde = { version = "1.0.163", features = ["derive"] }
 serde_json = "1.0.96"

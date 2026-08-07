@@ -35,8 +35,23 @@ pub struct FoundString {
 	pub encoding: StringEncoding,
 }
 
+/// The result of scanning an image for strings.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StringScan {
+	/// Strings found, sorted by address.
+	pub strings: Vec<FoundString>,
+	/// Whether [`MAX_STRINGS`] was reached and results were dropped.
+	///
+	/// The cap is a real defence — a hostile file must not be able to turn
+	/// string extraction into an allocation attack — but a truncated list that
+	/// does not admit it is worse than no list at all. A consumer cannot tell
+	/// "this image has 200,000 strings" from "this image has more than we will
+	/// tell you about" without being told.
+	pub truncated: bool,
+}
+
 /// Finds strings in every file-backed section.
-pub fn find_strings(image: &ParsedImage, file: &[u8]) -> Vec<FoundString> {
+pub fn find_strings(image: &ParsedImage, file: &[u8]) -> StringScan {
 	let mut out = Vec::new();
 
 	for section in &image.sections {
@@ -53,13 +68,21 @@ pub fn find_strings(image: &ParsedImage, file: &[u8]) -> Vec<FoundString> {
 
 		if out.len() >= MAX_STRINGS {
 			out.truncate(MAX_STRINGS);
-			return out;
+			out.sort_by_key(|s| (s.rva, s.text.len()));
+			out.dedup_by(|a, b| a.rva == b.rva && a.encoding == b.encoding);
+			return StringScan {
+				strings: out,
+				truncated: true,
+			};
 		}
 	}
 
 	out.sort_by_key(|s| (s.rva, s.text.len()));
 	out.dedup_by(|a, b| a.rva == b.rva && a.encoding == b.encoding);
-	out
+	StringScan {
+		strings: out,
+		truncated: false,
+	}
 }
 
 fn is_printable(byte: u8) -> bool {

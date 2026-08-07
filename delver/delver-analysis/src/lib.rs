@@ -24,13 +24,16 @@ pub mod index;
 pub mod strings;
 pub mod xrefs;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use delver_disasm::{Bitness, Disassembler, FlowKind};
 use delver_format::{ParsedImage, SeedSource};
 
+mod state;
+use state::RvaState;
+
 pub use index::InstructionIndex;
-pub use strings::{FoundString, StringEncoding};
+pub use strings::{FoundString, StringEncoding, StringScan};
 pub use xrefs::{Xref, XrefKind, XrefTable};
 
 /// Where a function start came from, most authoritative first.
@@ -92,6 +95,8 @@ pub struct AnalyzedImage {
 	pub xrefs: XrefTable,
 	/// Strings found in the image.
 	pub strings: Vec<FoundString>,
+	/// Whether the string scan hit its cap and dropped results.
+	pub strings_truncated: bool,
 }
 
 /// Analyses `image`, reading code from `file`.
@@ -99,9 +104,12 @@ pub struct AnalyzedImage {
 /// Returns an empty analysis for architectures the disassembler does not
 /// support, rather than guessing.
 pub fn analyze(image: &ParsedImage, file: &[u8]) -> AnalyzedImage {
+	let scan = strings::find_strings(image, file);
+
 	let Some(bitness) = Bitness::from_arch(&image.arch) else {
 		return AnalyzedImage {
-			strings: strings::find_strings(image, file),
+			strings: scan.strings,
+			strings_truncated: scan.truncated,
 			..Default::default()
 		};
 	};
@@ -127,7 +135,8 @@ pub fn analyze(image: &ParsedImage, file: &[u8]) -> AnalyzedImage {
 		instructions,
 		functions,
 		xrefs,
-		strings: strings::find_strings(image, file),
+		strings: scan.strings,
+		strings_truncated: scan.truncated,
 	}
 }
 
@@ -136,13 +145,12 @@ struct Descent<'a> {
 	disasm: &'a Disassembler,
 	image: &'a ParsedImage,
 	file: &'a [u8],
-	/// Decoded instruction starts and their lengths.
-	decoded: BTreeMap<u64, u32>,
+	/// Which addresses have been walked, and where instructions start.
+	state: RvaState,
 	/// Best-known source per function address.
 	functions: BTreeMap<u64, (Option<u64>, FunctionSource)>,
 	xrefs: Vec<Xref>,
 	queue: Vec<u64>,
-	visited: BTreeSet<u64>,
 }
 
 impl<'a> Descent<'a> {
@@ -151,11 +159,10 @@ impl<'a> Descent<'a> {
 			disasm,
 			image,
 			file,
-			decoded: BTreeMap::new(),
+			state: RvaState::new(image),
 			functions: BTreeMap::new(),
 			xrefs: Vec::new(),
 			queue: Vec::new(),
-			visited: BTreeSet::new(),
 		}
 	}
 
@@ -176,7 +183,7 @@ impl<'a> Descent<'a> {
 	}
 
 	fn queue(&mut self, rva: u64) {
-		if !self.visited.contains(&rva) {
+		if !self.state.is_visited(rva) {
 			self.queue.push(rva);
 		}
 	}
@@ -193,21 +200,23 @@ impl<'a> Descent<'a> {
 		let mut rva = start;
 
 		loop {
-			if !self.visited.insert(rva) {
+			if !self.state.visit(rva) {
 				return; // already walked this path
 			}
 			let Some(bytes) = self.image.bytes_at(self.file, rva) else {
 				return;
 			};
-			let decoded = self.disasm.decode_count(rva, bytes, 1);
-			let Some(instruction) = decoded.first() else {
+			// Structure only: this pass decodes every reachable instruction in
+			// the image and displays none of them, so formatting each one would
+			// be the single largest cost in the analysis.
+			let Some(instruction) = self.disasm.decode_facts_at(rva, bytes) else {
 				return;
 			};
 			if instruction.flow == FlowKind::Invalid {
 				return;
 			}
 
-			self.decoded.insert(instruction.rva, instruction.len);
+			self.state.set_instruction(instruction.rva, instruction.len);
 
 			if let Some(target) = instruction.branch_target {
 				let kind = match instruction.flow {
@@ -269,9 +278,9 @@ impl<'a> Descent<'a> {
 		for (start, end) in executable {
 			let mut rva = start;
 			while rva < end {
-				if self.visited.contains(&rva) {
+				if self.state.is_visited(rva) {
 					// Skip the whole instruction if we know its length.
-					rva += self.decoded.get(&rva).copied().unwrap_or(1) as u64;
+					rva += self.state.instruction_len(rva).unwrap_or(1) as u64;
 					continue;
 				}
 
@@ -284,9 +293,9 @@ impl<'a> Descent<'a> {
 					continue;
 				}
 
-				let decoded = self.disasm.decode_count(rva, bytes, 1);
-				let decodes = decoded
-					.first()
+				let decodes = self
+					.disasm
+					.decode_facts_at(rva, bytes)
 					.is_some_and(|instruction| instruction.flow != FlowKind::Invalid);
 
 				if decodes {
@@ -294,7 +303,7 @@ impl<'a> Descent<'a> {
 					self.queue(rva);
 					self.run();
 					// `run` decoded the instruction at `rva`; step over it.
-					rva += self.decoded.get(&rva).copied().unwrap_or(1) as u64;
+					rva += self.state.instruction_len(rva).unwrap_or(1) as u64;
 				} else {
 					rva += 1;
 				}
@@ -303,8 +312,7 @@ impl<'a> Descent<'a> {
 	}
 
 	fn finish(self) -> (InstructionIndex, Vec<Function>, XrefTable) {
-		let instructions =
-			InstructionIndex::from_pairs(self.decoded.into_iter().collect::<Vec<_>>());
+		let instructions = InstructionIndex::from_pairs(self.state.instructions());
 
 		let functions = self
 			.functions

@@ -3,10 +3,15 @@
 //! Wraps `iced-x86` behind a Delver-owned interface so the rest of the codebase
 //! never depends on a specific decoder. Two rules shape the API:
 //!
-//! - **One decode pass yields text *and* structure.** The formatted string is
-//!   for the listing; the structured flow-control and target information is
-//!   what `delver-analysis` builds xrefs from. Re-parsing formatted text to
-//!   recover a branch target would be a parser on top of a parser.
+//! - **Structure is never recovered from text.** The formatted string is for
+//!   the listing; the flow-control and target information is what
+//!   `delver-analysis` builds xrefs from, and it comes from the decoder.
+//!   Re-parsing formatted text to recover a branch target would be a parser on
+//!   top of a parser. When a caller wants both, one pass yields both — see
+//!   [`Disassembler::decode_count`]. When a caller wants only structure, it can
+//!   say so ([`Disassembler::decode_facts_at`]) rather than paying for text it
+//!   discards: whole-image analysis decodes millions of instructions and
+//!   displays none of them.
 //! - **Decoding never starts mid-instruction on its own authority.** x86 is
 //!   variable-length and not self-synchronising, so decoding from an arbitrary
 //!   offset yields plausible garbage. Callers supply an anchor they vouch for.
@@ -84,6 +89,39 @@ impl FlowKind {
 	/// Whether this instruction ends a basic block.
 	pub fn terminates_block(self) -> bool {
 		!matches!(self, Self::Sequential | Self::Call | Self::Interrupt)
+	}
+}
+
+/// The longest an x86 instruction can be.
+///
+/// A decode window never needs more than this, so a caller holding a
+/// multi-megabyte section can hand over a bounded slice.
+pub const MAX_INSTRUCTION_LEN: usize = 15;
+
+/// One instruction's structure, without formatted text.
+///
+/// This is what recursive descent and xref building actually consume. It is
+/// `Copy` and allocation-free on purpose: analysis decodes every reachable
+/// instruction in an image, and at that volume the two `String`s in
+/// [`DecodedInstruction`] dominate the cost of the pass that discards them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstructionFacts {
+	/// Address of the instruction, as an RVA.
+	pub rva: u64,
+	/// Encoded length in bytes.
+	pub len: u32,
+	/// How execution proceeds after this instruction.
+	pub flow: FlowKind,
+	/// Statically known branch or call target, as an RVA.
+	pub branch_target: Option<u64>,
+	/// Target of a RIP-relative memory operand, as an RVA.
+	pub memory_target: Option<u64>,
+}
+
+impl InstructionFacts {
+	/// Exclusive end of the instruction.
+	pub fn end_rva(&self) -> u64 {
+		self.rva.saturating_add(self.len as u64)
 	}
 }
 
@@ -197,6 +235,30 @@ impl Disassembler {
 		Ok(self.decode_from(anchor_rva, bytes))
 	}
 
+	/// Decodes the structure of the single instruction at `anchor_rva`.
+	///
+	/// Returns `None` when nothing decodes there. The caller must vouch for
+	/// `anchor_rva` being a real boundary, exactly as for [`Self::decode_from`];
+	/// this skips the formatter, not the anchoring rule.
+	pub fn decode_facts_at(&self, anchor_rva: u64, bytes: &[u8]) -> Option<InstructionFacts> {
+		// One instruction can never need more than `MAX_INSTRUCTION_LEN` bytes,
+		// and callers routinely pass the rest of a section.
+		let window = &bytes[..bytes.len().min(MAX_INSTRUCTION_LEN)];
+		let mut decoder = Decoder::with_ip(
+			self.bitness.bits(),
+			window,
+			anchor_rva,
+			DecoderOptions::NONE,
+		);
+		if !decoder.can_decode() {
+			return None;
+		}
+
+		let mut instruction = Instruction::default();
+		decoder.decode_out(&mut instruction);
+		Some(facts(&instruction))
+	}
+
 	fn decode_bounded(
 		&self,
 		anchor_rva: u64,
@@ -228,6 +290,24 @@ fn convert(instruction: &Instruction, formatter: &mut IntelFormatter) -> Decoded
 		None => (text, String::new()),
 	};
 
+	let facts = facts(instruction);
+
+	DecodedInstruction {
+		rva: facts.rva,
+		len: facts.len,
+		mnemonic,
+		operands,
+		flow: facts.flow,
+		branch_target: facts.branch_target,
+		memory_target: facts.memory_target,
+	}
+}
+
+/// Extracts everything about an instruction that is not its display text.
+///
+/// Shared by both decode paths so the two can never disagree about where a
+/// branch goes.
+fn facts(instruction: &Instruction) -> InstructionFacts {
 	let flow = flow_kind(instruction);
 	let branch_target = match flow {
 		FlowKind::Jump | FlowKind::ConditionalJump | FlowKind::Call => {
@@ -241,11 +321,9 @@ fn convert(instruction: &Instruction, formatter: &mut IntelFormatter) -> Decoded
 		None
 	};
 
-	DecodedInstruction {
+	InstructionFacts {
 		rva: instruction.ip(),
 		len: instruction.len() as u32,
-		mnemonic,
-		operands,
 		flow,
 		branch_target,
 		memory_target,
