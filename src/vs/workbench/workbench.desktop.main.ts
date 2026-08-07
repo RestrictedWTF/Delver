@@ -100,6 +100,7 @@ import './services/process/electron-browser/processService.js';
 import './services/power/electron-browser/powerService.js';
 import './services/delver/electron-browser/delverTargetService.js';
 import '../platform/delver/electron-browser/delverProcessService.js';
+import '../platform/delver/electron-browser/delverAnalysisService.js';
 
 import { registerSingleton } from '../platform/instantiation/common/extensions.js';
 import { IUserDataInitializationService, UserDataInitializationService } from './services/userData/browser/userDataInit.js';

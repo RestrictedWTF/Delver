@@ -3,26 +3,34 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { onUnexpectedError } from '../../../../base/common/errors.js';
 import { localize, localize2 } from '../../../../nls.js';
-import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
-import { Registry } from '../../../../platform/registry/common/platform.js';
-import { IViewsRegistry, Extensions as ViewExtensions, ITreeViewDescriptor } from '../../../common/views.js';
-import { VIEW_CONTAINER } from '../../files/browser/explorerViewlet.js';
+import { IDelverAnalysisService } from '../../../../platform/delver/common/delverAnalysisService.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
+import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
+import { Registry } from '../../../../platform/registry/common/platform.js';
 import { TreeView, TreeViewPane } from '../../../browser/parts/views/treeView.js';
-import { Action2, registerAction2 } from '../../../../platform/actions/common/actions.js';
-import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
-import { IDelverTargetService } from '../../../services/delver/common/delverTargetService.js';
-import { DelverSectionsTreeDataProvider, DELVER_SECTIONS_VIEW_ID } from './delverSectionsView.js';
-import { IGetImageInfoResult } from '../../../../platform/delver/common/protocol.generated.js';
 import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
+import { Extensions as ViewExtensions, ITreeViewDescriptor, IViewsRegistry } from '../../../common/views.js';
+import { registerDelverView } from '../../../services/delver/browser/delverViewContainer.js';
+import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
+import { DelverSectionsTreeDataProvider, DELVER_SECTIONS_VIEW_ID } from './delverSectionsView.js';
 
 const viewName = localize2('delverSections', "Sections");
 
+/**
+ * Shows the sections of the image the workbench currently has open.
+ *
+ * Driven by the **active analysis session**, not by an attach of its own.
+ * Opening a target once has to populate everything: a sections list that needs
+ * its own command, and runs its own provider to answer, is a second copy of the
+ * same image and a second thing for the user to remember.
+ */
 class DelverSectionsViewContribution {
 	constructor(
 		@IInstantiationService instantiationService: IInstantiationService,
-		@IDelverTargetService delverTargetService: IDelverTargetService,
+		@IDelverSessionService sessionService: IDelverSessionService,
+		@IDelverAnalysisService analysisService: IDelverAnalysisService,
 	) {
 		const treeView = instantiationService.createInstance(TreeView, DELVER_SECTIONS_VIEW_ID, viewName.value);
 		const dataProvider = instantiationService.createInstance(DelverSectionsTreeDataProvider);
@@ -36,20 +44,59 @@ class DelverSectionsViewContribution {
 			canToggleVisibility: true,
 			canMoveView: true,
 			treeView,
-			collapsed: false,
-			order: 100,
+			// Structural rather than browsed: consulted when a question comes up,
+			// not read on open. Collapsed keeps the panes that answer "what is
+			// this" above the fold.
+			collapsed: true,
+			order: 60,
 		};
-		viewsRegistry.registerViews([viewDescriptor], VIEW_CONTAINER);
+		registerDelverView(viewDescriptor);
 
-		delverTargetService.onDidChangeActiveTarget(async target => {
-			if (!target) {
+		// Without this the container opens onto empty trees and reads as broken
+		// rather than as waiting for a target.
+		viewsRegistry.registerViewWelcomeContent(DELVER_SECTIONS_VIEW_ID, {
+			content: localize(
+				'delverSectionsWelcome',
+				"No target open.\n[Open Target](command:delver.target.open)",
+			),
+			when: 'default',
+		});
+
+		/** Guards against a slow lookup overwriting a newer session's answer. */
+		let generation = 0;
+
+		const update = async () => {
+			const session = sessionService.activeSession;
+			const token = ++generation;
+
+			if (!session) {
 				dataProvider.setImageInfo(undefined);
 			} else {
-				const info = await target.getImageInfo() as IGetImageInfoResult;
-				dataProvider.setImageInfo(info);
+				try {
+					const info = await analysisService.imageInfo(session.sessionId);
+					if (token !== generation) {
+						return;
+					}
+					dataProvider.setImageInfo(info);
+				} catch (error) {
+					if (token !== generation) {
+						return;
+					}
+					// Leave the previous contents alone rather than blanking the
+					// view: a failed refresh is not evidence the image changed.
+					onUnexpectedError(error);
+					return;
+				}
 			}
-			treeView.refresh().catch(() => { /* ignore */ });
-		});
+			treeView.refresh().catch(onUnexpectedError);
+		};
+
+		sessionService.onDidChangeActiveSession(() => update());
+
+		// A session may already be open when this contribution constructs.
+		if (sessionService.activeSession) {
+			update();
+		}
 	}
 }
 
@@ -58,34 +105,3 @@ registerWorkbenchContribution2(
 	DelverSectionsViewContribution,
 	WorkbenchPhase.AfterRestored
 );
-
-class OpenFileTargetAction extends Action2 {
-	constructor() {
-		super({
-			id: 'delver.target.openFile',
-			title: localize2('delverOpenFile', 'Open File Target'),
-			category: localize2('delverCategory', 'Delver'),
-			f1: true,
-		});
-	}
-
-	async run(accessor: ServicesAccessor): Promise<void> {
-		const fileDialogService = accessor.get(IFileDialogService);
-		const delverTargetService = accessor.get(IDelverTargetService);
-
-		const result = await fileDialogService.showOpenDialog({
-			openLabel: localize('delverOpenFileLabel', 'Open'),
-			canSelectFiles: true,
-			canSelectFolders: false,
-			canSelectMany: false,
-		});
-
-		if (!result || result.length === 0) {
-			return;
-		}
-
-		await delverTargetService.attach({ kind: 'file', path: result[0].fsPath });
-	}
-}
-
-registerAction2(OpenFileTargetAction);

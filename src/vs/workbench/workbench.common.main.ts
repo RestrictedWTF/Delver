@@ -479,7 +479,17 @@ import './contrib/editTelemetry/browser/editTelemetry.contribution.js';
 // Opener
 import './contrib/opener/browser/opener.contribution.js';
 
-// DELVER: Delver contributions
+// DELVER: Delver services and contributions
+import './services/delver/common/delverFocusService.js';
+import './services/delver/common/delverSessionService.js';
+import './services/delver/browser/delverViewContainer.js';
+import './contrib/delverOverview/browser/delverOverview.contribution.js';
+import './contrib/delverFunctions/browser/delverFunctions.contribution.js';
+import './contrib/delverImports/browser/delverImports.contribution.js';
+import './contrib/delverExports/browser/delverExports.contribution.js';
+import './contrib/delverStrings/browser/delverStrings.contribution.js';
 import './contrib/delverSections/browser/delverSections.contribution.js';
+import './contrib/delverListing/browser/delverListing.contribution.js';
+import './contrib/delverXrefs/browser/delverXrefs.contribution.js';
 
 //#endregion

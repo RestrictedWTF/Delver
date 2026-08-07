@@ -24,13 +24,13 @@ one-day monthly merge and a one-week one.
 | File | Nature of change | Conflict risk | Owner | Notes |
 | --- | --- | --- | --- | --- |
 | `product.json` | Branding, app IDs, gallery URL, telemetry defaults | Medium | — | Upstream changes this often; expect to re-apply |
-| `src/vs/workbench/workbench.common.main.ts` | One import line per Delver contribution | **High** | — | Active: `delverTargetService` and `delverSections` imports under `// DELVER:` marker. Keep all Delver imports contiguous. |
+| `src/vs/workbench/workbench.common.main.ts` | One import line per Delver contribution | **High** | — | Active: Delver service and contribution imports under the `// DELVER:` marker — focus/session services, view container, and the `delverSections`, `delverImports`, `delverListing`, `delverXrefs` contributions. Keep all Delver imports contiguous. |
 | `src/vs/workbench/services/environment/…` *(TBD)* | Inject `DELVER_SESSION` into terminal + kernel environments | Low | — | Prefer an existing env-contribution point over a direct edit |
 | `.eslint-plugin-local/code-import-patterns.ts` | Layer rules for `delver` folders | Low | — | Only if new layer boundaries are introduced |
 | `eslint.config.js` | Delver lint rules (`delver-address-is-bigint`, `delver-no-target-kind-branch`) | Low | — | Active: delver file glob with two custom rules |
 | `build/gulpfile.ts` | Register the `delver` build task | Low | — | One line; `gulpfile.delver.ts` itself is a new file |
-| `src/vs/code/electron-utility/sharedProcess/sharedProcessMain.ts` | Register Delver shared-process channel | Low | — | Active: service and channel registration for `IDelverProcessService` |
-| `src/vs/workbench/workbench.desktop.main.ts` | Register Delver renderer-side services | Low | — | Active: imports `delverTargetService` and `delverProcessService` |
+| `src/vs/code/electron-utility/sharedProcess/sharedProcessMain.ts` | Register Delver shared-process channel | Low | — | Active: service and channel registration for `IDelverProcessService` and `IDelverAnalysisService` |
+| `src/vs/workbench/workbench.desktop.main.ts` | Register Delver renderer-side services | Low | — | Active: imports `delverTargetService`, `delverProcessService`, and `delverAnalysisService` |
 | `build/gulpfile.vscode.ts` (and platform variants) | Stage provider/analysis binaries into the package | Medium | — | Model on `gulpfile.cli.ts` |
 | `package.json` | `delver:*` scripts | Low | — | Active: `delver:build`, `delver:test`, `delver:protocol` |
 | `src/vs/workbench/browser/web.api.ts` | Only if Delver needs web-facing config | Low | — | Avoid if possible |

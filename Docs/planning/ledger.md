@@ -42,7 +42,8 @@ than a branch.
 | Provider process host | `done` | `src/vs/platform/delver/node/` | Sandboxing (deferred to P4) | |
 | `delverctl` | `done` | `delver/delverctl` | | |
 | Delver sections view | `done` | `src/vs/workbench/contrib/delverSections/` | | |
-| Delver target service | `done` | `src/vs/workbench/services/delver/` | | |
+| Delver view container | `done` | `services/delver/browser/delverViewContainer.ts` | Custom container icon artwork — see [rebranding-plan.md](rebranding-plan.md) | |
+| Delver target service | `done`, **unwired** | `src/vs/workbench/services/delver/` | Registered and tested but no UI consumer since sections moved onto the analysis session (2026-08-07). Retained because it models an attached target with capabilities and spaces, which P4 live-process attach needs and the file-only session does not cover. **Decide before Stage F.** Earlier fix: the snapshot carried `bigint` across IPC and hung `attach()` silently | [0001](../history/adr/0001-wire-protocol-framing-and-encoding.md) |
 | Build integration | `done` | `build/gulpfile.delver.ts`, `package.json` | | |
 | Protocol codegen (Rust → schema → TS) | `done` | `delver-protocol/src/bin/gen-schema.rs`, `build/lib/delver/generate-protocol.ts` | Repaired 2026-08-07: the TS emitter was a hardcoded string and the schema only carried the envelope, so no payload type had ever been generated | |
 | Branding + CI | `planned` | `product.json`, `build/`, `resources/` | Icons, installer artwork, Linux packaging — see [rebranding-plan.md](rebranding-plan.md) | |
@@ -53,17 +54,26 @@ than a branch.
 | Feature | Status | Code | Deliberately not done | ADR |
 | --- | --- | --- | --- | --- |
 | Named-pipe / Unix-socket transport | `done` | `delver/delver-rpc` | TCP transport; see also P0 `delver-rpc` row | [0003](../history/adr/0003-unsafe-code-in-transport-listener.md) |
-| Imports / exports / seeds over DTP | `done` | `delver/provider-file`, `delver/delver-protocol` | Not surfaced in the UI until Stage G | |
+| Imports / exports / seeds over DTP | `done` | `delver/provider-file`, `delver/delver-protocol` | Exports and seeds are not surfaced in the UI yet — see [stage-g-plan.md](stage-g-plan.md) | |
+| Imports view | `done` | `contrib/delverImports` | Filtering, delay-load imports shown as ordinary ones, no grouping by suspiciousness | |
+| Functions view | `done` | `contrib/delverFunctions` | Filter box and full virtualization — swept entries are capped at 1,000 with an explicit overflow row. Names need Stage F | |
+| Overview view | `done` | `contrib/delverOverview` | Hashes, compile timestamp, entropy, packer hints | |
 | PE loader (`delver-format`) | `done` | `delver/delver-format` | Resource-directory *contents* (the directory itself is parsed); ELF and Mach-O (P5) | |
-| Analysis server | `done` | `delver/server-analysis` | Progress notifications during indexing; multi-image sessions (one image at a time) | |
+| Analysis server | `done` | `delver/server-analysis` | Progress notifications during indexing (no longer urgent: 88.5 MB image analyses in ~3.9 s after the 2026-08-07 indexing work); multi-image sessions (one image at a time) | |
 | Disassembly (`delver-disasm`) | `done` | `delver/delver-disasm` | Non-x86 architectures; instruction index is D5 | |
 | Function detection | `done` | `delver/delver-analysis` | Signature matching (P5); sweep heuristics are deliberately naive — see status | |
 | Analysis session host | `done` | `platform/delver/node/analysisSession.ts` | Progress reporting during indexing; one image per session | |
-| Listing editor | `planned` | `contrib/delverListing` | Inline source interleaving (needs dynamic row heights) | |
+| Listing editor | `done` | `contrib/delverListing` | Inline source interleaving (needs dynamic row heights); **full-file scrollbar** — the buffer slides, see status; xref columns, context menu, and byte column | |
+| Analysis service (renderer ↔ shared process) | `done` | `platform/delver/{common,node,electron-browser}/delverAnalysisService.ts` | Session reuse between sections view and listing — each opens its own provider today | [0001](../history/adr/0001-wire-protocol-framing-and-encoding.md) |
 | Xrefs | `done` | `delver/delver-analysis` | Graph query API (P6); indirect-call targets need dataflow | |
-| Strings view | `planned` | `contrib/delverStrings` | | |
-| Quick access (address/symbol/string) | `planned` | `contrib/delverListing` | | |
-| Focus bus | `done` | `services/delver/common/delverFocusService.ts` | Thread/frame focus (P4); pin is per-view state, not bus state | |
+| References view | `done` | `contrib/delverXrefs` | Grouping by function (needs Stage F names); filtering by kind | |
+| Follow / return traversal | `done` | `contrib/delverListing` | Following a data reference into a hex view (needs the hex view); operand-level links for non-branch operands | |
+| Strings view | `done` | `contrib/delverStrings` | Filter box; encoding as a column rather than a suffix. Scan cap stays at 200k but now reports truncation | |
+| Exports view | `done` | `contrib/delverExports` | Filtering; forwarded exports are shown but not navigable | |
+| Navigation (address/function/history) | `done` | `contrib/delverListing/browser/delverListingNavigation.ts` | Go to String — quick-pick scale plus the 200k string cap; belongs with the strings view. Named symbols need the interpretation layer | |
+| Session registry | `done` | `services/delver/common/delverSessionService.ts` | Multiple concurrent sessions — one active session at a time | |
+| Focus bus | `done` | `services/delver/common/delverFocusService.ts` | Thread/frame focus (P4) | |
+| Per-view pin | `done` | `contrib/delverListing/browser/delverListingContext.ts` | Not persisted across reloads; only the listing has one so far. Pin is per-view state, never bus state, and keys on focus *reason* — see status | |
 | Interpretation layer | `planned` | `services/delver/common/` | Types (P5) | |
 | `.delver` project | `planned` | `delver/delver-store` | | |
 | Golden corpus | `done` | `delver/corpus` | Real-binary samples: F4 forbids non-redistributable ones, so samples are synthesised. Local-only real binaries by path are not wired up yet | |

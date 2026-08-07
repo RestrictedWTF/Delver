@@ -1,0 +1,164 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+import { Codicon } from '../../../../base/common/codicons.js';
+import { onUnexpectedError } from '../../../../base/common/errors.js';
+import { ThemeIcon } from '../../../../base/common/themables.js';
+import { localize, localize2 } from '../../../../nls.js';
+import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
+import { IDelverAnalysisService } from '../../../../platform/delver/common/delverAnalysisService.js';
+import { IExportWire } from '../../../../platform/delver/common/protocol.generated.js';
+import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
+import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
+import { Registry } from '../../../../platform/registry/common/platform.js';
+import { TreeView, TreeViewPane } from '../../../browser/parts/views/treeView.js';
+import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
+import {
+	Extensions as ViewExtensions,
+	ITreeItem,
+	ITreeViewDataProvider,
+	ITreeViewDescriptor,
+	IViewsRegistry,
+	TreeItemCollapsibleState,
+} from '../../../common/views.js';
+import { registerDelverView } from '../../../services/delver/browser/delverViewContainer.js';
+import {
+	FocusReason,
+	IDelverFocusService,
+} from '../../../services/delver/common/delverFocusService.js';
+import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
+
+export const DELVER_EXPORTS_VIEW_ID = 'delver.view.exports';
+
+const DELVER_EXPORTS_OPEN_COMMAND = 'delver.exports.goTo';
+
+const viewName = localize2('delverExports', "Exports");
+
+/** Identifies this view on the focus bus. */
+const FOCUS_ORIGIN = 'delver.view.exports';
+
+class DelverExportsTreeDataProvider implements ITreeViewDataProvider {
+	private exports: readonly IExportWire[] | undefined;
+
+	setExports(exports: readonly IExportWire[] | undefined): void {
+		this.exports = exports;
+	}
+
+	async getChildren(element?: ITreeItem): Promise<readonly ITreeItem[] | undefined> {
+		if (element || !this.exports) {
+			return [];
+		}
+		return this.exports.map(exportItem);
+	}
+}
+
+function exportItem(symbol: IExportWire, index: number): ITreeItem {
+	// Exports by ordinal carry no name; showing the ordinal is the honest answer.
+	const label = symbol.name
+		?? localize('delverExportOrdinal', "Ordinal {0}", symbol.ordinal);
+
+	// A forwarded export has no address in this image at all — it resolves into
+	// another module. Saying where it goes is the only useful thing to show, and
+	// it must not look navigable, because there is nothing here to navigate to.
+	const forwarded = symbol.forwarded_to !== undefined;
+
+	return {
+		handle: `delver.export.${index}`,
+		label: { label },
+		description: forwarded
+			? localize('delverExportForwarded', "→ {0}", symbol.forwarded_to!)
+			: symbol.rva,
+		themeIcon: ThemeIcon.fromId(forwarded ? Codicon.arrowRight.id : Codicon.symbolFunction.id),
+		collapsibleState: TreeItemCollapsibleState.None,
+		command: forwarded || symbol.rva === undefined ? undefined : {
+			id: DELVER_EXPORTS_OPEN_COMMAND,
+			title: localize('delverExportGoTo', "Go to Export"),
+			arguments: [symbol.rva],
+		},
+	};
+}
+
+class DelverExportsViewContribution {
+	constructor(
+		@IInstantiationService instantiationService: IInstantiationService,
+		@IDelverSessionService sessionService: IDelverSessionService,
+		@IDelverAnalysisService analysisService: IDelverAnalysisService,
+	) {
+		const treeView = instantiationService.createInstance(TreeView, DELVER_EXPORTS_VIEW_ID, viewName.value);
+		const dataProvider = new DelverExportsTreeDataProvider();
+		treeView.dataProvider = dataProvider;
+
+		const viewDescriptor: ITreeViewDescriptor = {
+			id: DELVER_EXPORTS_VIEW_ID,
+			name: viewName,
+			ctorDescriptor: new SyncDescriptor(TreeViewPane),
+			canToggleVisibility: true,
+			canMoveView: true,
+			treeView,
+			// Most targets are executables with nothing to export.
+			collapsed: true,
+			order: 40,
+		};
+		registerDelverView(viewDescriptor);
+
+		Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViewWelcomeContent(
+			DELVER_EXPORTS_VIEW_ID,
+			{
+				content: localize(
+					'delverExportsWelcome',
+					"No target open.\n[Open Target](command:delver.target.open)",
+				),
+				when: 'default',
+			},
+		);
+
+		/** Guards against a slow lookup overwriting a newer session's answer. */
+		let generation = 0;
+
+		const update = async () => {
+			const session = sessionService.activeSession;
+			const token = ++generation;
+
+			if (!session) {
+				dataProvider.setExports(undefined);
+			} else {
+				try {
+					const { exports } = await analysisService.exports(session.sessionId);
+					if (token !== generation) {
+						return;
+					}
+					dataProvider.setExports(exports);
+				} catch (error) {
+					if (token !== generation) {
+						return;
+					}
+					onUnexpectedError(error);
+					return;
+				}
+			}
+			treeView.refresh().catch(onUnexpectedError);
+		};
+
+		sessionService.onDidChangeActiveSession(() => update());
+
+		if (sessionService.activeSession) {
+			update();
+		}
+	}
+}
+
+registerWorkbenchContribution2(
+	'delver.exportsView',
+	DelverExportsViewContribution,
+	WorkbenchPhase.AfterRestored,
+);
+
+CommandsRegistry.registerCommand(DELVER_EXPORTS_OPEN_COMMAND, (accessor: ServicesAccessor, rva: string) => {
+	accessor.get(IDelverFocusService).setFocus(
+		{ location: { space: 'Image', address: BigInt(rva) } },
+		FOCUS_ORIGIN,
+		FocusReason.User,
+	);
+});
