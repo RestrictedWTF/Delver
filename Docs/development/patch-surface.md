@@ -27,6 +27,8 @@ one-day monthly merge and a one-week one.
 | `src/vs/platform/product/common/product.ts` | Fallback product name and telemetry defaults | Low | — | Active: fallback identity set to Delver; report/issue URLs cleared |
 | `build/win32/code.iss` | Publisher, output filename, `.delverdb` association | Low | — | Active: Delver publisher; OutputBaseFilename changed; `.delverdb` file-association block added. Full source-file association trim still pending |
 | `build/hygiene.ts` | Allow Open VSX in `product.json` extensionsGallery | Low | — | Active: hygiene blocked any `extensionsGallery`; now only blocks Microsoft Marketplace URLs |
+| `build/filters.ts` | Exclude `scripts/generate-artwork.py` from hygiene | Low | — | Active: Python dev script uses `#` comments and spaces, not the repo's TS-style header/tabs |
+| `build/lib/preLaunch.ts` | Detect stale Electron executable after rebrand | Low | — | Active: version match alone is not enough; also checks the executable name matches `product.json` |
 | `scripts/code.bat` | Find Electron executable when nameShort changes | Low | — | Active: falls back to the first `.exe` in `.build\electron` when `nameShort.exe` is missing (stale download) |
 | `resources/win32/code.ico` and tiles | Icon contents replaced with Delver logo | Low | — | Filenames unchanged; regenerate via `scripts/generate-artwork.py` |
 | `resources/win32/inno-big-*.bmp`, `inno-small-*.bmp` | Installer artwork replaced with Delver logo | Low | — | Filenames unchanged; dark background matches Delver Dark chrome |

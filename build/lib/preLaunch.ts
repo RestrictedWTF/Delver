@@ -51,7 +51,20 @@ async function isExpectedElectronInstalled(): Promise<boolean> {
 		const { getElectronVersion } = await import('./util.ts');
 		const { electronVersion } = getElectronVersion();
 		const installedVersion = (await fs.readFile(path.join(rootDir, '.build', 'electron', 'version'), 'utf8')).trim().replace(/^v/, '');
-		return installedVersion === electronVersion;
+		if (installedVersion !== electronVersion) {
+			return false;
+		}
+
+		// Rebranding changes the executable name; a version match is not enough
+		// to avoid running a stale Electron with the old icon and identity.
+		const productJson = JSON.parse(await fs.readFile(path.join(rootDir, 'product.json'), 'utf8'));
+		const expectedExe = process.platform === 'win32'
+			? `${productJson.nameShort}.exe`
+			: process.platform === 'darwin'
+				? `${productJson.nameShort}.app`
+				: productJson.applicationName;
+		await fs.stat(path.join(rootDir, '.build', 'electron', expectedExe));
+		return true;
 	} catch {
 		return false;
 	}
