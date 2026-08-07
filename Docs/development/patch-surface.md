@@ -28,6 +28,11 @@ one-day monthly merge and a one-week one.
 | `build/win32/code.iss` | Publisher, output filename, `.delverdb` association | Low | — | Active: Delver publisher; OutputBaseFilename changed; `.delverdb` file-association block added. Full source-file association trim still pending |
 | `build/hygiene.ts` | Allow Open VSX in `product.json` extensionsGallery | Low | — | Active: hygiene blocked any `extensionsGallery`; now only blocks Microsoft Marketplace URLs |
 | `scripts/code.bat` | Find Electron executable when nameShort changes | Low | — | Active: falls back to the first `.exe` in `.build\electron` when `nameShort.exe` is missing (stale download) |
+| `resources/win32/code.ico` and tiles | Icon contents replaced with Delver logo | Low | — | Filenames unchanged; regenerate via `scripts/generate-artwork.py` |
+| `resources/win32/inno-big-*.bmp`, `inno-small-*.bmp` | Installer artwork replaced with Delver logo | Low | — | Filenames unchanged; dark background matches Delver Dark chrome |
+| `resources/darwin/code.icns` | macOS app icon contents replaced | Low | — | Filenames unchanged; regenerate via `scripts/generate-artwork.py` |
+| `resources/linux/code.png` | Linux app icon contents replaced | Low | — | Filenames unchanged; regenerate via `scripts/generate-artwork.py` |
+| `resources/server/*.{ico,png}` | Server/web icon contents replaced | Low | — | Filenames unchanged |
 | `src/vs/workbench/workbench.common.main.ts` | One import line per Delver contribution | **High** | — | Active: Delver service and contribution imports under the `// DELVER:` marker — focus/session services, view container, and the `delverSections`, `delverImports`, `delverListing`, `delverXrefs` contributions. Keep all Delver imports contiguous. |
 | `src/vs/workbench/services/environment/…` *(TBD)* | Inject `DELVER_SESSION` into terminal + kernel environments | Low | — | Prefer an existing env-contribution point over a direct edit |
 | `.eslint-plugin-local/code-import-patterns.ts` | Layer rules for `delver` folders | Low | — | Only if new layer boundaries are introduced |

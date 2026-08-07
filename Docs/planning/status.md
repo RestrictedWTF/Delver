@@ -9,19 +9,20 @@ something is the way it is, see [adr/](../history/adr/).
 ---
 
 **Last updated:** 2026-08-08
-**Current phase:** Rebranding (identity + theme scaffold) — in progress
+**Current phase:** Rebranding — complete except for full `code.iss` file-association trim
 
 ## In flight
 
-**Rebranding** — non-artwork identity work from [rebranding-plan.md](rebranding-plan.md).
+**Rebranding** — identity, theme, and artwork from [rebranding-plan.md](rebranding-plan.md).
 `product.json` now carries Delver names, fresh GUIDs/mutexes, Open VSX gallery,
 telemetry off, and `.delver` data folder. `src/vs/platform/product/common/product.ts`
-fallback name updated. `extensions/theme-delver/` scaffolded with Delver Dark and
-Delver Light themes, and `configurationDefaults` sets Delver Dark as the default.
-Project file renamed to `.delverdb` across docs. `build/win32/code.iss` publisher
-and output filename updated, `.delverdb` association added; full source-file
-association trim still pending. Artwork (icons, installer images) intentionally
-out of scope per user.
+fallback name updated. `extensions/theme-delver/` ships Delver Dark and Delver
+Light, with `configurationDefaults` setting Delver Dark as the default. Project
+file renamed to `.delverdb` across docs. Artwork generated from
+`resources/delver/logo.png` via `scripts/generate-artwork.py`: Windows ICO/tiles,
+installer BMPs, macOS ICNS, Linux PNG, and server/web icons. `build/win32/code.iss`
+publisher and output filename updated, `.delverdb` association added; full
+source-file association trim still pending.
 
 **Next:** transpile smoke check, commit, then return to P1 Stage E2t listing
 editor work.
