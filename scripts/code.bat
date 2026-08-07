@@ -17,7 +17,14 @@ set "NAMESHORT="
 for /f "tokens=2 delims=:," %%a in ('findstr /R /C:"\"nameShort\":.*" product.json') do if not defined NAMESHORT set "NAMESHORT=%%~a"
 set NAMESHORT=%NAMESHORT: "=%
 set NAMESHORT=%NAMESHORT:"=%.exe
-set CODE=".build\electron\%NAMESHORT%"
+set "CODE=.build\electron\%NAMESHORT%"
+if not exist "%CODE%" (
+	for %%f in (".build\electron\*.exe") do set "CODE=%%~f"
+)
+if not exist "%CODE%" (
+	echo Failed to find Electron executable in .build\electron. 1>&2
+	exit /b 1
+)
 
 :: Manage built-in extensions
 if "%~1"=="--builtin" goto builtin
@@ -37,11 +44,11 @@ for %%A in (%*) do (
 )
 
 :: Launch Code
-%CODE% . %DISABLE_TEST_EXTENSION% %*
+"%CODE%" . %DISABLE_TEST_EXTENSION% %*
 goto end
 
 :builtin
-%CODE% build/builtin
+"%CODE%" build/builtin
 
 :end
 
