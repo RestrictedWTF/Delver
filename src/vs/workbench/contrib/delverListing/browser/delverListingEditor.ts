@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as dom from '../../../../base/browser/dom.js';
+import { onUnexpectedError } from '../../../../base/common/errors.js';
 import { ITableRenderer, ITableVirtualDelegate } from '../../../../base/browser/ui/table/table.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { DisposableStore, MutableDisposable } from '../../../../base/common/lifecycle.js';
@@ -130,11 +131,22 @@ export class DelverListingEditor extends EditorPane {
 			return;
 		}
 
+		// Fetched here rather than by each pane: the content hash is the identity
+		// every authored name is keyed to, and deriving it per consumer would
+		// invite two of them disagreeing about which image they are annotating.
+		let contentHash = '';
+		try {
+			contentHash = (await this.analysisService.imageInfo(handle.sessionId)).content_hash;
+		} catch (error) {
+			onUnexpectedError(error);
+		}
+
 		this.session = handle;
 		this.publishedSession = {
 			sessionId: handle.sessionId,
 			targetPath: input.targetPath,
 			image: handle.image,
+			contentHash,
 		};
 		this.sessionService.setActiveSession(this.publishedSession);
 		this.message.style.display = 'none';

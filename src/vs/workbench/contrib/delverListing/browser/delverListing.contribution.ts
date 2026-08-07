@@ -35,6 +35,7 @@ import {
 	GoToFunctionAction,
 	NavigateBackAction,
 	NavigateForwardAction,
+	RenameAction,
 	ReturnAction,
 	TogglePinAction,
 } from './delverListingNavigation.js';
@@ -158,3 +159,4 @@ registerAction2(NavigateForwardAction);
 registerAction2(TogglePinAction);
 registerAction2(FollowAction);
 registerAction2(ReturnAction);
+registerAction2(RenameAction);

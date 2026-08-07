@@ -31,11 +31,17 @@ export class DelverFunctionsTreeDataProvider implements ITreeViewDataProvider {
 	private vouched: readonly IFunctionWire[] = [];
 	private swept: readonly IFunctionWire[] = [];
 	private loaded = false;
+	private names = new Map<string, string>();
 
 	setFunctions(functions: readonly IFunctionWire[] | undefined): void {
 		this.loaded = functions !== undefined;
 		this.vouched = functions?.filter(f => f.authoritative) ?? [];
 		this.swept = functions?.filter(f => !f.authoritative) ?? [];
+	}
+
+	/** Authored names by RVA, as the "0x..." strings the wire uses. */
+	setNames(names: Map<string, string>): void {
+		this.names = names;
 	}
 
 	async getChildren(element?: ITreeItem): Promise<readonly ITreeItem[] | undefined> {
@@ -64,10 +70,12 @@ export class DelverFunctionsTreeDataProvider implements ITreeViewDataProvider {
 		}
 
 		if (element.handle === VOUCHED_HANDLE) {
-			return this.vouched.map((fn, i) => functionItem(fn, `v${i}`));
+			return this.vouched.map((fn, i) => functionItem(fn, `v${i}`, this.names.get(fn.rva)));
 		}
 		if (element.handle === SWEPT_HANDLE) {
-			const shown = this.swept.slice(0, SWEPT_LIMIT).map((fn, i) => functionItem(fn, `s${i}`));
+			const shown = this.swept
+				.slice(0, SWEPT_LIMIT)
+				.map((fn, i) => functionItem(fn, `s${i}`, this.names.get(fn.rva)));
 			if (this.swept.length > SWEPT_LIMIT) {
 				shown.push(overflowItem(this.swept.length - SWEPT_LIMIT));
 			}
@@ -86,14 +94,18 @@ function group(handle: string, label: string, count: number, state: TreeItemColl
 	};
 }
 
-function functionItem(fn: IFunctionWire, id: string): ITreeItem {
-	// Addresses arrive as "0x..." strings (ADR 0001) and are shown as they
-	// arrived. There is nothing else to call a function yet — names arrive with
-	// the interpretation layer.
+function functionItem(fn: IFunctionWire, id: string, name: string | undefined): ITreeItem {
+	// An authored name takes the label and pushes the address into the
+	// description — naming something is how you stop having to recognise it by
+	// address, so the name has to be what you actually read.
+	//
+	// Addresses arrive as "0x..." strings (ADR 0001) and are shown as they came.
 	return {
 		handle: `delver.function.${id}`,
-		label: { label: fn.rva },
-		description: describe(fn.source),
+		label: { label: name ?? fn.rva },
+		description: name === undefined
+			? describe(fn.source)
+			: `${fn.rva}  ${describe(fn.source)}`,
 		themeIcon: ThemeIcon.fromId(
 			fn.authoritative ? Codicon.symbolFunction.id : Codicon.symbolMisc.id,
 		),

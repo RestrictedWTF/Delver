@@ -132,6 +132,14 @@ pub struct ListSpacesResult {
 pub struct GetImageInfoResult {
 	/// Architecture string, e.g. "x86_64".
 	pub arch: String,
+	/// SHA-256 of the image's file bytes, lowercase hex.
+	///
+	/// This is the image's **identity**, and what interpretation anchors to
+	/// (`Docs/architecture/data-model.md` section 4). An absolute address is not
+	/// an identity — ASLR, a re-dump, or another process loading the same module
+	/// moves it — so an authored name must be keyed to the bytes it describes,
+	/// never to where they happened to sit.
+	pub content_hash: String,
 	/// Image entry point virtual address.
 	#[serde(with = "crate::hex")]
 	#[schemars(with = "String")]

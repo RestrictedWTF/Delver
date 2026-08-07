@@ -19,6 +19,8 @@ import {
 	IDelverFocusService,
 } from '../../../services/delver/common/delverFocusService.js';
 import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
+import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
+import { EditOp } from '../../../../platform/delver/common/interpretation.js';
 import {
 	DELVER_LISTING_PINNED,
 	DELVER_NAVIGATION_ORIGIN,
@@ -284,6 +286,62 @@ export class ReturnAction extends Action2 {
 
 	async run(accessor: ServicesAccessor): Promise<void> {
 		accessor.get(IDelverFocusService).back();
+	}
+}
+
+/**
+ * Names the address the cursor is on.
+ *
+ * Recorded as an authored edit against the image's content hash, never against
+ * the address alone — a name has to survive the same bytes being loaded
+ * somewhere else.
+ */
+export class RenameAction extends Action2 {
+	constructor() {
+		super({
+			id: 'delver.interpretation.rename',
+			title: localize2('delverRename', 'Rename'),
+			category: localize2('delverCategory', 'Delver'),
+			f1: true,
+			precondition: LISTING_ACTIVE,
+			keybinding: {
+				when: LISTING_ACTIVE,
+				primary: KeyCode.F2,
+				weight: KeybindingWeight.EditorContrib,
+			},
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const quickInputService = accessor.get(IQuickInputService);
+		const sessionService = accessor.get(IDelverSessionService);
+		const interpretationService = accessor.get(IDelverInterpretationService);
+		const focusService = accessor.get(IDelverFocusService);
+		const notificationService = accessor.get(INotificationService);
+
+		const session = sessionService.activeSession;
+		const location = focusService.focus.location;
+		if (!session || !location) {
+			notificationService.info(localize('delverNothingToRename', "Select an address to rename."));
+			return;
+		}
+
+		const anchor = {
+			kind: 'image' as const,
+			contentHash: session.contentHash,
+			rva: location.address,
+		};
+
+		const value = await quickInputService.input({
+			prompt: localize('delverRenamePrompt', "Name for {0}", toHex(location.address)),
+			value: interpretationService.nameAt(anchor) ?? '',
+			placeHolder: localize('delverRenamePlaceholder', "Leave empty to clear the name"),
+		});
+
+		if (value === undefined) {
+			return; // dismissed, which is not the same as cleared
+		}
+		interpretationService.edit(anchor, EditOp.Rename, value.trim());
 	}
 }
 

@@ -19,6 +19,8 @@ import {
 	IDelverFocusService,
 } from '../../../services/delver/common/delverFocusService.js';
 import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
+import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
+import { IFunctionWire } from '../../../../platform/delver/common/protocol.generated.js';
 import {
 	DELVER_FUNCTIONS_OPEN_COMMAND,
 	DELVER_FUNCTIONS_VIEW_ID,
@@ -38,6 +40,7 @@ class DelverFunctionsViewContribution {
 		@IInstantiationService instantiationService: IInstantiationService,
 		@IDelverSessionService sessionService: IDelverSessionService,
 		@IDelverAnalysisService analysisService: IDelverAnalysisService,
+		@IDelverInterpretationService interpretationService: IDelverInterpretationService,
 	) {
 		const treeView = instantiationService.createInstance(TreeView, DELVER_FUNCTIONS_VIEW_ID, viewName.value);
 		const dataProvider = new DelverFunctionsTreeDataProvider();
@@ -68,6 +71,35 @@ class DelverFunctionsViewContribution {
 
 		/** Guards against a slow lookup overwriting a newer session's answer. */
 		let generation = 0;
+		let lastFunctions: readonly IFunctionWire[] = [];
+
+		const applyNames = (functions: readonly IFunctionWire[]) => {
+			lastFunctions = functions;
+			const session = sessionService.activeSession;
+			if (!session) {
+				dataProvider.setNames(new Map());
+				return;
+			}
+			const names = new Map<string, string>();
+			for (const fn of functions) {
+				const name = interpretationService.nameAt({
+					kind: 'image',
+					contentHash: session.contentHash,
+					rva: BigInt(fn.rva),
+				});
+				if (name !== undefined) {
+					names.set(fn.rva, name);
+				}
+			}
+			dataProvider.setNames(names);
+		};
+
+		// Renaming anything re-labels this pane immediately. The log is the
+		// truth; this view is one of its caches.
+		interpretationService.onDidChange(() => {
+			applyNames(lastFunctions);
+			treeView.refresh().catch(onUnexpectedError);
+		});
 
 		const update = async () => {
 			const session = sessionService.activeSession;
@@ -82,6 +114,7 @@ class DelverFunctionsViewContribution {
 						return;
 					}
 					dataProvider.setFunctions(functions);
+					applyNames(functions);
 				} catch (error) {
 					if (token !== generation) {
 						return;

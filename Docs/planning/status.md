@@ -468,6 +468,41 @@ attach and is not something the file-only analysis session covers. Deleting it
 would throw away a designed abstraction; leaving it is a registered singleton
 with no callers. Worth resolving before Stage F rather than letting it rot.
 
+## Stage F · Interpretation — first slice landed
+
+You can name an address (`F2` in the listing) and the Functions pane shows the
+name in place of the address. That is the whole point of the layer: naming
+something is how you stop having to recognise it by address, so the name has to
+be what you actually read.
+
+The three rules from the data model are implemented, not deferred:
+
+**Anchors, not addresses.** `provider-file` now computes SHA-256 of the file
+bytes and serves it as `content_hash`; every edit is anchored to
+`(contentHash, rva)`. The same address in a different image is a different
+anchor — a test asserts it. An absolute address is not an identity, and a name
+attached to one would follow ASLR or a re-dump onto the wrong bytes.
+
+**Append-only.** Renaming twice leaves two entries; clearing a name is an append
+with an empty value, not a deletion. `InterpretationLog.from` replays a log and
+reconstructs the same state, which is what makes the materialized view safe to
+throw away and what loading a stored log will rely on.
+
+**Always attributed.** Every edit carries an `IAuthor`. A model's edits arrive
+as `proposed` and stay out of the materialized view until accepted — visible in
+the log, reviewable, and never mistaken for established fact. That mechanism is
+what P3 needs and it exists now rather than being retrofitted.
+
+### Not yet, and it matters
+
+**Nothing is persisted.** Names live in memory and die with the window. The log
+is deliberately shaped so this is a serialization problem and not a redesign —
+`from(edits)` already reconstructs state — but until the `.delver` store lands,
+this is a demonstration rather than a tool. **That is the next thing to build.**
+
+Also missing: comments have an `EditOp` and no UI; the listing does not yet show
+names on rows; nothing renames from the Functions or Imports panes.
+
 ## Next up — Stage G, the workspace panes
 
 See **[stage-g-plan.md](stage-g-plan.md)**.

@@ -23,12 +23,15 @@ use delver_protocol::{
 	TargetCapabilityWire, TargetDescriptorWire, TlsWire,
 };
 use memmap2::Mmap;
+use sha2::{Digest, Sha256};
 
 /// Provider state for a single target file.
 pub struct FileProvider {
 	mmap: Mmap,
 	image: ParsedImage,
 	file_size: u64,
+	/// SHA-256 of the file bytes, lowercase hex. Computed once at open.
+	content_hash: String,
 	next_frame_id: AtomicU64,
 }
 
@@ -39,12 +42,22 @@ impl FileProvider {
 		let mmap = unsafe { Mmap::map(&file) }.with_context(|| format!("mapping {path:?}"))?;
 		let file_size = mmap.len() as u64;
 		let image = parse_pe(&mmap)?;
+		// Over the file bytes, per the data model: an in-memory image hashes a
+		// normalized form so a loaded module still matches its on-disk
+		// counterpart, but a file target is already that counterpart.
+		let content_hash = hex_digest(&Sha256::digest(&mmap[..]));
 		Ok(Self {
 			mmap,
 			image,
 			file_size,
+			content_hash,
 			next_frame_id: AtomicU64::new(1),
 		})
+	}
+
+	/// The image's content hash, lowercase hex SHA-256.
+	pub fn content_hash(&self) -> &str {
+		&self.content_hash
 	}
 
 	/// Allocates the next binary frame id.
@@ -118,6 +131,7 @@ impl FileProvider {
 
 		GetImageInfoResult {
 			arch: self.image.arch.clone(),
+			content_hash: self.content_hash.clone(),
 			entry: self.image.entry,
 			image_base: self.image.image_base,
 			sections: self
@@ -357,4 +371,13 @@ mod tests {
 			handle.join().expect("thread join");
 		}
 	}
+}
+
+/// Formats a digest as lowercase hex.
+fn hex_digest(bytes: &[u8]) -> String {
+	use std::fmt::Write;
+	bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut out, b| {
+		let _ = write!(out, "{b:02x}");
+		out
+	})
 }

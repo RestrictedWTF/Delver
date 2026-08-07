@@ -16,6 +16,7 @@ function session(sessionId: string): IDelverSession {
 	return {
 		sessionId,
 		targetPath: `C:\\samples\\${sessionId}.exe`,
+		contentHash: `hash-${sessionId}`,
 		image: {
 			image_id: 'image-0',
 			arch: 'X86_64',

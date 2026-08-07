@@ -482,6 +482,7 @@ import './contrib/opener/browser/opener.contribution.js';
 // DELVER: Delver services and contributions
 import './services/delver/common/delverFocusService.js';
 import './services/delver/common/delverSessionService.js';
+import './services/delver/common/delverInterpretationService.js';
 import './services/delver/browser/delverViewContainer.js';
 import './contrib/delverOverview/browser/delverOverview.contribution.js';
 import './contrib/delverFunctions/browser/delverFunctions.contribution.js';

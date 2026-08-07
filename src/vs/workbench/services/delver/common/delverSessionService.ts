@@ -17,6 +17,14 @@ export interface IDelverSession {
 	readonly sessionId: AnalysisSessionId;
 	readonly targetPath: string;
 	readonly image: IOpenImageResult;
+	/**
+	 * SHA-256 of the image's file bytes, lowercase hex.
+	 *
+	 * The identity interpretation anchors to. It is carried on the session
+	 * because every pane that wants to show an authored name needs it, and it
+	 * must not be re-derived per pane.
+	 */
+	readonly contentHash: string;
 }
 
 /**

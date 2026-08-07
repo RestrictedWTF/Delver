@@ -431,6 +431,10 @@
           "description": "Architecture string, e.g. \"x86_64\".",
           "type": "string"
         },
+        "content_hash": {
+          "description": "SHA-256 of the image's file bytes, lowercase hex.\n\nThis is the image's **identity**, and what interpretation anchors to (`Docs/architecture/data-model.md` section 4). An absolute address is not an identity — ASLR, a re-dump, or another process loading the same module moves it — so an authored name must be keyed to the bytes it describes, never to where they happened to sit.",
+          "type": "string"
+        },
         "entry": {
           "description": "Image entry point virtual address.",
           "type": "string"
@@ -490,6 +494,7 @@
       },
       "required": [
         "arch",
+        "content_hash",
         "entry",
         "export_count",
         "function_seed_count",
