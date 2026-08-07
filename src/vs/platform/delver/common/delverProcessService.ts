@@ -5,17 +5,33 @@
 
 import { Event } from '../../../base/common/event.js';
 import { createDecorator } from '../../instantiation/common/instantiation.js';
-import { IAddressSpace } from './address.js';
-import { TargetCapability } from './capabilities.js';
-import { IGetImageInfoResult } from './protocol.generated.js';
-import { ITargetDescriptor, TargetConfig } from './target.js';
+import {
+	IAddressSpaceWire,
+	IGetImageInfoResult,
+	ITargetDescriptorWire,
+	TargetCapabilityWire,
+} from './protocol.generated.js';
+import { TargetConfig } from './target.js';
 
 export const IDelverProcessService = createDecorator<IDelverProcessService>('delverProcessService');
 
+/**
+ * Target state as it crosses the shared-process → renderer boundary.
+ *
+ * **This is wire-shaped on purpose.** VS Code's IPC serializes object payloads
+ * with `JSON.stringify`, which throws on `bigint` — and the throw happens
+ * inside the channel server's promise callback, so no response is ever sent
+ * and the caller's promise never settles. A domain `IAddressSpace` here (its
+ * `size` is a `bigint`) hangs `attach()` forever with no error anywhere.
+ *
+ * So this boundary follows the same rule as DTP: u64 travels as a "0x..."
+ * string (ADR 0001) and is converted to `bigint` on the renderer edge via
+ * `addressSpaceFromWire`.
+ */
 export interface IDelverTargetSnapshot {
-	readonly descriptor: ITargetDescriptor;
-	readonly capabilities: readonly TargetCapability[];
-	readonly spaces: readonly IAddressSpace[];
+	readonly descriptor: ITargetDescriptorWire;
+	readonly capabilities: readonly TargetCapabilityWire[];
+	readonly spaces: readonly IAddressSpaceWire[];
 }
 
 /**

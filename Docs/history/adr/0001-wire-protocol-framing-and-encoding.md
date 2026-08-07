@@ -53,6 +53,16 @@ rather than a correlation table.
 **Numbers.** Every `u64` on the wire — addresses, lengths, offsets — is a
 `"0x..."` **string**. Never a JSON number.
 
+**Scope — amended 2026-08-07.** "The wire" is *every* process boundary, not
+only DTP. In particular it includes the shared-process → renderer Electron IPC
+that carries target state into the workbench. VS Code serializes object payloads
+there with `JSON.stringify`, which throws on `bigint`; the throw happens inside
+the channel server's promise callback, so **no response is ever sent and the
+caller's promise never settles.** There is no error, no rejection, and no
+timeout — the UI simply never updates. Types crossing that boundary are
+therefore wire-shaped (`size: string`), and conversion to `bigint` happens on
+the renderer edge. See `platform/delver/common/wire.ts`.
+
 **Errors.** JSON-RPC error objects. Standard codes for protocol failures, a
 Delver range for domain failures carrying `data: { kind, detail }`. Initial
 kinds: `ProtocolVersionMismatch`, `NotAttached`, `InvalidAddress`,
@@ -86,6 +96,10 @@ error. `UnreadableMemory` is raised only when nothing was readable.
   `#[serde(with = "hex_u64")]` on every `u64` field — easy to forget, so this is
   covered by a round-trip test asserting `0x7FFFFFFFFFFFFFFF` survives
   serialize → JSON → deserialize.
+- A domain type carrying `bigint` can be introduced into an IPC payload without
+  failing to compile, and the symptom is a silent hang rather than an error.
+  `providerProcess.test.ts` guards the one such type by serializing it with the
+  real IPC `serialize`; any new cross-boundary type needs the same guard.
 - Hex strings are roughly 2.5× the bytes of a raw JSON number. Irrelevant in
   practice: addresses are a tiny fraction of payload, and bulk data is in
   frames.

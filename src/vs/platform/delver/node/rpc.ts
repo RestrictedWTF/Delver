@@ -31,6 +31,14 @@ export interface IRpcTransport {
 	readonly writer: Writable;
 }
 
+/**
+ * Buffered reader over the transport.
+ *
+ * **Single-reader only.** `resolveNext` holds one waiter, so a second concurrent
+ * read would overwrite the first and leave it parked forever. `DelverRpcClient`
+ * guarantees this by serializing calls; anything reading the transport directly
+ * has to preserve it.
+ */
 class StreamReader {
 	private buffer = Buffer.alloc(0);
 	private resolveNext?: () => void;
@@ -102,6 +110,19 @@ export class DelverRpcClient {
 	private readonly writer: Writable;
 	private nextId = 1;
 
+	/**
+	 * Tail of the in-flight call chain.
+	 *
+	 * The transport is a single ordered stream and a response's binary frames
+	 * follow it immediately (ADR 0001), so replies can only be read in the order
+	 * the requests went out. Two overlapping `call()`s would therefore each read
+	 * whichever reply arrived first — the caller of request 3 consuming the
+	 * response to request 2. Serializing here is what makes the client safe for
+	 * concurrent callers, which is the normal case as soon as more than one view
+	 * is asking for data.
+	 */
+	private tail: Promise<unknown> = Promise.resolve();
+
 	constructor(transport: IRpcTransport) {
 		this.reader = new StreamReader(transport.reader);
 		this.writer = transport.writer;
@@ -136,13 +157,27 @@ export class DelverRpcClient {
 	 * Sends a request and returns the response. Binary frames referenced by the
 	 * response are consumed and returned alongside the JSON.
 	 */
-	async call(method: string, params: unknown, expectedFrames = 0): Promise<IRpcMessage> {
+	call(method: string, params: unknown, expectedFrames = 0): Promise<IRpcMessage> {
+		const result = this.tail.then(() => this.sendAndReceive(method, params, expectedFrames));
+
+		// The chain must survive a failed call. Without swallowing the rejection
+		// here, one error would reject every request queued behind it — and would
+		// also surface as an unhandled rejection when a caller already handled it.
+		this.tail = result.then(() => undefined, () => undefined);
+
+		return result;
+	}
+
+	private async sendAndReceive(method: string, params: unknown, expectedFrames: number): Promise<IRpcMessage> {
 		const id = this.nextId++;
 		const request: IRequest = { id, method, params };
 		await this.writeJson(request);
 
 		const json = await this.readJson();
 		if (json.id !== id) {
+			// Now that calls are serialized this means the stream itself is out of
+			// step — an unsolicited message, or a server that answered out of
+			// order. Either way the connection can no longer be trusted.
 			throw new Error(`RPC id mismatch: expected ${id}, got ${json.id}`);
 		}
 

@@ -5,8 +5,6 @@
 
 import { Emitter } from '../../../base/common/event.js';
 import { IDelverProcessService, IDelverTargetSnapshot } from '../common/delverProcessService.js';
-import { IAddressSpace } from '../common/address.js';
-import { TargetCapability } from '../common/capabilities.js';
 import { IGetImageInfoResult } from '../common/protocol.generated.js';
 import { TargetConfig } from '../common/target.js';
 import { DelverProviderProcess } from './providerProcess.js';
@@ -22,7 +20,7 @@ export class DelverProcessService implements IDelverProcessService {
 	async attach(config: TargetConfig): Promise<IDelverTargetSnapshot> {
 		this.detach();
 		this.target = await DelverProviderProcess.attach(config);
-		const snapshot = snapshotFromInit(this.target.descriptor, this.target.capabilities, this.target.spaces);
+		const snapshot = this.target.snapshot;
 		this._onDidChangeActiveTarget.fire(snapshot);
 		return snapshot;
 	}
@@ -41,12 +39,4 @@ export class DelverProcessService implements IDelverProcessService {
 			this._onDidChangeActiveTarget.fire(undefined);
 		}
 	}
-}
-
-function snapshotFromInit(
-	descriptor: { name: string; kind: string },
-	capabilities: readonly TargetCapability[],
-	spaces: readonly IAddressSpace[],
-): IDelverTargetSnapshot {
-	return { descriptor, capabilities, spaces };
 }

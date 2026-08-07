@@ -5,18 +5,16 @@
 
 import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
 import { DelverRpcClient } from './rpc.js';
-import { AddressSpaceKind, IAddressSpace } from '../common/address.js';
+import { IAddressSpace } from '../common/address.js';
 import { TargetCapability } from '../common/capabilities.js';
+import { IDelverTargetSnapshot } from '../common/delverProcessService.js';
 import { IDelverTarget, ITargetDescriptor, TargetConfig } from '../common/target.js';
 import {
-	AddressSpaceKindWire,
-	IAddressSpaceWire,
 	IGetImageInfoResult,
 	IInitializeResult,
 	IListSpacesResult,
-	ITargetDescriptorWire,
-	TargetCapabilityWire,
 } from '../common/protocol.generated.js';
+import { addressSpaceFromWire, capabilitiesFromWire, descriptorFromWire } from '../common/wire.js';
 import { resolveBinary } from './delverBinaries.js';
 
 /**
@@ -31,6 +29,13 @@ export class DelverProviderProcess implements IDelverTarget {
 	readonly capabilities: readonly TargetCapability[];
 	readonly spaces: readonly IAddressSpace[];
 
+	/**
+	 * The same state in the form that crosses the process boundary. Kept as it
+	 * arrived rather than converted back from the domain values, so nothing has
+	 * to round-trip a `bigint` through a string.
+	 */
+	readonly snapshot: IDelverTargetSnapshot;
+
 	private constructor(
 		child: ChildProcessWithoutNullStreams,
 		rpc: DelverRpcClient,
@@ -39,8 +44,13 @@ export class DelverProviderProcess implements IDelverTarget {
 		this.child = child;
 		this.rpc = rpc;
 		this.descriptor = descriptorFromWire(init.target);
-		this.capabilities = Object.freeze(init.capabilities.map(capFromWire));
-		this.spaces = Object.freeze(init.spaces.map(spaceFromWire));
+		this.capabilities = Object.freeze(capabilitiesFromWire(init.capabilities));
+		this.spaces = Object.freeze(init.spaces.map(addressSpaceFromWire));
+		this.snapshot = Object.freeze({
+			descriptor: init.target,
+			capabilities: Object.freeze([...init.capabilities]),
+			spaces: Object.freeze([...init.spaces]),
+		});
 
 		child.on('exit', (code, signal) => {
 			this.disposed = true;
@@ -56,18 +66,30 @@ export class DelverProviderProcess implements IDelverTarget {
 	 */
 	static async attach(config: TargetConfig): Promise<DelverProviderProcess> {
 		const { args, binaryName } = commandLineFor(config);
-		const binaryPath = resolveBinary(binaryName);
-
-		const child = spawn(binaryPath, args, {
+		const child = spawn(resolveBinary(binaryName), args, {
 			stdio: ['pipe', 'pipe', 'pipe'],
 		});
+
+		// The provider's stderr is the only place a spawn or parse failure is
+		// explained, and nothing else is reading it.
+		child.stderr.on('data', data => {
+			console.error(`[${binaryName}] ${data.toString().trimEnd()}`);
+		});
+
+		// A spawn failure — missing binary, no execute permission — arrives as an
+		// 'error' event rather than a non-zero exit. Unhandled it takes down the
+		// host process, and the handshake below would never settle either way,
+		// so it has to race the handshake instead of being left to chance.
+		const spawnFailed = new Promise<never>((_, reject) => {
+			child.once('error', err => reject(new Error(`Could not start ${binaryName}: ${err.message}`)));
+		});
+		spawnFailed.catch(() => undefined); // Observed only if it wins the race.
 
 		const rpc = new DelverRpcClient({ reader: child.stdout, writer: child.stdin });
 
 		try {
-			const { json } = await rpc.call('initialize', null);
-			const init = json.result as IInitializeResult;
-			return new DelverProviderProcess(child, rpc, init);
+			const { json } = await Promise.race([rpc.call('initialize', null), spawnFailed]);
+			return new DelverProviderProcess(child, rpc, json.result as IInitializeResult);
 		} catch (e) {
 			child.kill();
 			throw e;
@@ -80,7 +102,7 @@ export class DelverProviderProcess implements IDelverTarget {
 	async listSpaces(): Promise<IAddressSpace[]> {
 		const { json } = await this.rpc.call('listSpaces', null);
 		const result = json.result as IListSpacesResult;
-		return result.spaces.map(spaceFromWire);
+		return result.spaces.map(addressSpaceFromWire);
 	}
 
 	/**
@@ -125,37 +147,3 @@ function commandLineFor(config: TargetConfig): { binaryName: string; args: strin
 	}
 }
 
-function descriptorFromWire(wire: ITargetDescriptorWire): ITargetDescriptor {
-	return { name: wire.name, kind: wire.kind };
-}
-
-function capFromWire(wire: TargetCapabilityWire): TargetCapability {
-	switch (wire) {
-		case TargetCapabilityWire.ListSpaces: return TargetCapability.ListSpaces;
-		case TargetCapabilityWire.GetImageInfo: return TargetCapability.GetImageInfo;
-		case TargetCapabilityWire.ReadMemory: return TargetCapability.ReadMemory;
-		case TargetCapabilityWire.GetImports: return TargetCapability.GetImports;
-		case TargetCapabilityWire.GetExports: return TargetCapability.GetExports;
-		case TargetCapabilityWire.GetFunctionSeeds: return TargetCapability.GetFunctionSeeds;
-		case TargetCapabilityWire.Analyze: return TargetCapability.Analyze;
-		default: throw new Error(`Unknown capability: ${wire}`);
-	}
-}
-
-function spaceFromWire(wire: IAddressSpaceWire): IAddressSpace {
-	return {
-		id: wire.id,
-		kind: kindFromWire(wire.kind),
-		pointerWidth: wire.pointer_width,
-		size: BigInt(wire.size),
-		translatesTo: wire.translates_to,
-	};
-}
-
-function kindFromWire(wire: AddressSpaceKindWire): AddressSpaceKind {
-	switch (wire) {
-		case AddressSpaceKindWire.File: return AddressSpaceKind.File;
-		case AddressSpaceKindWire.Image: return AddressSpaceKind.Image;
-		default: throw new Error(`Unknown address space kind: ${wire}`);
-	}
-}
