@@ -131,6 +131,8 @@ import { IDelverProcessService } from '../../../platform/delver/common/delverPro
 import { DelverProcessService } from '../../../platform/delver/node/delverProcessService.js';
 import { IDelverAnalysisService } from '../../../platform/delver/common/delverAnalysisService.js';
 import { DelverAnalysisService } from '../../../platform/delver/node/delverAnalysisService.js';
+import { IDelverInterpretationStoreService } from '../../../platform/delver/common/delverInterpretationStoreService.js';
+import { DelverInterpretationStoreService } from '../../../platform/delver/node/delverInterpretationStoreService.js';
 import { IExtensionGalleryManifestService } from '../../../platform/extensionManagement/common/extensionGalleryManifest.js';
 import { ExtensionGalleryManifestIPCService } from '../../../platform/extensionManagement/common/extensionGalleryManifestServiceIpc.js';
 import { ISharedWebContentExtractorService } from '../../../platform/webContentExtractor/common/webContentExtractor.js';
@@ -425,6 +427,7 @@ class SharedProcessMain extends Disposable implements IClientConnectionFilter {
 		// Delver
 		services.set(IDelverProcessService, new SyncDescriptor(DelverProcessService));
 		services.set(IDelverAnalysisService, new SyncDescriptor(DelverAnalysisService));
+		services.set(IDelverInterpretationStoreService, new SyncDescriptor(DelverInterpretationStoreService));
 
 		// SSH Remote Agent Host
 		services.set(ISSHRemoteAgentHostMainService, new SyncDescriptor(SSHRemoteAgentHostMainService, undefined, true));
@@ -499,6 +502,9 @@ class SharedProcessMain extends Disposable implements IClientConnectionFilter {
 
 		const delverAnalysisChannel = ProxyChannel.fromService(accessor.get(IDelverAnalysisService), this._store);
 		this.server.registerChannel('delverAnalysis', delverAnalysisChannel);
+
+		const delverInterpretationStoreChannel = ProxyChannel.fromService(accessor.get(IDelverInterpretationStoreService), this._store);
+		this.server.registerChannel('delverInterpretationStore', delverInterpretationStoreChannel);
 
 		// Tunnel
 		const sharedProcessTunnelChannel = ProxyChannel.fromService(accessor.get(ISharedProcessTunnelService), this._store);

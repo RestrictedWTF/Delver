@@ -240,6 +240,13 @@ Inline in the listing, single keystroke to start, `Esc` to abandon. Attributed
 and undoable. Names merge into listing rows server-side per E3.
 *Done when:* 30 renames survive a close/reopen and "revert this author" works.
 
+**Implemented UI decision (2026-08-08):** names and comments are owned by the
+instruction row, never synthetic analysis rows. A label sits above the
+instruction; its comment follows the operands on the instruction line. Both are
+bounded, and newlines imported from a log are folded for display without changing
+the stored value. This keeps analysis row ordinals exact and makes height depend
+only on the optional label line.
+
 ### Stage G — supporting views
 
 **G1 · Strings view** — S · filter, sort, xref-to

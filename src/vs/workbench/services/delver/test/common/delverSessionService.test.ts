@@ -8,6 +8,7 @@ import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/tes
 import { getSingletonServiceDescriptors } from '../../../../../platform/instantiation/common/extensions.js';
 import { IDelverAnalysisService } from '../../../../../platform/delver/common/delverAnalysisService.js';
 import { MockContextKeyService } from '../../../../../platform/keybinding/test/common/mockKeybindingService.js';
+import { IDelverInterpretationService } from '../../common/delverInterpretationService.js';
 import {
 	DelverSessionService,
 	IDelverSessionService,
@@ -17,6 +18,7 @@ import {
 class FakeAnalysisService implements Partial<IDelverAnalysisService> {
 	readonly opened: string[] = [];
 	readonly closed: string[] = [];
+	contentHash: string | undefined = 'a'.repeat(64);
 	private next = 1;
 
 	async openImage(config: { kind: 'file'; path: string }) {
@@ -34,8 +36,8 @@ class FakeAnalysisService implements Partial<IDelverAnalysisService> {
 		};
 	}
 
-	async imageInfo(sessionId: string) {
-		return { content_hash: `hash-of-${sessionId}` } as never;
+	async imageInfo(_sessionId: string) {
+		return { content_hash: this.contentHash } as never;
 	}
 
 	async closeImage(sessionId: string) {
@@ -43,13 +45,27 @@ class FakeAnalysisService implements Partial<IDelverAnalysisService> {
 	}
 }
 
+class FakeInterpretationService implements Partial<IDelverInterpretationService> {
+	readonly loaded: string[] = [];
+	loadError: Error | undefined;
+
+	async load(contentHash: string): Promise<void> {
+		this.loaded.push(contentHash);
+		if (this.loadError) {
+			throw this.loadError;
+		}
+	}
+}
+
 function createService(store: Pick<ReturnType<typeof ensureNoDisposablesAreLeakedInTestSuite>, 'add'>) {
 	const analysis = new FakeAnalysisService();
+	const interpretation = new FakeInterpretationService();
 	const service = store.add(new DelverSessionService(
 		analysis as unknown as IDelverAnalysisService,
+		interpretation as unknown as IDelverInterpretationService,
 		new MockContextKeyService(),
 	));
-	return { service, analysis };
+	return { service, analysis, interpretation };
 }
 
 suite('DelverSessionService', () => {
@@ -64,15 +80,39 @@ suite('DelverSessionService', () => {
 	});
 
 	test('opening a target publishes it with its content hash', async () => {
-		const { service } = createService(store);
+		const { service, interpretation } = createService(store);
 		const seen: (string | undefined)[] = [];
 		store.add(service.onDidChangeActiveSession(s => seen.push(s?.targetPath)));
 
 		const session = await service.openTarget('C:\\samples\\a.exe');
 
 		assert.deepStrictEqual(
-			{ path: session.targetPath, hash: session.contentHash, seen },
-			{ path: 'C:\\samples\\a.exe', hash: 'hash-of-session-1', seen: ['C:\\samples\\a.exe'] },
+			{ path: session.targetPath, hash: session.contentHash, loaded: interpretation.loaded, seen },
+			{ path: 'C:\\samples\\a.exe', hash: 'a'.repeat(64), loaded: ['a'.repeat(64)], seen: ['C:\\samples\\a.exe'] },
+		);
+	});
+
+	test('a stale provider without a content hash closes with an actionable error', async () => {
+		const { service, analysis } = createService(store);
+		analysis.contentHash = undefined;
+
+		await assert.rejects(() => service.openTarget('C:\\samples\\a.exe'), /Rebuild or update provider-file/);
+
+		assert.deepStrictEqual(
+			{ active: service.activeSession, closed: analysis.closed },
+			{ active: undefined, closed: ['session-1'] },
+		);
+	});
+
+	test('a failed interpretation replay closes the analysis session without publishing it', async () => {
+		const { service, analysis, interpretation } = createService(store);
+		interpretation.loadError = new Error('bad log');
+
+		await assert.rejects(() => service.openTarget('C:\\samples\\a.exe'), /bad log/);
+
+		assert.deepStrictEqual(
+			{ active: service.activeSession, closed: analysis.closed },
+			{ active: undefined, closed: ['session-1'] },
 		);
 	});
 

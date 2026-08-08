@@ -33,6 +33,7 @@ import { DelverListingEditor } from './delverListingEditor.js';
 import { DELVER_LISTING_EDITOR_ID, DelverListingInput } from './delverListingInput.js';
 import {
 	FollowAction,
+	CommentAction,
 	GoToAddressAction,
 	GoToFunctionAction,
 	NavigateBackAction,
@@ -41,6 +42,7 @@ import {
 	ReturnAction,
 	TogglePinAction,
 } from './delverListingNavigation.js';
+import { ExportInterpretationAction, ImportInterpretationAction } from './delverInterpretationActions.js';
 
 Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
 	EditorPaneDescriptor.create(DelverListingEditor, DELVER_LISTING_EDITOR_ID, localize2('delverListingEditor', "Delver Listing").value),
@@ -175,3 +177,6 @@ registerAction2(TogglePinAction);
 registerAction2(FollowAction);
 registerAction2(ReturnAction);
 registerAction2(RenameAction);
+registerAction2(CommentAction);
+registerAction2(ExportInterpretationAction);
+registerAction2(ImportInterpretationAction);

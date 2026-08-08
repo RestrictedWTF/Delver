@@ -13,6 +13,11 @@ import {
 	IInterpretationAt,
 	InterpretationLog,
 } from '../../../../platform/delver/common/interpretation.js';
+import {
+	editFromWire,
+	editToWire,
+	IDelverInterpretationStoreService,
+} from '../../../../platform/delver/common/delverInterpretationStoreService.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 
@@ -34,6 +39,9 @@ export interface IDelverInterpretationService {
 
 	readonly onDidChange: Event<IInterpretationChangeEvent>;
 
+	/** Loads and replays the stored log before an image is published. */
+	load(contentHash: string): Promise<void>;
+
 	/** Authored name at `anchor`, if any. */
 	nameAt(anchor: Anchor): string | undefined;
 
@@ -49,7 +57,13 @@ export interface IDelverInterpretationService {
 	namesFor(contentHash: string, rvas: readonly bigint[]): Map<bigint, string>;
 
 	/** Records an edit. Appends to the log; nothing is overwritten. */
-	edit(anchor: Anchor, op: EditOp, value: string, author?: IAuthor): IEdit;
+	edit(anchor: Anchor, op: EditOp, value: string, author?: IAuthor): Promise<IEdit>;
+
+	/** Exports one image's complete append-only log. */
+	exportTo(contentHash: string, destinationPath: string): Promise<number>;
+
+	/** Imports and materializes edits authored for this exact image. */
+	importFrom(contentHash: string, sourcePath: string): Promise<number>;
 
 	/** The full log for one image, oldest first. */
 	logFor(contentHash: string): readonly IEdit[];
@@ -71,6 +85,32 @@ export class DelverInterpretationService extends Disposable implements IDelverIn
 	readonly onDidChange = this._onDidChange.event;
 
 	private readonly logs = new Map<string, InterpretationLog>();
+	private readonly loading = new Map<string, Promise<void>>();
+	private readonly edits = new Map<string, Promise<void>>();
+
+	constructor(
+		@IDelverInterpretationStoreService private readonly storeService: IDelverInterpretationStoreService,
+	) {
+		super();
+	}
+
+	load(contentHash: string): Promise<void> {
+		if (this.logs.has(contentHash)) {
+			return Promise.resolve();
+		}
+		let loading = this.loading.get(contentHash);
+		if (!loading) {
+			loading = this.storeService.load(contentHash).then(edits => {
+				this.logs.set(contentHash, InterpretationLog.from(edits.map(editFromWire)));
+			});
+			this.loading.set(contentHash, loading);
+			void loading.then(
+				() => this.loading.delete(contentHash),
+				() => this.loading.delete(contentHash),
+			);
+		}
+		return loading;
+	}
 
 	nameAt(anchor: Anchor): string | undefined {
 		return this.logs.get(anchor.contentHash)?.nameAt(anchor);
@@ -95,19 +135,57 @@ export class DelverInterpretationService extends Disposable implements IDelverIn
 		return names;
 	}
 
-	edit(anchor: Anchor, op: EditOp, value: string, author: IAuthor = LOCAL_AUTHOR): IEdit {
-		let log = this.logs.get(anchor.contentHash);
-		if (!log) {
-			log = new InterpretationLog();
-			this.logs.set(anchor.contentHash, log);
-		}
-		const edit = log.append({ author, anchor, op, value });
-		this._onDidChange.fire({ edit });
-		return edit;
+	edit(anchor: Anchor, op: EditOp, value: string, author: IAuthor = LOCAL_AUTHOR): Promise<IEdit> {
+		return this.queueEdit(anchor.contentHash, async () => {
+			await this.load(anchor.contentHash);
+			const log = this.logs.get(anchor.contentHash)!;
+			const next = InterpretationLog.from(log.log);
+			const edit = next.append({ author, anchor, op, value });
+			await this.storeService.append(anchor.contentHash, editToWire(edit));
+			this.logs.set(anchor.contentHash, next);
+			this._onDidChange.fire({ edit });
+			return edit;
+		});
+	}
+
+	exportTo(contentHash: string, destinationPath: string): Promise<number> {
+		return this.queueEdit(contentHash, async () => {
+			await this.load(contentHash);
+			return this.storeService.exportLog(contentHash, destinationPath);
+		});
+	}
+
+	importFrom(contentHash: string, sourcePath: string): Promise<number> {
+		return this.queueEdit(contentHash, async () => {
+			await this.load(contentHash);
+			const imported = (await this.storeService.importLog(contentHash, sourcePath)).map(editFromWire);
+			if (imported.length === 0) {
+				return 0;
+			}
+			const existing = this.logs.get(contentHash)?.log ?? [];
+			this.logs.set(contentHash, InterpretationLog.from([...existing, ...imported]));
+			for (const edit of imported) {
+				this._onDidChange.fire({ edit });
+			}
+			return imported.length;
+		});
 	}
 
 	logFor(contentHash: string): readonly IEdit[] {
 		return this.logs.get(contentHash)?.log ?? [];
+	}
+
+	private queueEdit<T>(contentHash: string, operation: () => Promise<T>): Promise<T> {
+		const previous = this.edits.get(contentHash) ?? Promise.resolve();
+		const result = previous.then(operation, operation);
+		const tail = result.then(() => undefined, () => undefined);
+		this.edits.set(contentHash, tail);
+		void tail.finally(() => {
+			if (this.edits.get(contentHash) === tail) {
+				this.edits.delete(contentHash);
+			}
+		});
+		return result;
 	}
 }
 

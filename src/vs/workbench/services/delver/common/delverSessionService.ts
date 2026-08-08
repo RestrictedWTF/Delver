@@ -10,9 +10,11 @@ import {
 	IDelverAnalysisService,
 } from '../../../../platform/delver/common/delverAnalysisService.js';
 import { IOpenImageResult } from '../../../../platform/delver/common/protocol.generated.js';
+import { isContentHash } from '../../../../platform/delver/common/delverInterpretationStoreService.js';
 import { IContextKey, IContextKeyService, RawContextKey } from '../../../../platform/contextkey/common/contextkey.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
+import { IDelverInterpretationService } from './delverInterpretationService.js';
 
 export const IDelverSessionService = createDecorator<IDelverSessionService>('delverSessionService');
 
@@ -87,6 +89,7 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 
 	constructor(
 		@IDelverAnalysisService private readonly analysisService: IDelverAnalysisService,
+		@IDelverInterpretationService private readonly interpretationService: IDelverInterpretationService,
 		@IContextKeyService contextKeyService: IContextKeyService,
 	) {
 		super();
@@ -116,12 +119,23 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 		await this.closeTarget();
 
 		const handle = await this.analysisService.openImage({ kind: 'file', path: targetPath });
-		const info = await this.analysisService.imageInfo(handle.sessionId);
+		let contentHash: string;
+		try {
+			const info = await this.analysisService.imageInfo(handle.sessionId);
+			if (!isContentHash(info.content_hash)) {
+				throw new Error('The target provider did not return a valid content hash. Rebuild or update provider-file.');
+			}
+			contentHash = info.content_hash;
+			await this.interpretationService.load(contentHash);
+		} catch (error) {
+			await this.analysisService.closeImage(handle.sessionId).catch(() => undefined);
+			throw error;
+		}
 		const session: IDelverSession = {
 			sessionId: handle.sessionId,
 			targetPath,
 			image: handle.image,
-			contentHash: info.content_hash,
+			contentHash,
 		};
 
 		this._activeSession = session;

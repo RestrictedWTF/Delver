@@ -7,6 +7,8 @@ import { Codicon } from '../../../../base/common/codicons.js';
 import { KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { Action2, MenuId } from '../../../../platform/actions/common/actions.js';
+import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
+import { InputFocusedContextKey } from '../../../../platform/contextkey/common/contextkeys.js';
 import { IDelverAnalysisService } from '../../../../platform/delver/common/delverAnalysisService.js';
 import { IFunctionWire } from '../../../../platform/delver/common/protocol.generated.js';
 import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
@@ -19,9 +21,8 @@ import {
 	IDelverFocusService,
 } from '../../../services/delver/common/delverFocusService.js';
 import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
-import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
 import { EditOp } from '../../../../platform/delver/common/interpretation.js';
-import { placeholderFunctionName } from '../../../../platform/delver/common/naming.js';
+import { editInterpretationAt } from '../../../services/delver/browser/delverInterpretationEditing.js';
 import {
 	DELVER_LISTING_PINNED,
 	DELVER_NAVIGATION_ORIGIN,
@@ -60,10 +61,6 @@ export function parseAddress(input: string): bigint | undefined {
 	} catch {
 		return undefined;
 	}
-}
-
-function toHex(address: bigint): string {
-	return `0x${address.toString(16).toUpperCase()}`;
 }
 
 export class GoToAddressAction extends Action2 {
@@ -314,38 +311,42 @@ export class RenameAction extends Action2 {
 	}
 
 	async run(accessor: ServicesAccessor): Promise<void> {
-		const quickInputService = accessor.get(IQuickInputService);
-		const sessionService = accessor.get(IDelverSessionService);
-		const interpretationService = accessor.get(IDelverInterpretationService);
 		const focusService = accessor.get(IDelverFocusService);
 		const notificationService = accessor.get(INotificationService);
 
-		const session = sessionService.activeSession;
 		const location = focusService.focus.location;
-		if (!session || !location) {
+		if (!location) {
 			notificationService.info(localize('delverNothingToRename', "Select an address to rename."));
 			return;
 		}
+		await editInterpretationAt(accessor, location.address, EditOp.Rename);
+	}
+}
 
-		const anchor = {
-			kind: 'image' as const,
-			contentHash: session.contentHash,
-			rva: location.address,
-		};
-
-		// The placeholder is shown, never prefilled: typing over `sub_140001000`
-		// is easy to skip, and an accidentally accepted placeholder would enter
-		// the log as though an analyst had chosen it.
-		const value = await quickInputService.input({
-			prompt: localize('delverRenamePrompt', "Name for {0}", toHex(location.address)),
-			value: interpretationService.nameAt(anchor) ?? '',
-			placeHolder: placeholderFunctionName(location.address),
+/** Adds or clears the inline comment on the selected instruction. */
+export class CommentAction extends Action2 {
+	constructor() {
+		super({
+			id: 'delver.interpretation.comment',
+			title: localize2('delverSetComment', 'Set Comment'),
+			category: localize2('delverCategory', 'Delver'),
+			f1: true,
+			precondition: LISTING_ACTIVE,
+			keybinding: {
+				when: ContextKeyExpr.and(LISTING_ACTIVE, ContextKeyExpr.not(InputFocusedContextKey)),
+				primary: KeyCode.Semicolon,
+				weight: KeybindingWeight.EditorContrib,
+			},
 		});
+	}
 
-		if (value === undefined) {
-			return; // dismissed, which is not the same as cleared
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const location = accessor.get(IDelverFocusService).focus.location;
+		if (!location) {
+			accessor.get(INotificationService).info(localize('delverNothingToComment', "Select an instruction to comment."));
+			return;
 		}
-		interpretationService.edit(anchor, EditOp.Rename, value.trim());
+		await editInterpretationAt(accessor, location.address, EditOp.Comment);
 	}
 }
 
@@ -379,5 +380,3 @@ export class TogglePinAction extends Action2 {
 		}
 	}
 }
-
-export { toHex };

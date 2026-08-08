@@ -3,28 +3,34 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { Codicon } from '../../../../base/common/codicons.js';
 import { onUnexpectedError } from '../../../../base/common/errors.js';
 import { localize, localize2 } from '../../../../nls.js';
+import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
+import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
 import { IDelverAnalysisService } from '../../../../platform/delver/common/delverAnalysisService.js';
+import { EditOp } from '../../../../platform/delver/common/interpretation.js';
+import { IFunctionWire } from '../../../../platform/delver/common/protocol.generated.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { TreeView, TreeViewPane } from '../../../browser/parts/views/treeView.js';
 import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
-import { Extensions as ViewExtensions, ITreeViewDescriptor, IViewsRegistry } from '../../../common/views.js';
+import { Extensions as ViewExtensions, ITreeViewDescriptor, IViewsRegistry, TreeViewItemHandleArg } from '../../../common/views.js';
 import { registerDelverView } from '../../../services/delver/browser/delverViewContainer.js';
+import { editInterpretationAt } from '../../../services/delver/browser/delverInterpretationEditing.js';
 import {
 	FocusReason,
 	IDelverFocusService,
 } from '../../../services/delver/common/delverFocusService.js';
 import { DELVER_TARGET_OPEN, IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
-import { IFunctionWire } from '../../../../platform/delver/common/protocol.generated.js';
 import {
 	DELVER_FUNCTIONS_OPEN_COMMAND,
 	DELVER_FUNCTIONS_VIEW_ID,
 	DelverFunctionsTreeDataProvider,
+	functionRvaFromHandle,
 } from './delverFunctionsView.js';
 
 const viewName = localize2('delverFunctions', "Functions");
@@ -148,3 +154,56 @@ CommandsRegistry.registerCommand(DELVER_FUNCTIONS_OPEN_COMMAND, (accessor: Servi
 		FocusReason.User,
 	);
 });
+
+class RenameFunctionAction extends Action2 {
+	constructor() {
+		super({
+			id: 'delver.functions.rename',
+			title: localize2('delverRenameFunction', 'Rename'),
+			icon: Codicon.edit,
+			menu: {
+				id: MenuId.ViewItemContext,
+				when: ContextKeyExpr.and(
+					ContextKeyExpr.equals('view', DELVER_FUNCTIONS_VIEW_ID),
+					ContextKeyExpr.equals('viewItem', 'delver-function'),
+				),
+				group: 'inline',
+			},
+		});
+	}
+
+	async run(accessor: ServicesAccessor, handle: TreeViewItemHandleArg): Promise<void> {
+		const rva = functionRvaFromHandle(handle.$treeItemHandle);
+		if (rva !== undefined) {
+			await editInterpretationAt(accessor, rva, EditOp.Rename);
+		}
+	}
+}
+
+class CommentFunctionAction extends Action2 {
+	constructor() {
+		super({
+			id: 'delver.functions.comment',
+			title: localize2('delverCommentFunction', 'Set Comment'),
+			icon: Codicon.comment,
+			menu: {
+				id: MenuId.ViewItemContext,
+				when: ContextKeyExpr.and(
+					ContextKeyExpr.equals('view', DELVER_FUNCTIONS_VIEW_ID),
+					ContextKeyExpr.equals('viewItem', 'delver-function'),
+				),
+				group: '1_interpretation',
+			},
+		});
+	}
+
+	async run(accessor: ServicesAccessor, handle: TreeViewItemHandleArg): Promise<void> {
+		const rva = functionRvaFromHandle(handle.$treeItemHandle);
+		if (rva !== undefined) {
+			await editInterpretationAt(accessor, rva, EditOp.Comment);
+		}
+	}
+}
+
+registerAction2(RenameFunctionAction);
+registerAction2(CommentFunctionAction);

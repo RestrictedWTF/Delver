@@ -136,13 +136,15 @@ hosting a `WorkbenchTable` with `ITableRenderer`s per column. Read it before
 writing anything. Delver's listing is that pattern with:
 
 - a paged, cancellable data source over `IAnalysisService` rather than DAP
-- columns: breakpoint gutter, address, bytes, mnemonic, operands, comment,
-  xref margin
+- columns: breakpoint gutter, address, bytes, mnemonic, operands, xref margin;
+  an authored label is a bounded line owned by the instruction row, while its
+  comment follows the operands on the instruction line
 - placeholder rows while a page is in flight (never block the scroll)
 - the caveat noted in that file — `WorkbenchTable` doesn't do dynamic row
-  heights — which matters if you want inline source/pseudocode interleaving.
-  If interleaving is required, budget for a custom list delegate rather than
-  discovering this late.
+  heights — which matters if you want wrapped source/pseudocode interleaving.
+  Delver's single-line labels have deterministic heights and fit the existing
+  per-element delegate. Wrapped or unbounded interleaving
+  still requires a custom list delegate and must be budgeted explicitly.
 
 Build it as an `EditorInput` (`DelverListingInput`, keyed by target + space +
 anchor) so it gets tabs, splits, and history automatically.

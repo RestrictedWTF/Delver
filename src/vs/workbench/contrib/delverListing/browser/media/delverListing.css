@@ -32,57 +32,45 @@
 }
 
 .delver-listing-instruction {
-	display: flex;
-	gap: 1ch;
 	font-family: var(--monaco-monospace-font);
 	font-size: 12px;
 	white-space: pre;
 	overflow: hidden;
-}
-
-/*
- * A function's first instruction is two lines tall: the name on its own line,
- * the instruction beneath it. That is a real header line sharing the row's
- * address and ordinal, rather than an inserted row — inserting one would break
- * the listing's row-to-address identity, which the sliding buffer depends on.
- */
-.delver-listing-instruction.delver-listing-function-start {
-	display: block;
-	border-top: 1px solid var(--vscode-editorWidget-border);
-}
-
-.delver-listing-function-label {
-	display: block;
-	color: var(--vscode-symbolIcon-functionForeground);
-	font-weight: 600;
-	line-height: 22px;
-	white-space: pre;
-}
-
-/* Absent on every other row, and must not reserve space there. */
-.delver-listing-function-label:empty {
-	display: none;
-}
-
-/*
- * Body instructions sit inside their function. The indent is what lets the eye
- * find a boundary while scrolling, without reading a single address.
- */
-.delver-listing-instruction {
 	padding-left: 2ch;
 }
 
-/* A header line is the function itself, so it sits at the outer level. */
-.delver-listing-instruction.delver-listing-function-start .delver-listing-function-label {
+/* The authored comment stays on the same line as the instruction. */
+.delver-listing-instruction-line {
+	display: flex;
+	align-items: baseline;
+	gap: 1ch;
+	line-height: 22px;
+	overflow: hidden;
+}
+
+.delver-listing-instruction.delver-listing-function-start {
+	border-top: 1px solid var(--vscode-editorWidget-border);
+}
+
+.delver-listing-interpretation-label {
+	display: block;
+	color: var(--vscode-symbolIcon-variableForeground);
+	font-weight: 600;
+	line-height: 22px;
+	white-space: pre;
+	overflow: hidden;
+	text-overflow: ellipsis;
 	margin-left: -2ch;
 }
 
-/* The instruction under a header keeps the same indent as every other body row. */
-.delver-listing-instruction.delver-listing-function-start .delver-listing-mnemonic,
-.delver-listing-instruction.delver-listing-function-start .delver-listing-operands {
-	display: inline-block;
-	vertical-align: top;
-	line-height: 22px;
+/* Absent on every other row, and must not reserve space there. */
+.delver-listing-interpretation-label:empty,
+.delver-listing-comment:empty {
+	display: none;
+}
+
+.delver-listing-instruction.delver-listing-function-start .delver-listing-interpretation-label {
+	color: var(--vscode-symbolIcon-functionForeground);
 }
 
 /* Push the address down beside the instruction rather than beside the name. */
@@ -101,9 +89,26 @@
 }
 
 .delver-listing-operands {
+	flex: 0 1 auto;
+	min-width: 0;
 	color: var(--vscode-editor-foreground);
 	overflow: hidden;
 	text-overflow: ellipsis;
+}
+
+.delver-listing-comment {
+	flex: 1 1 auto;
+	min-width: 4ch;
+	color: var(--vscode-descriptionForeground);
+	font-style: italic;
+	white-space: pre;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.delver-listing-comment::before {
+	content: '; ';
+	color: var(--vscode-editorLineNumber-foreground);
 }
 
 /*

@@ -42,8 +42,8 @@ one-day monthly merge and a one-week one.
 | `.eslint-plugin-local/code-import-patterns.ts` | Layer rules for `delver` folders | Low | — | Only if new layer boundaries are introduced |
 | `eslint.config.js` | Delver lint rules (`delver-address-is-bigint`, `delver-no-target-kind-branch`) | Low | — | Active: delver file glob with two custom rules |
 | `build/gulpfile.ts` | Register the `delver` build task | Low | — | One line; `gulpfile.delver.ts` itself is a new file |
-| `src/vs/code/electron-utility/sharedProcess/sharedProcessMain.ts` | Register Delver shared-process channel | Low | — | Active: service and channel registration for `IDelverProcessService` and `IDelverAnalysisService` |
-| `src/vs/workbench/workbench.desktop.main.ts` | Register Delver renderer-side services | Low | — | Active: imports `delverTargetService`, `delverProcessService`, and `delverAnalysisService` |
+| `src/vs/code/electron-utility/sharedProcess/sharedProcessMain.ts` | Register Delver shared-process channels | Low | — | Active: service and channel registration for process hosting, analysis, and the node-side interpretation store |
+| `src/vs/workbench/workbench.desktop.main.ts` | Register Delver renderer-side services | Low | — | Active: imports target, process, analysis, and interpretation-store remote services |
 | `build/gulpfile.vscode.ts` (and platform variants) | Stage provider/analysis binaries into the package | Medium | — | Model on `gulpfile.cli.ts` |
 | `package.json` | `delver:*` scripts | Low | — | Active: `delver:build`, `delver:test`, `delver:protocol` |
 | `src/vs/workbench/browser/web.api.ts` | Only if Delver needs web-facing config | Low | — | Avoid if possible |

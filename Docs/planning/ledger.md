@@ -56,14 +56,14 @@ than a branch.
 | Named-pipe / Unix-socket transport | `done` | `delver/delver-rpc` | TCP transport; see also P0 `delver-rpc` row | [0003](../history/adr/0003-unsafe-code-in-transport-listener.md) |
 | Imports / exports / seeds over DTP | `done` | `delver/provider-file`, `delver/delver-protocol` | Exports and seeds are not surfaced in the UI yet — see [stage-g-plan.md](stage-g-plan.md) | |
 | Imports view | `done` | `contrib/delverImports` | Filtering, delay-load imports shown as ordinary ones, no grouping by suspiciousness | |
-| Functions view | `done` | `contrib/delverFunctions` | Filter box and full virtualization — swept entries are capped at 1,000 with an explicit overflow row. Names need Stage F | |
+| Functions view | `done` | `contrib/delverFunctions` | Filter box and full virtualization — swept entries are capped at 1,000 with an explicit overflow row. Function rows expose Rename and Set Comment actions | |
 | Overview view | `done` | `contrib/delverOverview` | Hashes, compile timestamp, entropy, packer hints | |
 | PE loader (`delver-format`) | `done` | `delver/delver-format` | Resource-directory *contents* (the directory itself is parsed); ELF and Mach-O (P5) | |
 | Analysis server | `done` | `delver/server-analysis` | Progress notifications during indexing (no longer urgent: 88.5 MB image analyses in ~3.9 s after the 2026-08-07 indexing work); multi-image sessions (one image at a time) | |
 | Disassembly (`delver-disasm`) | `done` | `delver/delver-disasm` | Non-x86 architectures; instruction index is D5 | |
 | Function detection | `done` | `delver/delver-analysis` | Signature matching (P5); sweep heuristics are deliberately naive — see status | |
 | Analysis session host | `done` | `platform/delver/node/analysisSession.ts` | Progress reporting during indexing; one image per session | |
-| Listing editor | `done` | `contrib/delverListing` | Inline source interleaving (needs dynamic row heights); **full-file scrollbar** — the buffer slides, see status; xref columns, context menu, and byte column | |
+| Listing editor | `done` | `contrib/delverListing` | Wrapped source/pseudocode interleaving (needs truly dynamic row heights); **full-file scrollbar** — the buffer slides, see status; xref columns, context menu, and byte column. Authored names are bounded header lines; comments follow operands inline | |
 | Analysis service (renderer ↔ shared process) | `done` | `platform/delver/{common,node,electron-browser}/delverAnalysisService.ts` | Session reuse between sections view and listing — each opens its own provider today | [0001](../history/adr/0001-wire-protocol-framing-and-encoding.md) |
 | Xrefs | `done` | `delver/delver-analysis` | Graph query API (P6); indirect-call targets need dataflow | |
 | References view | `done` | `contrib/delverXrefs` | Grouping by function (needs Stage F names); filtering by kind | |
@@ -74,9 +74,9 @@ than a branch.
 | Session registry | `done` | `services/delver/common/delverSessionService.ts` | Multiple concurrent sessions — one active session at a time | |
 | Focus bus | `done` | `services/delver/common/delverFocusService.ts` | Thread/frame focus (P4) | |
 | Per-view pin | `done` | `contrib/delverListing/browser/delverListingContext.ts` | Not persisted across reloads; only the listing has one so far. Pin is per-view state, never bus state, and keys on focus *reason* — see status | |
-| Interpretation layer | `wip` | `platform/delver/common/interpretation.ts`, `services/delver/common/delverInterpretationService.ts` | **Persistence — names die with the window; the `.delverdb` store is next.** Comments have an op but no UI; listing rows do not show names; rename only from the listing. Types (P5); merge and conflict detection (P6) | |
+| Interpretation layer | `wip` | `platform/delver/common/interpretation.ts`, `services/delver/common/delverInterpretationService.ts` | Inline names/comments and Function-pane actions are built. Tags, undo/revert-by-author, and edit actions from the remaining address panes are not. Types (P5); merge and conflict detection (P6) | |
 | Content hash (image identity) | `done` | `delver/provider-file` | Normalized hashing for in-memory images, which P4 needs so a loaded module matches its on-disk counterpart | |
-| `.delverdb` interpretation store | `planned` | `delver/delver-store` | Location decided: user data, keyed by content hash, append-only JSONL. Export/import must ship with it, not after | [0004](../history/adr/0004-interpretation-store-location.md) |
+| `.delverdb` interpretation store | `done` | `platform/delver/{common,node,electron-browser}/delverInterpretationStoreService.ts` | Append-only JSONL in user data, keyed by content hash; export/import commands ship with it. No compaction or external-tool format conversion | [0004](../history/adr/0004-interpretation-store-location.md) |
 | Golden corpus | `done` | `delver/corpus` | Real-binary samples: F4 forbids non-redistributable ones, so samples are synthesised. Local-only real binaries by path are not wired up yet | |
 | Hex view | `planned` | `contrib/delverMemory` | **Slidable to P4** — nothing in P2/P3 needs it | |
 

@@ -14,6 +14,7 @@ export const DELVER_FUNCTIONS_VIEW_ID = 'delver.view.functions';
 
 /** Command invoked when a function is clicked. */
 export const DELVER_FUNCTIONS_OPEN_COMMAND = 'delver.functions.goTo';
+export const DELVER_FUNCTION_HANDLE_PREFIX = 'delver.function.';
 
 /**
  * How many swept functions the pane will list.
@@ -71,12 +72,12 @@ export class DelverFunctionsTreeDataProvider implements ITreeViewDataProvider {
 		}
 
 		if (element.handle === VOUCHED_HANDLE) {
-			return this.vouched.map((fn, i) => functionItem(fn, `v${i}`, this.names.get(fn.rva)));
+			return this.vouched.map(fn => functionItem(fn, this.names.get(fn.rva)));
 		}
 		if (element.handle === SWEPT_HANDLE) {
 			const shown = this.swept
 				.slice(0, SWEPT_LIMIT)
-				.map((fn, i) => functionItem(fn, `s${i}`, this.names.get(fn.rva)));
+				.map(fn => functionItem(fn, this.names.get(fn.rva)));
 			if (this.swept.length > SWEPT_LIMIT) {
 				shown.push(overflowItem(this.swept.length - SWEPT_LIMIT));
 			}
@@ -95,7 +96,7 @@ function group(handle: string, label: string, count: number, state: TreeItemColl
 	};
 }
 
-function functionItem(fn: IFunctionWire, id: string, name: string | undefined): ITreeItem {
+function functionItem(fn: IFunctionWire, name: string | undefined): ITreeItem {
 	// Unnamed functions read as `sub_140001000` rather than a bare address, so
 	// the label is always a name-shaped thing and an authored name replaces it
 	// in place instead of changing what kind of row this is. The address stays
@@ -103,7 +104,8 @@ function functionItem(fn: IFunctionWire, id: string, name: string | undefined): 
 	//
 	// Addresses arrive as "0x..." strings (ADR 0001) and are shown as they came.
 	return {
-		handle: `delver.function.${id}`,
+		handle: `${DELVER_FUNCTION_HANDLE_PREFIX}${fn.rva}`,
+		contextValue: 'delver-function',
 		label: { label: functionDisplayName(BigInt(fn.rva), name) },
 		description: `${fn.rva}  ${describe(fn.source)}`,
 		themeIcon: ThemeIcon.fromId(
@@ -116,6 +118,17 @@ function functionItem(fn: IFunctionWire, id: string, name: string | undefined): 
 			arguments: [fn.rva],
 		},
 	};
+}
+
+export function functionRvaFromHandle(handle: string): bigint | undefined {
+	if (!handle.startsWith(DELVER_FUNCTION_HANDLE_PREFIX)) {
+		return undefined;
+	}
+	try {
+		return BigInt(handle.slice(DELVER_FUNCTION_HANDLE_PREFIX.length));
+	} catch {
+		return undefined;
+	}
 }
 
 function overflowItem(remaining: number): ITreeItem {

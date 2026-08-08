@@ -87,10 +87,19 @@ suite('DelverAnalysisSession', () => {
 				session.getImageInfo(),
 				session.listingWindow(0, 1),
 			]);
+			assert.match(info.content_hash, /^[0-9a-f]{64}$/);
 
 			assert.deepStrictEqual(
-				{ arch: info.arch, sections: info.sections.map(s => s.name), rows: window.rows.length },
-				{ arch: 'X86_64', sections: ['.text'], rows: 1 },
+				{
+					arch: info.arch,
+					sections: info.sections.map(s => s.name),
+					rows: window.rows.length,
+				},
+				{
+					arch: 'X86_64',
+					sections: ['.text'],
+					rows: 1,
+				},
 			);
 		} finally {
 			session.dispose();
