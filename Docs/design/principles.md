@@ -60,6 +60,11 @@ channel available. Spending it on decoration wastes it.
 
 - Reserve a small, fixed semantic palette: control flow, data reference, string
   reference, import/thunk, modified/patched bytes, uncertainty.
+- One role sits outside that palette: the **function landmark**. It is not a
+  kind of content, it is the boundary between content, and it carries the
+  product accent so a scrolling listing has one thing the eye can catch. It is
+  also encoded structurally — a rule above the line and an indent below it — so
+  it does not depend on color alone.
 - Anything encoded by color must also be encoded by something else — a glyph, a
   column, a prefix. Roughly one in twelve analysts has a color vision deficiency,
   and this content has no redundancy to fall back on.

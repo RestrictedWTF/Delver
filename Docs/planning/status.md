@@ -34,7 +34,16 @@ through the interpretation event.
 The inline-row decision is recorded in [p1-plan.md](p1-plan.md), and the listing
 height constraint is updated in [ide-architecture.md](../architecture/ide-architecture.md).
 
-The rebrand had replaced only the OS artwork under `resources/`, so
+Function names on listing landmark lines are now the product accent instead of
+`symbolIcon.functionForeground`, through a registered `delver.listing.functionName`
+color. Registering it exposed that the other four `delver.listing.*` IDs are
+declared in the theme files but never registered — a theme entry for an
+unregistered ID emits no CSS variable, so those four roles currently do nothing.
+The listing's mnemonic and branch-target colors still borrow
+`debugTokenExpression.*` and `textLink.foreground`. See
+[rebranding-plan.md](rebranding-plan.md) §2.1.
+
+Separately, the rebrand had replaced only the OS artwork under `resources/`, so
 every renderer-drawn surface still showed the VS Code logo — most visibly the
 titlebar app icon. Those come from source-tree SVGs
 (`browser/media/code-icon.svg` and the four `letterpress-*.svg` watermarks), which

@@ -8,6 +8,7 @@
 		"delver.listing.dataRef": "#79c0ff",
 		"delver.listing.stringRef": "#a5d6ff",
 		"delver.listing.importThunk": "#d2a8ff",
+		"delver.listing.functionName": "#ff9648",
 		"delver.diff.modifiedBytes": "#e5ba7d",
 		"delver.state.uncertain": "#cca700",
 		"delver.state.stale": "#8c8c8c",

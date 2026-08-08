@@ -11,6 +11,7 @@ These themes reserve a semantic palette for reverse-engineering content:
 - `delver.listing.dataRef` — data references
 - `delver.listing.stringRef` — string references
 - `delver.listing.importThunk` — imports and thunks
+- `delver.listing.functionName` — the function name on a listing landmark line
 - `delver.diff.modifiedBytes` — modified bytes
 - `delver.state.uncertain` — analysis results with low confidence
 - `delver.state.stale` — stale or cached data

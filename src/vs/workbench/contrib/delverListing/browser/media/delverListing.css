@@ -69,8 +69,13 @@
 	display: none;
 }
 
+/*
+ * The function name is the listing's only landmark. It carries the product
+ * accent so the eye can find a boundary while scrolling without reading a
+ * single address — the rule the indent below serves in the other direction.
+ */
 .delver-listing-instruction.delver-listing-function-start .delver-listing-interpretation-label {
-	color: var(--vscode-symbolIcon-functionForeground);
+	color: var(--vscode-delver-listing-functionName);
 }
 
 /* Push the address down beside the instruction rather than beside the name. */

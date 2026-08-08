@@ -4,6 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 import './media/delverListing.css';
+// Registers the listing's semantic colors; the CSS above reads them as variables.
+import './delverListingColors.js';
 
 import { Codicon } from '../../../../base/common/codicons.js';
 import { localize2 } from '../../../../nls.js';

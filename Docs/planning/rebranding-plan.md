@@ -153,10 +153,18 @@ sensible defaults per base theme:
 ```
 delver.listing.controlFlow      delver.listing.dataRef
 delver.listing.stringRef        delver.listing.importThunk
-delver.diff.modifiedBytes       delver.state.uncertain
-delver.state.stale              delver.state.unreadable
-delver.state.proposed
+delver.listing.functionName     delver.diff.modifiedBytes
+delver.state.uncertain          delver.state.stale
+delver.state.unreadable         delver.state.proposed
 ```
+
+`delver.listing.functionName` is registered (2026-08-08) in
+`contrib/delverListing/browser/delverListingColors.ts` and is the first of these
+actually wired. The rest are still declared in the theme files only — a theme
+`colors` entry for an unregistered ID produces no CSS variable, so those four
+listing roles currently do nothing. The listing's mnemonic and branch-target
+colors still borrow `debugTokenExpression.*` and `textLink.foreground`; moving
+them onto this namespace is the remaining work.
 
 Your theme then overrides them in its `colors` block, and so can anyone else's.
 Register each ID in the contrib that owns it, as it's built — not all at once
