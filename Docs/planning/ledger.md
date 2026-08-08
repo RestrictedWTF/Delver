@@ -46,7 +46,7 @@ than a branch.
 | Delver target service | `done`, **unwired** | `src/vs/workbench/services/delver/` | Registered and tested but no UI consumer since sections moved onto the analysis session (2026-08-07). Retained because it models an attached target with capabilities and spaces, which P4 live-process attach needs and the file-only session does not cover. **Decide before Stage F.** Earlier fix: the snapshot carried `bigint` across IPC and hung `attach()` silently | [0001](../history/adr/0001-wire-protocol-framing-and-encoding.md) |
 | Build integration | `done` | `build/gulpfile.delver.ts`, `package.json` | | |
 | Protocol codegen (Rust → schema → TS) | `done` | `delver-protocol/src/bin/gen-schema.rs`, `build/lib/delver/generate-protocol.ts` | Repaired 2026-08-07: the TS emitter was a hardcoded string and the schema only carried the envelope, so no payload type had ever been generated | |
-| Branding + CI | `planned` | `product.json`, `build/`, `resources/` | Icons, installer artwork, Linux packaging — see [rebranding-plan.md](rebranding-plan.md) | |
+| Branding + CI | `wip` | `product.json`, `build/`, `resources/`, `scripts/generate-artwork.py` | OS icons, installer artwork, and the in-workbench SVGs (titlebar app icon, editor watermark) all generate from `resources/delver/logo.png`. Remaining: Linux packaging, full `code.iss` file-association trim — see [rebranding-plan.md](rebranding-plan.md) | |
 | Theme (`theme-delver`) | `planned` | `extensions/theme-delver` | Product icon + file icon themes deferred | |
 
 ## P1 — Static core

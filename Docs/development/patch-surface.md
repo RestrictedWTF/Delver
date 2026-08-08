@@ -35,6 +35,8 @@ one-day monthly merge and a one-week one.
 | `resources/darwin/code.icns` | macOS app icon contents replaced | Low | — | Filenames unchanged; regenerate via `scripts/generate-artwork.py` |
 | `resources/linux/code.png` | Linux app icon contents replaced | Low | — | Filenames unchanged; regenerate via `scripts/generate-artwork.py` |
 | `resources/server/*.{ico,png}` | Server/web icon contents replaced | Low | — | Filenames unchanged |
+| `src/vs/workbench/browser/media/code-icon.svg` | In-workbench app icon replaced with Delver logo | Low | — | Filenames unchanged; regenerate via `scripts/generate-artwork.py`. Drives the titlebar app icon plus the banner, update tooltip, getting-started, onboarding and walkthrough surfaces — the OS icons under `resources/` do **not** cover these |
+| `src/vs/workbench/browser/parts/editor/media/letterpress-*.svg` | Empty-editor watermark replaced with Delver logo | Low | — | Filenames unchanged; regenerate via `scripts/generate-artwork.py`. Upstream's per-theme opacity/fill is carried over verbatim, only the mark changes |
 | `src/vs/workbench/workbench.common.main.ts` | One import line per Delver contribution | **High** | — | Active: Delver service and contribution imports under the `// DELVER:` marker — focus/session services, view container, and the `delverSections`, `delverImports`, `delverListing`, `delverXrefs` contributions. Keep all Delver imports contiguous. |
 | `src/vs/workbench/services/environment/…` *(TBD)* | Inject `DELVER_SESSION` into terminal + kernel environments | Low | — | Prefer an existing env-contribution point over a direct edit |
 | `.eslint-plugin-local/code-import-patterns.ts` | Layer rules for `delver` folders | Low | — | Only if new layer boundaries are introduced |
