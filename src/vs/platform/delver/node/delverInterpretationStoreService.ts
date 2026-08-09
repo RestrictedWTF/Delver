@@ -63,10 +63,12 @@ export class DelverInterpretationStoreService implements IDelverInterpretationSt
 				throw new Error('Cannot import an interpretation log into itself');
 			}
 			const contents = await promises.readFile(sourcePath, 'utf8');
-			const edits = parseLog(contents, contentHash, sourcePath);
-			if (edits.length === 0) {
-				return edits;
+			const sourceEdits = parseLog(contents, contentHash, sourcePath);
+			if (sourceEdits.length === 0) {
+				return sourceEdits;
 			}
+			const existing = await this.readLog(contentHash);
+			const edits = resequenceImportedEdits(sourceEdits, existing);
 			await promises.mkdir(this.storeRoot, { recursive: true });
 			await repairTruncatedTail(this.storePath(contentHash));
 			await promises.appendFile(
@@ -152,12 +154,56 @@ function validateEdit(value: unknown, contentHash: string, location: string): as
 		|| value.anchor.contentHash !== contentHash
 		|| typeof value.anchor.rva !== 'string' || !WIRE_RVA.test(value.anchor.rva)
 		|| BigInt(value.anchor.rva) > MAX_U64
-		|| (value.op !== EditOp.Rename && value.op !== EditOp.Comment)
-		|| typeof value.value !== 'string'
+		|| (value.op !== EditOp.Rename && value.op !== EditOp.Comment && value.op !== EditOp.Tags)
+		|| !isValueForOp(value.op, value.value)
 		|| (value.status !== EditStatus.Proposed && value.status !== EditStatus.Accepted && value.status !== EditStatus.Rejected)
+		|| (value.compensates !== undefined && !isCompensationList(value.compensates))
 	) {
 		throw new Error(`Invalid interpretation edit at ${location}`);
 	}
+}
+
+function isValueForOp(op: EditOp, value: unknown): boolean {
+	if (op === EditOp.Tags) {
+		return Array.isArray(value)
+			&& value.every(tag => typeof tag === 'string' && tag.length > 0 && tag === tag.trim())
+			&& new Set(value).size === value.length
+			&& value.every((tag, index) => index === 0 || value[index - 1] < tag);
+	}
+	return typeof value === 'string';
+}
+
+function isCompensationList(value: unknown): value is readonly number[] {
+	return Array.isArray(value)
+		&& value.length > 0
+		&& value.every(seq => Number.isSafeInteger(seq) && seq > 0)
+		&& new Set(value).size === value.length;
+}
+
+function resequenceImportedEdits(
+	source: readonly IInterpretationEditWire[],
+	existing: readonly IInterpretationEditWire[],
+): readonly IInterpretationEditWire[] {
+	if (existing.length === 0) {
+		return source;
+	}
+	const sourceSeqs = new Set<number>();
+	for (const edit of source) {
+		if (sourceSeqs.has(edit.seq)) {
+			throw new Error(`Cannot import an interpretation log with duplicate sequence ${edit.seq}`);
+		}
+		sourceSeqs.add(edit.seq);
+	}
+	let nextSeq = existing.reduce((maximum, edit) => Math.max(maximum, edit.seq), 0) + 1;
+	const mapped = new Map<number, number>();
+	for (const edit of source) {
+		mapped.set(edit.seq, nextSeq++);
+	}
+	return source.map(edit => ({
+		...edit,
+		seq: mapped.get(edit.seq)!,
+		compensates: edit.compensates?.map(seq => mapped.get(seq) ?? seq),
+	}));
 }
 
 function validateContentHash(contentHash: string): void {

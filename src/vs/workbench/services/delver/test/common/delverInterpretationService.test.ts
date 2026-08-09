@@ -58,7 +58,7 @@ suite('DelverInterpretationService persistence', () => {
 		await service.load(HASH);
 
 		const announced: string[] = [];
-		store.add(service.onDidChange(event => announced.push(event.edit.value)));
+		store.add(service.onDidChange(event => announced.push(String(event.edit.value))));
 		const saved = await service.edit(anchor, EditOp.Rename, 'new_name');
 
 		assert.deepStrictEqual(
@@ -75,6 +75,56 @@ suite('DelverInterpretationService persistence', () => {
 				seq: 8,
 				wireRva: '0x1000000000000001',
 				announced: ['new_name'],
+			},
+		);
+	});
+
+	test('undo appends compensations and continues backward through local history', async () => {
+		const persistence = new FakeStore();
+		const service = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService));
+		const anchor = { kind: 'image' as const, contentHash: HASH, rva: 0x1000000000000001n };
+		await service.edit(anchor, EditOp.Rename, 'first');
+		await service.edit(anchor, EditOp.Rename, 'second');
+
+		const firstUndo = await service.undoLast(HASH);
+		const secondUndo = await service.undoLast(HASH);
+
+		assert.deepStrictEqual(
+			{
+				name: service.nameAt(anchor),
+				values: service.logFor(HASH).map(edit => edit.value),
+				compensates: [firstUndo?.compensates, secondUndo?.compensates],
+			},
+			{
+				name: 'loaded_name',
+				values: ['loaded_name', 'first', 'second', 'first', 'loaded_name'],
+				compensates: [[9], [8]],
+			},
+		);
+	});
+
+	test('revert author restores every affected field without removing other authors', async () => {
+		const persistence = new FakeStore();
+		const service = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService));
+		const anchor = { kind: 'image' as const, contentHash: HASH, rva: 0x3000n };
+		const model = { kind: 'model' as const, id: 'assistant' };
+		await service.edit(anchor, EditOp.Rename, 'model_name', model);
+		await service.edit(anchor, EditOp.Comment, 'model comment', model);
+		await service.edit(anchor, EditOp.Tags, ['crypto', 'review'], model);
+		await service.edit(anchor, EditOp.Comment, 'analyst correction');
+
+		const count = await service.revertAuthor(HASH, model);
+
+		assert.deepStrictEqual(
+			{
+				count,
+				current: service.at(anchor),
+				compensations: service.logFor(HASH).slice(-3).map(edit => edit.compensates),
+			},
+			{
+				count: 3,
+				current: { comment: 'analyst correction' },
+				compensations: [[8], [9], [10]],
 			},
 		);
 	});

@@ -117,7 +117,8 @@ Requirements that fall out of experience with tools that got this wrong:
   every synchronized view, from the first one you build.
 - **History is a stack of `IFocus`, deduplicated by proximity** — scrolling
   three instructions should not create three history entries. Coalesce within a
-  basic block, and within a time window.
+  basic block, and within a time window. Listings expose the same stack through
+  Alt+Left/Alt+Right and Mouse4/Mouse5.
 - Prefer direct service calls over events for *commands* (per the repo coding
   guidelines); the focus bus is legitimately a state broadcast, which is exactly
   what events are for.
@@ -138,7 +139,7 @@ writing anything. Delver's listing is that pattern with:
 - a paged, cancellable data source over `IAnalysisService` rather than DAP
 - columns: breakpoint gutter, address, bytes, mnemonic, operands, xref margin;
   an authored label is a bounded line owned by the instruction row, while its
-  comment follows the operands on the instruction line
+  comment and `#tag` tokens follow the operands on the instruction line
 - placeholder rows while a page is in flight (never block the scroll)
 - the caveat noted in that file — `WorkbenchTable` doesn't do dynamic row
   heights — which matters if you want wrapped source/pseudocode interleaving.

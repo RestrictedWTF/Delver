@@ -24,6 +24,7 @@ import {
 	TreeItemCollapsibleState,
 } from '../../../common/views.js';
 import { registerDelverView } from '../../../services/delver/browser/delverViewContainer.js';
+import { registerInterpretationViewActions } from '../../../services/delver/browser/delverInterpretationEditing.js';
 import {
 	FocusReason,
 	IDelverFocusService,
@@ -65,8 +66,9 @@ function exportItem(symbol: IExportWire, index: number): ITreeItem {
 	const forwarded = symbol.forwarded_to !== undefined;
 
 	return {
-		handle: `delver.export.${index}`,
+		handle: `delver.export.${index}.${symbol.rva ?? 'forwarded'}`,
 		label: { label },
+		contextValue: forwarded ? undefined : 'delver-export',
 		description: forwarded
 			? localize('delverExportForwarded', "→ {0}", symbol.forwarded_to!)
 			: symbol.rva,
@@ -172,4 +174,10 @@ CommandsRegistry.registerCommand(DELVER_EXPORTS_OPEN_COMMAND, (accessor: Service
 		FOCUS_ORIGIN,
 		FocusReason.User,
 	);
+});
+
+registerInterpretationViewActions({
+	commandPrefix: 'delver.exports',
+	viewId: DELVER_EXPORTS_VIEW_ID,
+	contextValue: 'delver-export',
 });

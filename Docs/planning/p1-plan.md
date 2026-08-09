@@ -213,7 +213,7 @@ columns for gutter, address, bytes, mnemonic, operands, comment, xref margin.
 
 **E3t · Quick access + address history** — S
 Go to address, go to symbol, go to string. Alt+Left / Alt+Right on the focus
-history.
+history; Mouse4 / Mouse5 use the same stack while the listing is active.
 *Done when:* an address typed into quick access lands on the right row.
 
 **E4t · Per-view pin** — S
@@ -246,6 +246,11 @@ instruction; its comment follows the operands on the instruction line. Both are
 bounded, and newlines imported from a log are folded for display without changing
 the stored value. This keeps analysis row ordinals exact and makes height depend
 only on the optional label line.
+
+Tags follow the comment as bounded `#tag` tokens. Undo and revert-by-author are
+compensating accepted edits carrying the sequence IDs they supersede; the JSONL
+history is never rewritten. Import into a non-empty log resequences the incoming
+records and their compensation references before appending.
 
 ### Stage G — supporting views
 

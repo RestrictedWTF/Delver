@@ -21,8 +21,9 @@ import {
 	IDelverFocusService,
 } from '../../../services/delver/common/delverFocusService.js';
 import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
-import { EditOp } from '../../../../platform/delver/common/interpretation.js';
+import { EditOp, EditStatus, IAuthor } from '../../../../platform/delver/common/interpretation.js';
 import { editInterpretationAt } from '../../../services/delver/browser/delverInterpretationEditing.js';
+import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
 import {
 	DELVER_LISTING_PINNED,
 	DELVER_NAVIGATION_ORIGIN,
@@ -347,6 +348,120 @@ export class CommentAction extends Action2 {
 			return;
 		}
 		await editInterpretationAt(accessor, location.address, EditOp.Comment);
+	}
+}
+
+/** Adds or clears the tags on the selected instruction. */
+export class TagAction extends Action2 {
+	constructor() {
+		super({
+			id: 'delver.interpretation.tags',
+			title: localize2('delverSetTags', 'Set Tags'),
+			category: localize2('delverCategory', 'Delver'),
+			f1: true,
+			precondition: LISTING_ACTIVE,
+			keybinding: {
+				when: ContextKeyExpr.and(LISTING_ACTIVE, ContextKeyExpr.not(InputFocusedContextKey)),
+				primary: KeyCode.KeyT,
+				weight: KeybindingWeight.EditorContrib,
+			},
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const location = accessor.get(IDelverFocusService).focus.location;
+		if (!location) {
+			accessor.get(INotificationService).info(localize('delverNothingToTag', "Select an instruction to tag."));
+			return;
+		}
+		await editInterpretationAt(accessor, location.address, EditOp.Tags);
+	}
+}
+
+/** Undoes local interpretation by appending a compensating edit. */
+export class UndoInterpretationAction extends Action2 {
+	constructor() {
+		super({
+			id: 'delver.interpretation.undo',
+			title: localize2('delverUndoInterpretation', 'Undo Interpretation'),
+			category: localize2('delverCategory', 'Delver'),
+			f1: true,
+			precondition: LISTING_ACTIVE,
+			keybinding: {
+				when: ContextKeyExpr.and(LISTING_ACTIVE, ContextKeyExpr.not(InputFocusedContextKey)),
+				primary: KeyMod.CtrlCmd | KeyCode.KeyZ,
+				weight: KeybindingWeight.EditorContrib,
+			},
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const session = accessor.get(IDelverSessionService).activeSession;
+		const notifications = accessor.get(INotificationService);
+		if (!session) {
+			return;
+		}
+		try {
+			const edit = await accessor.get(IDelverInterpretationService).undoLast(session.contentHash);
+			if (!edit) {
+				notifications.info(localize('delverNothingToUndo', "No local interpretation edit to undo."));
+			}
+		} catch (error) {
+			notifications.error(error instanceof Error ? error : String(error));
+		}
+	}
+}
+
+interface IAuthorPickItem extends IQuickPickItem {
+	readonly author: IAuthor;
+}
+
+/** Reconstructs the active image as if one author had made no accepted edits. */
+export class RevertAuthorAction extends Action2 {
+	constructor() {
+		super({
+			id: 'delver.interpretation.revertAuthor',
+			title: localize2('delverRevertAuthor', 'Revert Interpretation by Author...'),
+			category: localize2('delverCategory', 'Delver'),
+			f1: true,
+			precondition: LISTING_ACTIVE,
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const session = accessor.get(IDelverSessionService).activeSession;
+		if (!session) {
+			return;
+		}
+		const interpretationService = accessor.get(IDelverInterpretationService);
+		const quickInputService = accessor.get(IQuickInputService);
+		const notifications = accessor.get(INotificationService);
+		const authors = new Map<string, IAuthor>();
+		for (const edit of interpretationService.logFor(session.contentHash)) {
+			if (edit.status === EditStatus.Accepted && edit.compensates === undefined) {
+				authors.set(`${edit.author.kind}:${edit.author.id}`, edit.author);
+			}
+		}
+		const picked = await quickInputService.pick<IAuthorPickItem>(
+			[...authors.values()].map(author => ({
+				label: author.id,
+				description: author.kind,
+				author,
+			})),
+			{ placeHolder: localize('delverRevertAuthorPlaceholder', "Author whose accepted edits should be compensated") },
+		);
+		if (!picked) {
+			return;
+		}
+
+		try {
+			const count = await interpretationService.revertAuthor(session.contentHash, picked.author);
+			notifications.info(count === 0
+				? localize('delverAuthorAlreadyReverted', "No active edits remain for {0}.", picked.author.id)
+				: localize('delverAuthorReverted', "Appended {0} compensating interpretation edits for {1}.", count, picked.author.id));
+		} catch (error) {
+			notifications.error(error instanceof Error ? error : String(error));
+		}
 	}
 }
 

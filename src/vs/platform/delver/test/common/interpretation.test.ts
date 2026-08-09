@@ -99,6 +99,17 @@ suite('InterpretationLog', () => {
 		assert.deepStrictEqual(log.at(at(0x1000n)), { name: 'stage2', comment: 'RC4, key at 0x4000' });
 	});
 
+	test('tags are a canonical set-valued field and replay independently', () => {
+		const log = new InterpretationLog();
+		log.append({ author: ANALYST, anchor: at(0x1000n), op: EditOp.Rename, value: 'stage2' });
+		log.append({ author: ANALYST, anchor: at(0x1000n), op: EditOp.Tags, value: ['crypto', 'config'] });
+
+		assert.deepStrictEqual(
+			InterpretationLog.from(log.log).at(at(0x1000n)),
+			{ name: 'stage2', tags: ['crypto', 'config'] },
+		);
+	});
+
 	test('replaying the log reconstructs the same state', () => {
 		// The log is the truth and the materialized view is a cache; this is what
 		// makes the cache safe to discard, and what loading a stored log relies on.

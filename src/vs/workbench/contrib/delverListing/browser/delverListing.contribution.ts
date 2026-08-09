@@ -34,15 +34,18 @@ import {
 import { DelverListingEditor } from './delverListingEditor.js';
 import { DELVER_LISTING_EDITOR_ID, DelverListingInput } from './delverListingInput.js';
 import {
-	FollowAction,
 	CommentAction,
+	FollowAction,
 	GoToAddressAction,
 	GoToFunctionAction,
 	NavigateBackAction,
 	NavigateForwardAction,
 	RenameAction,
+	RevertAuthorAction,
 	ReturnAction,
+	TagAction,
 	TogglePinAction,
+	UndoInterpretationAction,
 } from './delverListingNavigation.js';
 import { ExportInterpretationAction, ImportInterpretationAction } from './delverInterpretationActions.js';
 
@@ -180,5 +183,8 @@ registerAction2(FollowAction);
 registerAction2(ReturnAction);
 registerAction2(RenameAction);
 registerAction2(CommentAction);
+registerAction2(TagAction);
+registerAction2(UndoInterpretationAction);
+registerAction2(RevertAuthorAction);
 registerAction2(ExportInterpretationAction);
 registerAction2(ImportInterpretationAction);

@@ -78,4 +78,21 @@ suite('DelverInterpretationStoreService', () => {
 		assert.deepStrictEqual(await imported.load(HASH_A), [edit(HASH_A, 1)]);
 		await assert.rejects(() => imported.importLog(HASH_B, exported), /line 1/);
 	});
+
+	test('merged imports are resequenced with compensation references intact', async () => {
+		await service.append(HASH_A, edit(HASH_A, 7));
+		const source = join(userDataPath, 'compensated.delverdb');
+		const original = [
+			{ ...edit(HASH_A, 1), op: EditOp.Tags, value: ['crypto'] },
+			{ ...edit(HASH_A, 2), op: EditOp.Tags, value: [], compensates: [1] },
+		];
+		await promises.writeFile(source, original.map(value => `${JSON.stringify(value)}\n`).join(''), 'utf8');
+
+		const imported = await service.importLog(HASH_A, source);
+
+		assert.deepStrictEqual(
+			imported.map(value => ({ seq: value.seq, compensates: value.compensates })),
+			[{ seq: 8, compensates: undefined }, { seq: 9, compensates: [8] }],
+		);
+	});
 });

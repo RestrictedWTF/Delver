@@ -27,39 +27,67 @@ export const DELVER_IMPORTS_OPEN_COMMAND = 'delver.imports.goTo';
  */
 export class DelverImportsTreeDataProvider implements ITreeViewDataProvider {
 	private result: IGetImportsResult | undefined;
+	private visible: readonly IVisibleModule[] = [];
+	private filter = '';
 
 	setImports(result: IGetImportsResult | undefined): void {
 		this.result = result;
+		this.rebuildVisible();
+	}
+
+	setFilter(query: string): void {
+		this.filter = query.trim().toLowerCase();
+		this.rebuildVisible();
 	}
 
 	async getChildren(element?: ITreeItem): Promise<readonly ITreeItem[] | undefined> {
-		const modules = this.result?.modules;
-		if (!modules) {
+		if (!this.result) {
 			return [];
 		}
 
 		if (!element) {
-			return modules.map(moduleItem);
+			return this.visible.map(entry => moduleItem(entry, this.filter !== ''));
 		}
 
 		const index = moduleIndexOf(element.handle);
-		const module = index === undefined ? undefined : modules[index];
-		return module ? module.symbols.map((symbol, i) => symbolItem(symbol, index!, i)) : [];
+		const entry = index === undefined ? undefined : this.visible.find(module => module.index === index);
+		return entry ? entry.symbols.map((symbol, i) => symbolItem(symbol, entry.index, i)) : [];
+	}
+
+	private rebuildVisible(): void {
+		const modules = this.result?.modules ?? [];
+		this.visible = modules.flatMap((module, index): IVisibleModule[] => {
+			if (!this.filter || module.name.toLowerCase().includes(this.filter)) {
+				return [{ module, index, symbols: module.symbols }];
+			}
+			const symbols = module.symbols.filter(symbol => importSearchText(symbol).includes(this.filter));
+			return symbols.length > 0 ? [{ module, index, symbols }] : [];
+		});
 	}
 }
 
-function moduleItem(module: IImportedModuleWire, index: number): ITreeItem {
+interface IVisibleModule {
+	readonly module: IImportedModuleWire;
+	readonly index: number;
+	readonly symbols: readonly IImportedSymbolWire[];
+}
+
+function moduleItem(entry: IVisibleModule, filtered: boolean): ITreeItem {
 	return {
-		handle: `delver.import.module.${index}`,
-		label: { label: module.name },
-		description: localize('delverImportSymbolCount', "{0} symbols", module.symbols.length),
+		handle: `delver.import.module.${entry.index}`,
+		label: { label: entry.module.name },
+		description: localize('delverImportSymbolCount', "{0} symbols", entry.symbols.length),
 		themeIcon: ThemeIcon.fromId(Codicon.library.id),
 		// Modules start collapsed: the point of this pane at a glance is *which*
 		// libraries are used, and expanding everything buries that under symbols.
-		collapsibleState: module.symbols.length > 0
-			? TreeItemCollapsibleState.Collapsed
+		collapsibleState: entry.symbols.length > 0
+			? (filtered ? TreeItemCollapsibleState.Expanded : TreeItemCollapsibleState.Collapsed)
 			: TreeItemCollapsibleState.None,
 	};
+}
+
+function importSearchText(symbol: IImportedSymbolWire): string {
+	return `${symbol.name ?? ''} ${symbol.ordinal ?? ''} ${symbol.iat_rva}`.toLowerCase();
 }
 
 function symbolItem(symbol: IImportedSymbolWire, moduleIndex: number, index: number): ITreeItem {
@@ -69,8 +97,9 @@ function symbolItem(symbol: IImportedSymbolWire, moduleIndex: number, index: num
 		?? localize('delverImportOrdinal', "Ordinal {0}", symbol.ordinal ?? 0);
 
 	return {
-		handle: `delver.import.symbol.${moduleIndex}.${index}`,
+		handle: `delver.import.symbol.${moduleIndex}.${index}.${symbol.iat_rva}`,
 		label: { label },
+		contextValue: 'delver-import-symbol',
 		// Addresses arrive as "0x..." strings (ADR 0001) and are shown as they
 		// arrived. This is the IAT slot a call site indirects through, which is
 		// what makes the symbol navigable at all.

@@ -1,6 +1,6 @@
 # Stage G — The workspace panes
 
-**Status:** planned
+**Status:** complete; requested follow-ups tracked separately below
 **Date:** 2026-08-07
 
 ## The problem
@@ -84,7 +84,7 @@ scan cap, or its own display cap of 2,000. A strings pane silently missing
 entries is worse than none, because a search that finds nothing then means
 nothing.
 
-Still wanted: a filter box, and an encoding column rather than a suffix.
+The editor page now has a persistent filter box and a dedicated encoding column.
 
 ### G6 · Polish — **partly done**
 
@@ -100,11 +100,15 @@ Done:
   compressed them. Surfaced as a flag with a reason in the tooltip, never as a
   verdict: a section full of compressed resources trips the same test.
 - Container title actions for Open Target and Reset Views.
+- Persistent filter boxes on Functions and Imports. The Strings editor page has
+  its own filter and encoding column.
+- Every function remains reachable. Because `TreeView.getChildren` materializes
+  its returned array even though DOM rows are virtualized, large categories are
+  split into lazy 1,000-item pages. A 178k-function image therefore creates about
+  178 cheap page nodes rather than 178k tree items on every refresh. Filtering
+  still searches the complete function set.
 
-Still wanted:
-
-- Filter boxes on Functions, Imports, and Strings.
-- Full virtualization for Functions, replacing the 1,000-row cap.
+No G6 implementation items remain.
 
 ## Requested, not yet built
 
@@ -136,7 +140,7 @@ Each Overview row becomes an action rather than a readout:
 Cheap, and it turns the pane from a label into a table of contents. The focus
 bus already carries every one of these.
 
-### R2 · Strings as a page — M
+### R2 · Strings as a page — **done**
 
 Strings is the clearest case for a page: thousands of entries, and string
 hunting is a distinct activity rather than a question asked mid-read. It wants

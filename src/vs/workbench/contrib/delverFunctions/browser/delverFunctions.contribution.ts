@@ -15,10 +15,11 @@ import { IFunctionWire } from '../../../../platform/delver/common/protocol.gener
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
-import { TreeView, TreeViewPane } from '../../../browser/parts/views/treeView.js';
+import { TreeView } from '../../../browser/parts/views/treeView.js';
 import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { Extensions as ViewExtensions, ITreeViewDescriptor, IViewsRegistry, TreeViewItemHandleArg } from '../../../common/views.js';
 import { registerDelverView } from '../../../services/delver/browser/delverViewContainer.js';
+import { DelverFilterableTreeViewPane, registerDelverTreeFilterProvider } from '../../../services/delver/browser/delverFilterableTreeViewPane.js';
 import { editInterpretationAt } from '../../../services/delver/browser/delverInterpretationEditing.js';
 import {
 	FocusReason,
@@ -51,11 +52,12 @@ class DelverFunctionsViewContribution {
 		const treeView = instantiationService.createInstance(TreeView, DELVER_FUNCTIONS_VIEW_ID, viewName.value);
 		const dataProvider = new DelverFunctionsTreeDataProvider();
 		treeView.dataProvider = dataProvider;
+		registerDelverTreeFilterProvider(treeView, dataProvider);
 
 		const viewDescriptor: ITreeViewDescriptor = {
 			id: DELVER_FUNCTIONS_VIEW_ID,
 			name: viewName,
-			ctorDescriptor: new SyncDescriptor(TreeViewPane),
+			ctorDescriptor: new SyncDescriptor(DelverFilterableTreeViewPane),
 			canToggleVisibility: true,
 			canMoveView: true,
 			treeView,
@@ -77,21 +79,24 @@ class DelverFunctionsViewContribution {
 
 		/** Guards against a slow lookup overwriting a newer session's answer. */
 		let generation = 0;
-		let lastFunctions: readonly IFunctionWire[] = [];
+		let names = new Map<string, string>();
+		let wireRvaByAddress = new Map<bigint, string>();
 
 		const applyNames = (functions: readonly IFunctionWire[]) => {
-			lastFunctions = functions;
+			names = new Map();
+			wireRvaByAddress = new Map();
 			const session = sessionService.activeSession;
 			if (!session) {
-				dataProvider.setNames(new Map());
+				dataProvider.setNames(names);
 				return;
 			}
-			const names = new Map<string, string>();
 			for (const fn of functions) {
+				const rva = BigInt(fn.rva);
+				wireRvaByAddress.set(rva, fn.rva);
 				const name = interpretationService.nameAt({
 					kind: 'image',
 					contentHash: session.contentHash,
-					rva: BigInt(fn.rva),
+					rva,
 				});
 				if (name !== undefined) {
 					names.set(fn.rva, name);
@@ -102,8 +107,22 @@ class DelverFunctionsViewContribution {
 
 		// Renaming anything re-labels this pane immediately. The log is the
 		// truth; this view is one of its caches.
-		interpretationService.onDidChange(() => {
-			applyNames(lastFunctions);
+		interpretationService.onDidChange(event => {
+			const session = sessionService.activeSession;
+			if (!session || event.edit.op !== EditOp.Rename || event.edit.anchor.contentHash !== session.contentHash) {
+				return;
+			}
+			const wireRva = wireRvaByAddress.get(event.edit.anchor.rva);
+			if (wireRva === undefined) {
+				return;
+			}
+			const name = interpretationService.nameAt(event.edit.anchor);
+			if (name === undefined) {
+				names.delete(wireRva);
+			} else {
+				names.set(wireRva, name);
+			}
+			dataProvider.setNames(names);
 			treeView.refresh().catch(onUnexpectedError);
 		});
 
@@ -205,5 +224,32 @@ class CommentFunctionAction extends Action2 {
 	}
 }
 
+class TagFunctionAction extends Action2 {
+	constructor() {
+		super({
+			id: 'delver.functions.tags',
+			title: localize2('delverTagFunction', 'Set Tags'),
+			icon: Codicon.tag,
+			menu: {
+				id: MenuId.ViewItemContext,
+				when: ContextKeyExpr.and(
+					ContextKeyExpr.equals('view', DELVER_FUNCTIONS_VIEW_ID),
+					ContextKeyExpr.equals('viewItem', 'delver-function'),
+				),
+				group: '1_interpretation',
+				order: 2,
+			},
+		});
+	}
+
+	async run(accessor: ServicesAccessor, handle: TreeViewItemHandleArg): Promise<void> {
+		const rva = functionRvaFromHandle(handle.$treeItemHandle);
+		if (rva !== undefined) {
+			await editInterpretationAt(accessor, rva, EditOp.Tags);
+		}
+	}
+}
+
 registerAction2(RenameFunctionAction);
 registerAction2(CommentFunctionAction);
+registerAction2(TagFunctionAction);

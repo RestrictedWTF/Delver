@@ -7,6 +7,8 @@ import { onUnexpectedError } from '../../../../base/common/errors.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
 import { IDelverAnalysisService } from '../../../../platform/delver/common/delverAnalysisService.js';
+import { EditOp } from '../../../../platform/delver/common/interpretation.js';
+import { IFunctionWire } from '../../../../platform/delver/common/protocol.generated.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
@@ -18,7 +20,9 @@ import {
 	IDelverFocusService,
 } from '../../../services/delver/common/delverFocusService.js';
 import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
+import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
 import { registerDelverView } from '../../../services/delver/browser/delverViewContainer.js';
+import { registerInterpretationViewActions } from '../../../services/delver/browser/delverInterpretationEditing.js';
 import {
 	DELVER_XREFS_OPEN_COMMAND,
 	DELVER_XREFS_VIEW_ID,
@@ -42,6 +46,7 @@ class DelverXrefsViewContribution {
 		@IDelverFocusService focusService: IDelverFocusService,
 		@IDelverSessionService sessionService: IDelverSessionService,
 		@IDelverAnalysisService analysisService: IDelverAnalysisService,
+		@IDelverInterpretationService interpretationService: IDelverInterpretationService,
 	) {
 		const treeView = instantiationService.createInstance(TreeView, DELVER_XREFS_VIEW_ID, viewName.value);
 		const dataProvider = new DelverXrefsTreeDataProvider();
@@ -71,6 +76,58 @@ class DelverXrefsViewContribution {
 
 		/** Guards against a slow lookup overwriting a newer one. */
 		let generation = 0;
+		let functionGeneration = 0;
+		let functions: readonly IFunctionWire[] = [];
+		let names = new Map<bigint, string>();
+
+		const loadFunctions = async () => {
+			const session = sessionService.activeSession;
+			const token = ++functionGeneration;
+			functions = [];
+			names = new Map();
+			dataProvider.setFunctions(functions);
+			dataProvider.setNames(names);
+			if (!session) {
+				treeView.refresh().catch(onUnexpectedError);
+				return;
+			}
+			try {
+				const result = await analysisService.functions(session.sessionId);
+				if (token !== functionGeneration) {
+					return;
+				}
+				functions = result.functions;
+				names = interpretationService.namesFor(session.contentHash, functions.map(fn => BigInt(fn.rva)));
+				dataProvider.setFunctions(functions);
+				dataProvider.setNames(names);
+				treeView.refresh().catch(onUnexpectedError);
+			} catch (error) {
+				if (token === functionGeneration) {
+					onUnexpectedError(error);
+				}
+			}
+		};
+
+		sessionService.onDidChangeActiveSession(() => loadFunctions());
+		interpretationService.onDidChange(event => {
+			const session = sessionService.activeSession;
+			if (!session || event.edit.op !== EditOp.Rename || event.edit.anchor.contentHash !== session.contentHash) {
+				return;
+			}
+			const rva = event.edit.anchor.rva;
+			const name = interpretationService.nameAt(event.edit.anchor);
+			if (name === undefined) {
+				names.delete(rva);
+			} else {
+				names.set(rva, name);
+			}
+			dataProvider.setNames(names);
+			treeView.refresh().catch(onUnexpectedError);
+		});
+
+		if (sessionService.activeSession) {
+			loadFunctions();
+		}
 
 		// Deliberately not filtered by origin. Clicking a reference here moves
 		// the focus, and this panel must then show references for where it just
@@ -126,4 +183,10 @@ CommandsRegistry.registerCommand(DELVER_XREFS_OPEN_COMMAND, (accessor: ServicesA
 		FOCUS_ORIGIN,
 		FocusReason.User,
 	);
+});
+
+registerInterpretationViewActions({
+	commandPrefix: 'delver.xrefs',
+	viewId: DELVER_XREFS_VIEW_ID,
+	contextValue: 'delver-xref',
 });

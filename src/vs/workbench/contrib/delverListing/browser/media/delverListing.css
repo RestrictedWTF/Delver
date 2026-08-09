@@ -65,7 +65,8 @@
 
 /* Absent on every other row, and must not reserve space there. */
 .delver-listing-interpretation-label:empty,
-.delver-listing-comment:empty {
+.delver-listing-comment:empty,
+.delver-listing-tags:empty {
 	display: none;
 }
 
@@ -114,6 +115,15 @@
 .delver-listing-comment::before {
 	content: '; ';
 	color: var(--vscode-editorLineNumber-foreground);
+}
+
+.delver-listing-tags {
+	flex: 0 1 auto;
+	min-width: 0;
+	color: var(--vscode-symbolIcon-keyForeground);
+	white-space: pre;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 
 /*

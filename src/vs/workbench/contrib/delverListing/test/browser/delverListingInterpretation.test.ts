@@ -16,6 +16,7 @@ suite('Delver listing interpretation presentation', () => {
 			{
 				label: 'sub_1000',
 				comment: undefined,
+				tags: undefined,
 				linesBeforeInstruction: 1,
 				heightInLines: 2,
 			},
@@ -28,6 +29,7 @@ suite('Delver listing interpretation presentation', () => {
 			{
 				label: 'key_length',
 				comment: 'bytes, not bits',
+				tags: undefined,
 				linesBeforeInstruction: 1,
 				heightInLines: 2,
 			},
@@ -40,6 +42,20 @@ suite('Delver listing interpretation presentation', () => {
 			{
 				label: undefined,
 				comment: 'first ⏎ second ⏎ third',
+				tags: undefined,
+				linesBeforeInstruction: 0,
+				heightInLines: 1,
+			},
+		);
+	});
+
+	test('tags stay on the instruction line and do not change its height', () => {
+		assert.deepStrictEqual(
+			listingInterpretationPresentation(0x1010n, false, { tags: ['crypto', 'reviewed'] }),
+			{
+				label: undefined,
+				comment: undefined,
+				tags: '#crypto #reviewed',
 				linesBeforeInstruction: 0,
 				heightInLines: 1,
 			},

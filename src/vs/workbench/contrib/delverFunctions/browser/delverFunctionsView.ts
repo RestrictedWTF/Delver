@@ -11,79 +11,94 @@ import { FunctionSourceWire, IFunctionWire } from '../../../../platform/delver/c
 import { ITreeItem, ITreeViewDataProvider, TreeItemCollapsibleState } from '../../../common/views.js';
 
 export const DELVER_FUNCTIONS_VIEW_ID = 'delver.view.functions';
-
-/** Command invoked when a function is clicked. */
 export const DELVER_FUNCTIONS_OPEN_COMMAND = 'delver.functions.goTo';
 export const DELVER_FUNCTION_HANDLE_PREFIX = 'delver.function.';
 
-/**
- * How many swept functions the pane will list.
- *
- * A large module sweeps up ~178k guesses. Rendering them is possible but
- * pointless: nobody finds a function by scrolling past a hundred thousand
- * addresses, and the cost is paid on every refresh. The list is capped and says
- * so, which is more honest than silently stopping.
- */
-const SWEPT_LIMIT = 1_000;
+/** Maximum function rows materialized by one expanded tree node. */
+export const FUNCTION_PAGE_SIZE = 1_000;
 
 const VOUCHED_HANDLE = 'delver.functions.vouched';
 const SWEPT_HANDLE = 'delver.functions.swept';
+const PAGE_PREFIX = 'delver.functions.page.';
 
 export class DelverFunctionsTreeDataProvider implements ITreeViewDataProvider {
 	private vouched: readonly IFunctionWire[] = [];
 	private swept: readonly IFunctionWire[] = [];
+	private visibleVouched: readonly IFunctionWire[] = [];
+	private visibleSwept: readonly IFunctionWire[] = [];
 	private loaded = false;
 	private names = new Map<string, string>();
+	private filter = '';
 
 	setFunctions(functions: readonly IFunctionWire[] | undefined): void {
 		this.loaded = functions !== undefined;
-		this.vouched = functions?.filter(f => f.authoritative) ?? [];
-		this.swept = functions?.filter(f => !f.authoritative) ?? [];
+		this.vouched = functions?.filter(fn => fn.authoritative) ?? [];
+		this.swept = functions?.filter(fn => !fn.authoritative) ?? [];
+		this.rebuildVisible();
 	}
 
-	/** Authored names by RVA, as the "0x..." strings the wire uses. */
 	setNames(names: Map<string, string>): void {
 		this.names = names;
+		if (this.filter) {
+			this.rebuildVisible();
+		}
+	}
+
+	setFilter(query: string): void {
+		this.filter = query.trim().toLowerCase();
+		this.rebuildVisible();
 	}
 
 	async getChildren(element?: ITreeItem): Promise<readonly ITreeItem[] | undefined> {
 		if (!this.loaded) {
 			return [];
 		}
-
 		if (!element) {
 			return [
-				// The split is the point of this pane. A boundary the image
-				// vouches for and one a sweep guessed at are different kinds of
-				// claim, and presenting them in one list would flatten that.
 				group(
 					VOUCHED_HANDLE,
 					localize('delverFunctionsVouched', "Compiler-vouched"),
-					this.vouched.length,
+					this.visibleVouched.length,
 					TreeItemCollapsibleState.Expanded,
 				),
 				group(
 					SWEPT_HANDLE,
 					localize('delverFunctionsSwept', "Found by sweep"),
-					this.swept.length,
-					TreeItemCollapsibleState.Collapsed,
+					this.visibleSwept.length,
+					this.filter ? TreeItemCollapsibleState.Expanded : TreeItemCollapsibleState.Collapsed,
 				),
 			];
 		}
-
 		if (element.handle === VOUCHED_HANDLE) {
-			return this.vouched.map(fn => functionItem(fn, this.names.get(fn.rva)));
+			return categoryChildren('vouched', this.visibleVouched, this.names);
 		}
 		if (element.handle === SWEPT_HANDLE) {
-			const shown = this.swept
-				.slice(0, SWEPT_LIMIT)
-				.map(fn => functionItem(fn, this.names.get(fn.rva)));
-			if (this.swept.length > SWEPT_LIMIT) {
-				shown.push(overflowItem(this.swept.length - SWEPT_LIMIT));
-			}
-			return shown;
+			return categoryChildren('swept', this.visibleSwept, this.names);
 		}
-		return [];
+		const page = parsePageHandle(element.handle);
+		if (!page) {
+			return [];
+		}
+		const source = page.category === 'vouched' ? this.visibleVouched : this.visibleSwept;
+		return source
+			.slice(page.start, page.start + FUNCTION_PAGE_SIZE)
+			.map(fn => functionItem(fn, this.names.get(fn.rva)));
+	}
+
+	private rebuildVisible(): void {
+		if (!this.filter) {
+			this.visibleVouched = this.vouched;
+			this.visibleSwept = this.swept;
+			return;
+		}
+		const matches = (fn: IFunctionWire) => {
+			const name = functionDisplayName(BigInt(fn.rva), this.names.get(fn.rva));
+			return name.toLowerCase().includes(this.filter)
+				|| fn.rva.toLowerCase().includes(this.filter)
+				|| functionSourceSearchText(fn.source).includes(this.filter);
+		};
+		this.visibleVouched = this.vouched.filter(matches);
+		this.visibleSwept = this.swept.filter(matches);
 	}
 }
 
@@ -96,21 +111,35 @@ function group(handle: string, label: string, count: number, state: TreeItemColl
 	};
 }
 
+function categoryChildren(
+	category: 'vouched' | 'swept',
+	functions: readonly IFunctionWire[],
+	names: ReadonlyMap<string, string>,
+): readonly ITreeItem[] {
+	if (functions.length <= FUNCTION_PAGE_SIZE) {
+		return functions.map(fn => functionItem(fn, names.get(fn.rva)));
+	}
+	const pages: ITreeItem[] = [];
+	for (let start = 0; start < functions.length; start += FUNCTION_PAGE_SIZE) {
+		const end = Math.min(functions.length, start + FUNCTION_PAGE_SIZE);
+		pages.push({
+			handle: `${PAGE_PREFIX}${category}.${start}`,
+			label: { label: localize('delverFunctionPage', "Functions {0}-{1}", start + 1, end) },
+			description: `${functions[start].rva}-${functions[end - 1].rva}`,
+			themeIcon: ThemeIcon.fromId(Codicon.listTree.id),
+			collapsibleState: TreeItemCollapsibleState.Collapsed,
+		});
+	}
+	return pages;
+}
+
 function functionItem(fn: IFunctionWire, name: string | undefined): ITreeItem {
-	// Unnamed functions read as `sub_140001000` rather than a bare address, so
-	// the label is always a name-shaped thing and an authored name replaces it
-	// in place instead of changing what kind of row this is. The address stays
-	// in the description either way.
-	//
-	// Addresses arrive as "0x..." strings (ADR 0001) and are shown as they came.
 	return {
 		handle: `${DELVER_FUNCTION_HANDLE_PREFIX}${fn.rva}`,
 		contextValue: 'delver-function',
 		label: { label: functionDisplayName(BigInt(fn.rva), name) },
 		description: `${fn.rva}  ${describe(fn.source)}`,
-		themeIcon: ThemeIcon.fromId(
-			fn.authoritative ? Codicon.symbolFunction.id : Codicon.symbolMisc.id,
-		),
+		themeIcon: ThemeIcon.fromId(fn.authoritative ? Codicon.symbolFunction.id : Codicon.symbolMisc.id),
 		collapsibleState: TreeItemCollapsibleState.None,
 		command: {
 			id: DELVER_FUNCTIONS_OPEN_COMMAND,
@@ -131,19 +160,9 @@ export function functionRvaFromHandle(handle: string): bigint | undefined {
 	}
 }
 
-function overflowItem(remaining: number): ITreeItem {
-	return {
-		handle: 'delver.functions.overflow',
-		label: {
-			label: localize(
-				'delverFunctionsOverflow',
-				"{0} more not shown — use Go to Address",
-				remaining,
-			),
-		},
-		themeIcon: ThemeIcon.fromId(Codicon.ellipsis.id),
-		collapsibleState: TreeItemCollapsibleState.None,
-	};
+function parsePageHandle(handle: string): { category: 'vouched' | 'swept'; start: number } | undefined {
+	const match = /^delver\.functions\.page\.(vouched|swept)\.(\d+)$/.exec(handle);
+	return match ? { category: match[1] as 'vouched' | 'swept', start: Number(match[2]) } : undefined;
 }
 
 function describe(source: FunctionSourceWire): string {
@@ -156,4 +175,8 @@ function describe(source: FunctionSourceWire): string {
 		case FunctionSourceWire.LinearSweep: return localize('delverFnSweep', "guess");
 		default: return '';
 	}
+}
+
+function functionSourceSearchText(source: FunctionSourceWire): string {
+	return `${source} ${describe(source)}`.toLowerCase();
 }

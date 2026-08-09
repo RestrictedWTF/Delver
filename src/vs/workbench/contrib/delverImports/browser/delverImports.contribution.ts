@@ -10,10 +10,12 @@ import { IDelverAnalysisService } from '../../../../platform/delver/common/delve
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
-import { TreeView, TreeViewPane } from '../../../browser/parts/views/treeView.js';
+import { TreeView } from '../../../browser/parts/views/treeView.js';
 import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { Extensions as ViewExtensions, ITreeViewDescriptor, IViewsRegistry } from '../../../common/views.js';
 import { registerDelverView } from '../../../services/delver/browser/delverViewContainer.js';
+import { DelverFilterableTreeViewPane, registerDelverTreeFilterProvider } from '../../../services/delver/browser/delverFilterableTreeViewPane.js';
+import { registerInterpretationViewActions } from '../../../services/delver/browser/delverInterpretationEditing.js';
 import {
 	FocusReason,
 	IDelverFocusService,
@@ -46,11 +48,12 @@ class DelverImportsViewContribution {
 		const treeView = instantiationService.createInstance(TreeView, DELVER_IMPORTS_VIEW_ID, viewName.value);
 		const dataProvider = new DelverImportsTreeDataProvider();
 		treeView.dataProvider = dataProvider;
+		registerDelverTreeFilterProvider(treeView, dataProvider);
 
 		const viewDescriptor: ITreeViewDescriptor = {
 			id: DELVER_IMPORTS_VIEW_ID,
 			name: viewName,
-			ctorDescriptor: new SyncDescriptor(TreeViewPane),
+			ctorDescriptor: new SyncDescriptor(DelverFilterableTreeViewPane),
 			canToggleVisibility: true,
 			canMoveView: true,
 			treeView,
@@ -128,4 +131,10 @@ CommandsRegistry.registerCommand(DELVER_IMPORTS_OPEN_COMMAND, (accessor: Service
 		FOCUS_ORIGIN,
 		FocusReason.User,
 	);
+});
+
+registerInterpretationViewActions({
+	commandPrefix: 'delver.imports',
+	viewId: DELVER_IMPORTS_VIEW_ID,
+	contextValue: 'delver-import-symbol',
 });

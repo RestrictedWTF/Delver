@@ -8,6 +8,8 @@ import { Disposable } from '../../../../base/common/lifecycle.js';
 import {
 	Anchor,
 	EditOp,
+	EditStatus,
+	EditValue,
 	IAuthor,
 	IEdit,
 	IInterpretationAt,
@@ -57,7 +59,13 @@ export interface IDelverInterpretationService {
 	namesFor(contentHash: string, rvas: readonly bigint[]): Map<bigint, string>;
 
 	/** Records an edit. Appends to the log; nothing is overwritten. */
-	edit(anchor: Anchor, op: EditOp, value: string, author?: IAuthor): Promise<IEdit>;
+	edit(anchor: Anchor, op: EditOp, value: EditValue, author?: IAuthor): Promise<IEdit>;
+
+	/** Compensates the most recent uncompensated accepted edit by `author`. */
+	undoLast(contentHash: string, author?: IAuthor): Promise<IEdit | undefined>;
+
+	/** Appends compensations that reconstruct state as if `author` had not edited it. */
+	revertAuthor(contentHash: string, author: IAuthor, actor?: IAuthor): Promise<number>;
 
 	/** Exports one image's complete append-only log. */
 	exportTo(contentHash: string, destinationPath: string): Promise<number>;
@@ -135,16 +143,79 @@ export class DelverInterpretationService extends Disposable implements IDelverIn
 		return names;
 	}
 
-	edit(anchor: Anchor, op: EditOp, value: string, author: IAuthor = LOCAL_AUTHOR): Promise<IEdit> {
+	edit(anchor: Anchor, op: EditOp, value: EditValue, author: IAuthor = LOCAL_AUTHOR): Promise<IEdit> {
 		return this.queueEdit(anchor.contentHash, async () => {
 			await this.load(anchor.contentHash);
-			const log = this.logs.get(anchor.contentHash)!;
-			const next = InterpretationLog.from(log.log);
-			const edit = next.append({ author, anchor, op, value });
-			await this.storeService.append(anchor.contentHash, editToWire(edit));
-			this.logs.set(anchor.contentHash, next);
-			this._onDidChange.fire({ edit });
-			return edit;
+			return this.appendPersisted(anchor.contentHash, { author, anchor, op, value });
+		});
+	}
+
+	undoLast(contentHash: string, author: IAuthor = LOCAL_AUTHOR): Promise<IEdit | undefined> {
+		return this.queueEdit(contentHash, async () => {
+			await this.load(contentHash);
+			const log = this.logs.get(contentHash)!;
+			const active = activeLogEdits(log.log);
+			const compensated = compensatedSequences(log.log);
+			const target = [...log.log].reverse().find(edit =>
+				edit.status === EditStatus.Accepted
+				&& edit.compensates === undefined
+				&& !compensated.has(edit.seq)
+				&& sameAuthor(edit.author, author)
+			);
+			if (!target) {
+				return undefined;
+			}
+
+			const desired = InterpretationLog.from(active.filter(edit => edit !== target));
+			return this.appendPersisted(contentHash, {
+				author,
+				anchor: target.anchor,
+				op: target.op,
+				value: desired.valueAt(target.anchor, target.op),
+				compensates: [target.seq],
+			});
+		});
+	}
+
+	revertAuthor(contentHash: string, author: IAuthor, actor: IAuthor = LOCAL_AUTHOR): Promise<number> {
+		return this.queueEdit(contentHash, async () => {
+			await this.load(contentHash);
+			const log = this.logs.get(contentHash)!;
+			const active = activeLogEdits(log.log);
+			const targets = active.filter(edit =>
+				edit.status === EditStatus.Accepted
+				&& edit.compensates === undefined
+				&& sameAuthor(edit.author, author)
+			);
+			if (targets.length === 0) {
+				return 0;
+			}
+
+			const desired = InterpretationLog.from(active.filter(edit => !sameAuthor(edit.author, author)));
+			const fields = new Map<string, IEdit[]>();
+			for (const edit of targets) {
+				const key = `${edit.anchor.contentHash}:${edit.anchor.rva.toString(16)}:${edit.op}`;
+				const existing = fields.get(key);
+				if (existing) {
+					existing.push(edit);
+				} else {
+					fields.set(key, [edit]);
+				}
+			}
+
+			let count = 0;
+			for (const edits of fields.values()) {
+				const field = edits[edits.length - 1];
+				await this.appendPersisted(contentHash, {
+					author: actor,
+					anchor: field.anchor,
+					op: field.op,
+					value: desired.valueAt(field.anchor, field.op),
+					compensates: edits.map(edit => edit.seq),
+				});
+				count++;
+			}
+			return count;
 		});
 	}
 
@@ -175,6 +246,16 @@ export class DelverInterpretationService extends Disposable implements IDelverIn
 		return this.logs.get(contentHash)?.log ?? [];
 	}
 
+	private async appendPersisted(contentHash: string, request: Parameters<InterpretationLog['append']>[0]): Promise<IEdit> {
+		const log = this.logs.get(contentHash)!;
+		const next = InterpretationLog.from(log.log);
+		const edit = next.append(request);
+		await this.storeService.append(contentHash, editToWire(edit));
+		this.logs.set(contentHash, next);
+		this._onDidChange.fire({ edit });
+		return edit;
+	}
+
 	private queueEdit<T>(contentHash: string, operation: () => Promise<T>): Promise<T> {
 		const previous = this.edits.get(contentHash) ?? Promise.resolve();
 		const result = previous.then(operation, operation);
@@ -187,6 +268,27 @@ export class DelverInterpretationService extends Disposable implements IDelverIn
 		});
 		return result;
 	}
+}
+
+function sameAuthor(left: IAuthor, right: IAuthor): boolean {
+	return left.kind === right.kind && left.id === right.id;
+}
+
+function compensatedSequences(edits: readonly IEdit[]): Set<number> {
+	const compensated = new Set<number>();
+	for (const edit of edits) {
+		if (edit.status === EditStatus.Accepted) {
+			for (const seq of edit.compensates ?? []) {
+				compensated.add(seq);
+			}
+		}
+	}
+	return compensated;
+}
+
+function activeLogEdits(edits: readonly IEdit[]): readonly IEdit[] {
+	const compensated = compensatedSequences(edits);
+	return edits.filter(edit => edit.compensates === undefined && !compensated.has(edit.seq));
 }
 
 registerSingleton(IDelverInterpretationService, DelverInterpretationService, InstantiationType.Delayed);

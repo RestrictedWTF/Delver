@@ -39,6 +39,7 @@ import {
 import { DELVER_LISTING_EDITOR_ID, DelverListingInput } from './delverListingInput.js';
 import { IListingInterpretationPresentation, listingInterpretationPresentation } from './delverListingInterpretation.js';
 import { DelverListingModel, IListingRow } from './delverListingModel.js';
+import { mouseHistoryDirection } from './delverListingMouseNavigation.js';
 
 /** Identifies this view on the focus bus, so it can ignore its own echo. */
 const FOCUS_ORIGIN = 'delver.editor.listing';
@@ -260,6 +261,30 @@ export class DelverListingEditor extends EditorPane {
 			},
 		)) as WorkbenchTable<IListingRow>;
 		this.table = table;
+
+		// Mouse4/Mouse5 share the focus history used by Alt+Left/Alt+Right.
+		// Capture them before the list changes selection or Chromium treats them
+		// as page navigation. `auxclick` is suppressed separately so it cannot
+		// replay the same history movement a second time.
+		store.add(dom.addDisposableListener(this.tableContainer, dom.EventType.MOUSE_DOWN, event => {
+			const direction = mouseHistoryDirection(event.button);
+			if (direction === undefined) {
+				return;
+			}
+			event.preventDefault();
+			event.stopPropagation();
+			if (direction === 'back') {
+				this.focusService.back();
+			} else {
+				this.focusService.forward();
+			}
+		}, true));
+		store.add(dom.addDisposableListener(this.tableContainer, dom.EventType.AUXCLICK, event => {
+			if (mouseHistoryDirection(event.button) !== undefined) {
+				event.preventDefault();
+				event.stopPropagation();
+			}
+		}, true));
 
 		table.splice(0, table.length, model.rows);
 		if (this.dimension) {
@@ -514,6 +539,7 @@ interface IInstructionTemplate {
 	readonly mnemonic: HTMLElement;
 	readonly operands: HTMLElement;
 	readonly comment: HTMLElement;
+	readonly tags: HTMLElement;
 	readonly disposables: DisposableStore;
 	/** Branch target of the row currently in this reused template, if any. */
 	target: string | undefined;
@@ -539,6 +565,7 @@ class InstructionRenderer implements ITableRenderer<IListingRow, IInstructionTem
 			mnemonic: dom.append(instructionLine, dom.$('.delver-listing-mnemonic')),
 			operands: dom.append(instructionLine, dom.$('.delver-listing-operands')),
 			comment: dom.append(instructionLine, dom.$('.delver-listing-comment')),
+			tags: dom.append(instructionLine, dom.$('.delver-listing-tags')),
 			disposables: new DisposableStore(),
 			target: undefined,
 		};
@@ -566,6 +593,7 @@ class InstructionRenderer implements ITableRenderer<IListingRow, IInstructionTem
 			template.target = undefined;
 			template.label.textContent = '';
 			template.comment.textContent = '';
+			template.tags.textContent = '';
 			template.mnemonic.classList.add('delver-listing-pending');
 			template.operands.classList.remove('delver-listing-link');
 			template.row.classList.remove('delver-listing-function-start');
@@ -578,6 +606,7 @@ class InstructionRenderer implements ITableRenderer<IListingRow, IInstructionTem
 		const presentation = this.presentationFor(row.data.rva);
 		template.label.textContent = presentation.label ?? '';
 		template.comment.textContent = presentation.comment ?? '';
+		template.tags.textContent = presentation.tags ?? '';
 		template.row.classList.toggle('delver-listing-function-start', this.isFunctionStart(row.data.rva));
 
 		template.mnemonic.classList.remove('delver-listing-pending');

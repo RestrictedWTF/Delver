@@ -9,6 +9,7 @@ import { functionDisplayName } from '../../../../platform/delver/common/naming.j
 export interface IListingInterpretationPresentation {
 	readonly label?: string;
 	readonly comment?: string;
+	readonly tags?: string;
 	readonly linesBeforeInstruction: number;
 	readonly heightInLines: number;
 }
@@ -30,10 +31,12 @@ export function listingInterpretationPresentation(
 		? functionDisplayName(address, interpretation?.name)
 		: interpretation?.name;
 	const comment = interpretation?.comment?.replace(/\r\n|\r|\n/g, ' ⏎ ');
+	const tags = interpretation?.tags?.map(tag => `#${tag}`).join(' ');
 	const linesBeforeInstruction = label === undefined ? 0 : 1;
 	return {
 		label,
 		comment,
+		tags,
 		linesBeforeInstruction,
 		heightInLines: 1 + linesBeforeInstruction,
 	};

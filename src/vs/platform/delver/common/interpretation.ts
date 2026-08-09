@@ -49,7 +49,11 @@ export type Anchor = IImageAnchor;
 export const enum EditOp {
 	Rename = 'rename',
 	Comment = 'comment',
+	/** Replaces the complete tag set with a canonical array. */
+	Tags = 'tags',
 }
+
+export type EditValue = string | readonly string[];
 
 /**
  * Review state. A model's work is visible but provisional until accepted, so
@@ -69,8 +73,10 @@ export interface IEdit {
 	readonly anchor: Anchor;
 	readonly op: EditOp;
 	/** Empty string clears — a deletion is an append like everything else. */
-	readonly value: string;
+	readonly value: EditValue;
 	readonly status: EditStatus;
+	/** Earlier accepted edits whose effects this append compensates. */
+	readonly compensates?: readonly number[];
 }
 
 /** What an edit records, minus the bookkeeping the log fills in. */
@@ -78,14 +84,16 @@ export interface IEditRequest {
 	readonly author: IAuthor;
 	readonly anchor: Anchor;
 	readonly op: EditOp;
-	readonly value: string;
+	readonly value: EditValue;
 	readonly status?: EditStatus;
+	readonly compensates?: readonly number[];
 }
 
 /** Current interpretation at one anchor, materialized from the log. */
 export interface IInterpretationAt {
 	readonly name?: string;
 	readonly comment?: string;
+	readonly tags?: readonly string[];
 }
 
 /**
@@ -128,6 +136,7 @@ export class InterpretationLog {
 			op: request.op,
 			value: request.value,
 			status: request.status ?? EditStatus.Accepted,
+			compensates: request.compensates,
 		};
 		this.edits.push(edit);
 		this.materialize(edit);
@@ -142,6 +151,19 @@ export class InterpretationLog {
 	/** Authored name at `anchor`, if any. */
 	nameAt(anchor: Anchor): string | undefined {
 		return this.current.get(anchorKey(anchor))?.name;
+	}
+
+	/** Current value of one authored field, in the shape an edit stores it. */
+	valueAt(anchor: Anchor, op: EditOp): EditValue {
+		const current = this.current.get(anchorKey(anchor));
+		switch (op) {
+			case EditOp.Rename:
+				return current?.name ?? '';
+			case EditOp.Comment:
+				return current?.comment ?? '';
+			case EditOp.Tags:
+				return current?.tags ?? [];
+		}
 	}
 
 	/**
@@ -169,15 +191,70 @@ export class InterpretationLog {
 		const existing = this.current.get(key) ?? {};
 		// An empty value clears the field rather than storing a blank, so that
 		// "cleared" and "never set" read the same to every consumer.
-		const value = edit.value === '' ? undefined : edit.value;
-		const next: IInterpretationAt = edit.op === EditOp.Rename
-			? { ...existing, name: value }
-			: { ...existing, comment: value };
+		let next: IInterpretationAt;
+		switch (edit.op) {
+			case EditOp.Rename: {
+				const name = textValue(edit);
+				next = name === undefined
+					? interpretationWithoutName(existing)
+					: { ...existing, name };
+				break;
+			}
+			case EditOp.Comment: {
+				const comment = textValue(edit);
+				next = comment === undefined
+					? interpretationWithoutComment(existing)
+					: { ...existing, comment };
+				break;
+			}
+			case EditOp.Tags: {
+				const tags = tagValue(edit);
+				next = tags === undefined
+					? interpretationWithoutTags(existing)
+					: { ...existing, tags };
+				break;
+			}
+		}
 
-		if (next.name === undefined && next.comment === undefined) {
+		if (next.name === undefined && next.comment === undefined && next.tags === undefined) {
 			this.current.delete(key);
 		} else {
 			this.current.set(key, next);
 		}
 	}
+}
+
+function textValue(edit: IEdit): string | undefined {
+	if (typeof edit.value !== 'string') {
+		throw new Error(`${edit.op} interpretation edit requires a string value`);
+	}
+	return edit.value === '' ? undefined : edit.value;
+}
+
+function tagValue(edit: IEdit): readonly string[] | undefined {
+	if (!Array.isArray(edit.value)) {
+		throw new Error('tags interpretation edit requires an array value');
+	}
+	return edit.value.length === 0 ? undefined : [...edit.value];
+}
+
+function interpretationWithoutName(value: IInterpretationAt): IInterpretationAt {
+	return {
+		...(value.comment === undefined ? {} : { comment: value.comment }),
+		...(value.tags === undefined ? {} : { tags: value.tags }),
+	};
+}
+
+function interpretationWithoutComment(value: IInterpretationAt): IInterpretationAt {
+	return {
+		...(value.name === undefined ? {} : { name: value.name }),
+		...(value.tags === undefined ? {} : { tags: value.tags }),
+	};
+}
+
+function interpretationWithoutTags(value: IInterpretationAt): IInterpretationAt {
+	return {
+		...(value.name === undefined ? {} : { name: value.name }),
+		...(value.comment === undefined ? {} : { comment: value.comment }),
+	};
 }
