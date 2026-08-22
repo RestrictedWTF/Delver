@@ -149,6 +149,10 @@ export interface IEdit {
 	readonly evidence?: readonly EvidenceRef[];
 	/** Unpromoted edits are visible-but-provisional. See 05-AI-Analyst.md. */
 	readonly status: 'proposed' | 'accepted' | 'rejected';
+	/** Earlier accepted edits whose effects this append compensates. */
+	readonly compensates?: readonly number[];
+	/** Earlier proposals this append decides. ADR 0006. */
+	readonly resolves?: readonly number[];
 }
 ```
 
@@ -159,7 +163,11 @@ Because it's an append-only log:
 - "Revert everything the model did on Tuesday" is a filter plus a compensating
   append.
 - Two analysts' work merges as two logs, with conflicts detected per anchor.
-- Review UI (accept/reject) is a filter over `status === 'proposed'`.
+- Review UI (accept/reject) is a filter over `status === 'proposed'` minus the
+  proposals a later append `resolves`. A decision is itself an append: accepting
+  copies the proposal's anchor/op/value under the *reviewer's* authorship,
+  rejecting records what was declined and touches nothing
+  ([ADR 0006](../history/adr/0006-proposal-resolution-in-the-edit-log.md)).
 
 Materialize a current-state view over the log for fast reads; the log is the
 truth, the materialized table is a cache.
@@ -188,10 +196,13 @@ undone, IAT zeroed, writable data sections excluded) so a loaded module still
 matches its on-disk counterpart. That normalization function is also what powers
 the memory-vs-disk diff in [01-Critique-and-Direction.md](../history/critique-and-direction.md) G1 — build it once.
 
-When re-attaching anchors to a new target, report each as `exact`, `fuzzy`
-(fingerprint matched, content drifted), or `orphaned`. Never silently attach a
-name to the wrong bytes; that is how an analyst reaches a wrong conclusion with
-full confidence.
+When re-attaching anchors to a new target, report each as `exact` (a unique,
+versioned normalized function fingerprint matched), `fuzzy` (structural evidence
+matched at a disclosed lower confidence), or `orphaned`. Duplicate exact
+fingerprints are ambiguous rather than matched by address or order. Never
+silently attach a name to the wrong bytes; that is how an analyst reaches a
+wrong conclusion with full confidence. See
+[session-persistence.md](session-persistence.md#function-identity-across-revisions).
 
 ## 5. The graph layer
 
@@ -248,25 +259,41 @@ it until P6.
 
 ## 7. Persistence — the `.delverdb` project
 
-One SQLite database per project (WAL mode), holding:
+One SQLite database per saved project (WAL mode while open), holding:
 
 | Table group | Rewritable? | Notes |
 | --- | --- | --- |
-| `blob_*` | yes | Content-addressed captured bytes (dumps, snapshots) |
-| `fact_*` | yes | Derived analysis, keyed by content hash. Deletable. |
+| `target_*` | yes | Content hash, format metadata, and optional source locator; never sample bytes |
+| `fact_*` | yes | Derived analysis, keyed by content hash and schema version. Deletable. |
+| `decompile_*` | yes | Text, mappings, variables, and provenance qualified by backend/version/profile |
 | `edit_log` | **no** | Append-only interpretation. The user's actual work. |
 | `finding`, `recipe` | no | Investigation output |
 | `session_*` | yes | Layout, open editors, focus history |
 
 Design constraints worth honoring:
 
+- Opening a raw binary creates an untitled in-memory session. Once analysis
+  produces durable content, close, target replacement, and application shutdown
+  prompt Save / Don't Save / Cancel. A named project autosaves each durable
+  change incrementally.
 - The project must open with **no target attached** — reviewing yesterday's
   analysis on a laptop is the common case.
 - The project must be shareable as a single file, and must be openable by
   someone who does not have the sample.
-- Keep captured sample bytes in a *separate*, clearly-named file from the
-  analysis so a project can be shared without shipping malware by accident.
-  See [06-Security-Model.md](security-model.md).
+- Never store captured sample bytes in `.delverdb`; a sample is attached
+  separately and only after its content hash matches the project. See
+  [security-model.md](security-model.md).
+- Checkpoint WAL before Save As, clean close, export, or sharing so the portable
+  artifact is one complete `.delverdb` file.
+- Derived cache identity includes content hash, backend identifier, backend
+  version, analysis profile, and schema version. Interpretation remains anchored
+  to the content hash and is not invalidated by switching decompilers.
+- Ghidra projects and future native IDA databases are disposable local
+  accelerators under user data, not portable project state or records of truth.
+
+The exact lifecycle, dirty-state boundary, and backend-cache separation are in
+[session-persistence.md](session-persistence.md) and ADR
+[0005](../history/adr/0005-portable-project-database.md).
 
 ## 8. Performance budget
 

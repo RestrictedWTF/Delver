@@ -33,6 +33,7 @@ export interface IInterpretationEditWire {
 	readonly value: IEdit['value'];
 	readonly status: EditStatus;
 	readonly compensates?: readonly number[];
+	readonly resolves?: readonly number[];
 }
 
 /** Persistence for authored interpretation, hosted in the shared process. */

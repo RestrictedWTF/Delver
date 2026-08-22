@@ -14,10 +14,12 @@ import {
 	IEdit,
 	IInterpretationAt,
 	InterpretationLog,
+	ProposalOutcome,
 } from '../../../../platform/delver/common/interpretation.js';
 import {
 	editFromWire,
 	editToWire,
+	IInterpretationEditWire,
 	IDelverInterpretationStoreService,
 } from '../../../../platform/delver/common/delverInterpretationStoreService.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
@@ -44,6 +46,9 @@ export interface IDelverInterpretationService {
 	/** Loads and replays the stored log before an image is published. */
 	load(contentHash: string): Promise<void>;
 
+	/** Restores the portable project's authored log without requiring its original sample. */
+	loadFromProject(contentHash: string, edits: readonly IInterpretationEditWire[]): void;
+
 	/** Authored name at `anchor`, if any. */
 	nameAt(anchor: Anchor): string | undefined;
 
@@ -60,6 +65,23 @@ export interface IDelverInterpretationService {
 
 	/** Records an edit. Appends to the log; nothing is overwritten. */
 	edit(anchor: Anchor, op: EditOp, value: EditValue, author?: IAuthor): Promise<IEdit>;
+
+	/**
+	 * Records a provisional edit. Visible in the log, absent from the picture
+	 * until a human decides it — the whole point of the proposed state.
+	 */
+	propose(anchor: Anchor, op: EditOp, value: EditValue, author: IAuthor): Promise<IEdit>;
+
+	/** Proposals awaiting a decision for one image, oldest first. */
+	pendingProposals(contentHash: string): readonly IEdit[];
+
+	/**
+	 * Decides pending proposals after validating the complete requested batch.
+	 *
+	 * An invalid sequence prevents every append. Persistence still consists of
+	 * independent append-only records, so an I/O failure may commit a prefix.
+	 */
+	resolveProposals(contentHash: string, seqs: readonly number[], outcome: ProposalOutcome, reviewer?: IAuthor): Promise<readonly IEdit[]>;
 
 	/** Compensates the most recent uncompensated accepted edit by `author`. */
 	undoLast(contentHash: string, author?: IAuthor): Promise<IEdit | undefined>;
@@ -120,6 +142,10 @@ export class DelverInterpretationService extends Disposable implements IDelverIn
 		return loading;
 	}
 
+	loadFromProject(contentHash: string, edits: readonly IInterpretationEditWire[]): void {
+		this.logs.set(contentHash, InterpretationLog.from(edits.map(editFromWire)));
+	}
+
 	nameAt(anchor: Anchor): string | undefined {
 		return this.logs.get(anchor.contentHash)?.nameAt(anchor);
 	}
@@ -147,6 +173,35 @@ export class DelverInterpretationService extends Disposable implements IDelverIn
 		return this.queueEdit(anchor.contentHash, async () => {
 			await this.load(anchor.contentHash);
 			return this.appendPersisted(anchor.contentHash, { author, anchor, op, value });
+		});
+	}
+
+	propose(anchor: Anchor, op: EditOp, value: EditValue, author: IAuthor): Promise<IEdit> {
+		return this.queueEdit(anchor.contentHash, async () => {
+			await this.load(anchor.contentHash);
+			return this.appendPersisted(anchor.contentHash, { author, anchor, op, value, status: EditStatus.Proposed });
+		});
+	}
+
+	pendingProposals(contentHash: string): readonly IEdit[] {
+		return this.logs.get(contentHash)?.pendingProposals() ?? [];
+	}
+
+	resolveProposals(contentHash: string, seqs: readonly number[], outcome: ProposalOutcome, reviewer: IAuthor = LOCAL_AUTHOR): Promise<readonly IEdit[]> {
+		return this.queueEdit(contentHash, async () => {
+			await this.load(contentHash);
+			if (new Set(seqs).size !== seqs.length) {
+				throw new Error('A review batch cannot decide the same proposal twice');
+			}
+			const log = this.logs.get(contentHash)!;
+			// Build every resolution against the pre-batch log first. Nothing is
+			// appended or persisted until all of them are known to be valid.
+			const requests = seqs.map(seq => log.resolutionOf(seq, outcome, reviewer));
+			const resolutions: IEdit[] = [];
+			for (const request of requests) {
+				resolutions.push(await this.appendPersisted(contentHash, request));
+			}
+			return resolutions;
 		});
 	}
 

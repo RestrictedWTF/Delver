@@ -143,4 +143,109 @@ suite('InterpretationLog', () => {
 
 		assert.strictEqual(next.seq, 2);
 	});
+
+	test('a proposal is visible in the log and absent from the picture', () => {
+		const log = new InterpretationLog();
+		const proposal = log.append({ author: MODEL, anchor: at(0x1000n), op: EditOp.Rename, value: 'decrypt_config', status: EditStatus.Proposed });
+
+		assert.deepStrictEqual({
+			name: log.nameAt(at(0x1000n)),
+			logged: log.log.length,
+			pending: log.pendingProposals().map(edit => edit.seq),
+			resolved: log.isResolved(proposal.seq),
+		}, {
+			name: undefined,
+			logged: 1,
+			pending: [1],
+			resolved: false,
+		});
+	});
+
+	test('accepting a proposal appends the reviewer\'s decision and keeps the proposal traceable', () => {
+		const log = new InterpretationLog();
+		const proposal = log.append({ author: MODEL, anchor: at(0x1000n), op: EditOp.Rename, value: 'decrypt_config', status: EditStatus.Proposed });
+		const decision = log.append(log.resolutionOf(proposal.seq, EditStatus.Accepted, ANALYST));
+
+		assert.deepStrictEqual({
+			name: log.nameAt(at(0x1000n)),
+			decidedBy: decision.author,
+			resolves: decision.resolves,
+			proposedBy: log.editAt(decision.resolves![0])?.author,
+			pending: log.pendingProposals().length,
+		}, {
+			name: 'decrypt_config',
+			decidedBy: ANALYST,
+			resolves: [1],
+			proposedBy: MODEL,
+			pending: 0,
+		});
+	});
+
+	test('rejecting a proposal records what was declined without touching the picture', () => {
+		const log = new InterpretationLog();
+		log.append({ author: ANALYST, anchor: at(0x1000n), op: EditOp.Rename, value: 'authored' });
+		const proposal = log.append({ author: MODEL, anchor: at(0x1000n), op: EditOp.Rename, value: 'guessed', status: EditStatus.Proposed });
+		const decision = log.append(log.resolutionOf(proposal.seq, EditStatus.Rejected, ANALYST));
+
+		assert.deepStrictEqual({
+			name: log.nameAt(at(0x1000n)),
+			status: decision.status,
+			declined: decision.value,
+			pending: log.pendingProposals().length,
+			resolved: log.isResolved(proposal.seq),
+		}, {
+			name: 'authored',
+			status: EditStatus.Rejected,
+			declined: 'guessed',
+			pending: 0,
+			resolved: true,
+		});
+	});
+
+	test('a decided, unknown, or non-proposed sequence cannot be resolved', () => {
+		const log = new InterpretationLog();
+		const accepted = log.append({ author: ANALYST, anchor: at(0x1000n), op: EditOp.Rename, value: 'authored' });
+		const proposal = log.append({ author: MODEL, anchor: at(0x2000n), op: EditOp.Rename, value: 'guessed', status: EditStatus.Proposed });
+		log.append(log.resolutionOf(proposal.seq, EditStatus.Accepted, ANALYST));
+
+		assert.deepStrictEqual([
+			() => log.resolutionOf(99, EditStatus.Accepted, ANALYST),
+			() => log.resolutionOf(accepted.seq, EditStatus.Accepted, ANALYST),
+			() => log.resolutionOf(proposal.seq, EditStatus.Rejected, ANALYST),
+		].map(resolve => {
+			try {
+				resolve();
+				return 'accepted';
+			} catch (error) {
+				return (error as Error).message;
+			}
+		}), [
+			'No interpretation edit at sequence 99',
+			'Interpretation edit 1 is not a proposal',
+			'Proposal 2 has already been decided',
+		]);
+	});
+
+	test('replay restores pending proposals and decisions', () => {
+		const original = new InterpretationLog();
+		const kept = original.append({ author: MODEL, anchor: at(0x1000n), op: EditOp.Rename, value: 'still_pending', status: EditStatus.Proposed });
+		const decided = original.append({ author: MODEL, anchor: at(0x2000n), op: EditOp.Comment, value: 'stage two', status: EditStatus.Proposed });
+		original.append(original.resolutionOf(decided.seq, EditStatus.Accepted, ANALYST));
+
+		const replayed = InterpretationLog.from(original.log);
+
+		assert.deepStrictEqual({
+			pending: replayed.pendingProposals().map(edit => edit.seq),
+			decided: replayed.isResolved(decided.seq),
+			comment: replayed.at(at(0x2000n)),
+			name: replayed.nameAt(at(0x1000n)),
+			keptStatus: replayed.editAt(kept.seq)?.status,
+		}, {
+			pending: [1],
+			decided: true,
+			comment: { comment: 'stage two' },
+			name: undefined,
+			keptStatus: EditStatus.Proposed,
+		});
+	});
 });

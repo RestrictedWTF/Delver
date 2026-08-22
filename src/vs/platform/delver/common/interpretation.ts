@@ -77,6 +77,15 @@ export interface IEdit {
 	readonly status: EditStatus;
 	/** Earlier accepted edits whose effects this append compensates. */
 	readonly compensates?: readonly number[];
+	/**
+	 * Earlier proposals this append decides.
+	 *
+	 * Distinct from `compensates`: a compensation undoes an effect the picture
+	 * already had, while a resolution decides a proposal that never entered it.
+	 * Keeping them apart is what lets a review surface show "declined" and
+	 * "reverted" as the different things they are.
+	 */
+	readonly resolves?: readonly number[];
 }
 
 /** What an edit records, minus the bookkeeping the log fills in. */
@@ -87,7 +96,11 @@ export interface IEditRequest {
 	readonly value: EditValue;
 	readonly status?: EditStatus;
 	readonly compensates?: readonly number[];
+	readonly resolves?: readonly number[];
 }
+
+/** The outcome a human can record against a pending proposal. */
+export type ProposalOutcome = EditStatus.Accepted | EditStatus.Rejected;
 
 /** Current interpretation at one anchor, materialized from the log. */
 export interface IInterpretationAt {
@@ -114,6 +127,8 @@ function anchorKey(anchor: Anchor): string {
 export class InterpretationLog {
 	private readonly edits: IEdit[] = [];
 	private readonly current = new Map<string, IInterpretationAt>();
+	private readonly bySeq = new Map<number, IEdit>();
+	private readonly resolved = new Set<number>();
 	private nextSeq = 1;
 
 	/** Every edit, oldest first. This is the record; do not mutate it. */
@@ -128,6 +143,9 @@ export class InterpretationLog {
 	 * edits arrive as `proposed` and only reach the view once accepted.
 	 */
 	append(request: IEditRequest): IEdit {
+		for (const seq of request.resolves ?? []) {
+			this.assertPending(seq);
+		}
 		const edit: IEdit = {
 			seq: this.nextSeq++,
 			at: Date.now(),
@@ -137,10 +155,46 @@ export class InterpretationLog {
 			value: request.value,
 			status: request.status ?? EditStatus.Accepted,
 			compensates: request.compensates,
+			resolves: request.resolves,
 		};
-		this.edits.push(edit);
-		this.materialize(edit);
+		this.record(edit);
 		return edit;
+	}
+
+	/**
+	 * Builds the append that decides one pending proposal.
+	 *
+	 * Returned rather than appended so the caller can persist it through the
+	 * same path as every other edit. Accepting copies the proposal's exact
+	 * anchor, op, and value, and is authored by the reviewer: the proposal
+	 * remains in the log at `resolves`, so "where did this name come from?" is
+	 * still answerable while "who decided it?" names a person.
+	 */
+	resolutionOf(seq: number, outcome: ProposalOutcome, reviewer: IAuthor): IEditRequest {
+		const proposal = this.assertPending(seq);
+		return {
+			author: reviewer,
+			anchor: proposal.anchor,
+			op: proposal.op,
+			value: proposal.value,
+			status: outcome,
+			resolves: [seq],
+		};
+	}
+
+	/** Proposals no later append has decided, oldest first. */
+	pendingProposals(): readonly IEdit[] {
+		return this.edits.filter(edit => edit.status === EditStatus.Proposed && !this.resolved.has(edit.seq));
+	}
+
+	/** Whether a proposal has already been accepted or rejected. */
+	isResolved(seq: number): boolean {
+		return this.resolved.has(seq);
+	}
+
+	/** The edit at `seq`, for a review surface resolving a `resolves` reference. */
+	editAt(seq: number): IEdit | undefined {
+		return this.bySeq.get(seq);
 	}
 
 	/** Current interpretation at `anchor`, if anything has been authored there. */
@@ -175,11 +229,38 @@ export class InterpretationLog {
 	static from(edits: readonly IEdit[]): InterpretationLog {
 		const log = new InterpretationLog();
 		for (const edit of edits) {
-			log.edits.push(edit);
+			// Replay is deliberately tolerant where `append` is strict: a stored
+			// log that references a sequence it does not contain is still the
+			// user's work, and refusing to load it loses far more than it protects.
+			log.record(edit);
 			log.nextSeq = Math.max(log.nextSeq, edit.seq + 1);
-			log.materialize(edit);
 		}
 		return log;
+	}
+
+	/** Files one edit into the log, the index, the resolution set, and the view. */
+	private record(edit: IEdit): void {
+		this.edits.push(edit);
+		this.bySeq.set(edit.seq, edit);
+		for (const seq of edit.resolves ?? []) {
+			this.resolved.add(seq);
+		}
+		this.materialize(edit);
+	}
+
+	/** Fails closed on an unknown, non-proposed, or already-decided sequence. */
+	private assertPending(seq: number): IEdit {
+		const proposal = this.bySeq.get(seq);
+		if (!proposal) {
+			throw new Error(`No interpretation edit at sequence ${seq}`);
+		}
+		if (proposal.status !== EditStatus.Proposed) {
+			throw new Error(`Interpretation edit ${seq} is not a proposal`);
+		}
+		if (this.resolved.has(seq)) {
+			throw new Error(`Proposal ${seq} has already been decided`);
+		}
+		return proposal;
 	}
 
 	private materialize(edit: IEdit): void {

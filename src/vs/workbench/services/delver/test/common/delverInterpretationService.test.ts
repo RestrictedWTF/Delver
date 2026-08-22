@@ -9,10 +9,13 @@ import {
 	IDelverInterpretationStoreService,
 	IInterpretationEditWire,
 } from '../../../../../platform/delver/common/delverInterpretationStoreService.js';
-import { EditOp, EditStatus } from '../../../../../platform/delver/common/interpretation.js';
+import { EditOp, EditStatus, IAuthor } from '../../../../../platform/delver/common/interpretation.js';
 import { DelverInterpretationService } from '../../common/delverInterpretationService.js';
 
 const HASH = 'a'.repeat(64);
+
+const ANALYST: IAuthor = { kind: 'human', id: 'analyst' };
+const MODEL: IAuthor = { kind: 'model', id: 'opus-5' };
 
 class FakeStore implements Partial<IDelverInterpretationStoreService> {
 	readonly persisted: IInterpretationEditWire[] = [{
@@ -151,5 +154,71 @@ suite('DelverInterpretationService persistence', () => {
 				announced: ['shared-analyst'],
 			},
 		);
+	});
+
+	test('a proposal is persisted and pending until a reviewer decides it', async () => {
+		const persistence = new FakeStore();
+		const service = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService));
+		const anchor = { kind: 'image' as const, contentHash: HASH, rva: 0x2000n };
+		await service.load(HASH);
+
+		const proposal = await service.propose(anchor, EditOp.Rename, 'decrypt_config', MODEL);
+		const pendingBefore = service.pendingProposals(HASH).map(edit => edit.seq);
+		const [decision] = await service.resolveProposals(HASH, [proposal.seq], EditStatus.Accepted, ANALYST);
+
+		assert.deepStrictEqual({
+			pendingBefore,
+			nameBefore: undefined,
+			pendingAfter: service.pendingProposals(HASH).length,
+			name: service.nameAt(anchor),
+			decidedBy: decision.author.id,
+			resolves: decision.resolves,
+			persistedStatuses: persistence.persisted.map(edit => edit.status),
+			persistedResolves: persistence.persisted.map(edit => edit.resolves),
+		}, {
+			pendingBefore: [8],
+			nameBefore: undefined,
+			pendingAfter: 0,
+			name: 'decrypt_config',
+			decidedBy: 'analyst',
+			resolves: [8],
+			persistedStatuses: [EditStatus.Accepted, EditStatus.Proposed, EditStatus.Accepted],
+			persistedResolves: [undefined, undefined, [8]],
+		});
+	});
+
+	test('an invalid review batch appends no resolutions', async () => {
+		const persistence = new FakeStore();
+		const service = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService));
+		await service.load(HASH);
+
+		const first = await service.propose({ kind: 'image', contentHash: HASH, rva: 0x2000n }, EditOp.Rename, 'first', MODEL);
+		const second = await service.propose({ kind: 'image', contentHash: HASH, rva: 0x3000n }, EditOp.Rename, 'second', MODEL);
+		const persistedBefore = persistence.persisted.length;
+
+		let failure = 'accepted';
+		try {
+			// The second sequence is not a proposal, so nothing may be appended.
+			await service.resolveProposals(HASH, [first.seq, 7], EditStatus.Accepted, ANALYST);
+		} catch (error) {
+			failure = (error as Error).message;
+		}
+		const rejected = await service.resolveProposals(HASH, [first.seq, second.seq], EditStatus.Rejected, ANALYST);
+
+		assert.deepStrictEqual({
+			failure,
+			persistedAfterFailure: persistedBefore,
+			appendedByFailure: persistence.persisted.length - persistedBefore - rejected.length,
+			pending: service.pendingProposals(HASH).length,
+			names: [service.nameAt({ kind: 'image', contentHash: HASH, rva: 0x2000n }), service.nameAt({ kind: 'image', contentHash: HASH, rva: 0x3000n })],
+			outcomes: rejected.map(edit => edit.status),
+		}, {
+			failure: 'Interpretation edit 7 is not a proposal',
+			persistedAfterFailure: 3,
+			appendedByFailure: 0,
+			pending: 0,
+			names: [undefined, undefined],
+			outcomes: [EditStatus.Rejected, EditStatus.Rejected],
+		});
 	});
 });

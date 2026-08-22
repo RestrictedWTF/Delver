@@ -113,6 +113,9 @@ export class DelverInterpretationStoreService implements IDelverInterpretationSt
 }
 
 function parseLog(contents: string, contentHash: string, source: string): readonly IInterpretationEditWire[] {
+	if (contents.startsWith('SQLite format 3\0')) {
+		throw new Error(`Cannot import Delver project database ${source} as an interpretation log. Select a .delverlog file instead.`);
+	}
 	const lines = contents.split('\n');
 	const edits: IInterpretationEditWire[] = [];
 	for (let index = 0; index < lines.length; index++) {
@@ -157,7 +160,8 @@ function validateEdit(value: unknown, contentHash: string, location: string): as
 		|| (value.op !== EditOp.Rename && value.op !== EditOp.Comment && value.op !== EditOp.Tags)
 		|| !isValueForOp(value.op, value.value)
 		|| (value.status !== EditStatus.Proposed && value.status !== EditStatus.Accepted && value.status !== EditStatus.Rejected)
-		|| (value.compensates !== undefined && !isCompensationList(value.compensates))
+		|| (value.compensates !== undefined && !isSequenceList(value.compensates))
+		|| (value.resolves !== undefined && !isSequenceList(value.resolves))
 	) {
 		throw new Error(`Invalid interpretation edit at ${location}`);
 	}
@@ -173,7 +177,7 @@ function isValueForOp(op: EditOp, value: unknown): boolean {
 	return typeof value === 'string';
 }
 
-function isCompensationList(value: unknown): value is readonly number[] {
+function isSequenceList(value: unknown): value is readonly number[] {
 	return Array.isArray(value)
 		&& value.length > 0
 		&& value.every(seq => Number.isSafeInteger(seq) && seq > 0)
@@ -203,6 +207,7 @@ function resequenceImportedEdits(
 		...edit,
 		seq: mapped.get(edit.seq)!,
 		compensates: edit.compensates?.map(seq => mapped.get(seq) ?? seq),
+		resolves: edit.resolves?.map(seq => mapped.get(seq) ?? seq),
 	}));
 }
 
