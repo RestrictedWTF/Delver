@@ -274,6 +274,29 @@
       ],
       "type": "object"
     },
+    "FunctionFingerprintWire": {
+      "description": "Versioned digest used to associate unchanged functions across binaries.",
+      "properties": {
+        "algorithm": {
+          "description": "Digest algorithm.",
+          "type": "string"
+        },
+        "digest": {
+          "description": "Lowercase hexadecimal digest.",
+          "type": "string"
+        },
+        "normalization": {
+          "description": "Versioned normalization profile.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "algorithm",
+        "digest",
+        "normalization"
+      ],
+      "type": "object"
+    },
     "FunctionSeedWire": {
       "description": "A candidate function start on the wire.",
       "properties": {
@@ -359,6 +382,17 @@
             "string",
             "null"
           ]
+        },
+        "fingerprint": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/FunctionFingerprintWire"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Relocation-insensitive identity of the function's normalized listing."
         },
         "rva": {
           "description": "Entry RVA.",

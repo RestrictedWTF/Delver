@@ -92,7 +92,7 @@ class DelverXrefsViewContribution {
 				return;
 			}
 			try {
-				const result = await analysisService.functions(session.sessionId);
+				const result = await sessionService.functions();
 				if (token !== functionGeneration) {
 					return;
 				}
@@ -138,7 +138,7 @@ class DelverXrefsViewContribution {
 			const location = e.focus.location;
 			const token = ++generation;
 
-			if (!session || !location) {
+			if (!session || !location || !session.sessionId) {
 				dataProvider.setContent(undefined);
 				treeView.refresh().catch(onUnexpectedError);
 				return;

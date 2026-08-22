@@ -9,13 +9,12 @@
  * **A placeholder is not an authored name.** It is never written to the
  * interpretation log: doing so would attribute a machine-generated label to an
  * analyst, and the whole value of that log is that everything in it was
- * genuinely decided by someone. `sub_140001000` means "nobody has looked at
+ * genuinely decided by someone. `SUB_1000` means "nobody has looked at
  * this", and it has to keep meaning that.
  *
- * The `sub_` / `loc_` convention comes from IDA. It is worth matching exactly
- * because these names get pasted into notes, tickets, and papers, and an
- * analyst reading `sub_140001000` in a report should be able to type it into
- * whatever tool they have open.
+ * Delver uses image-relative addresses so generated names remain stable when
+ * an image is rebased. The upper-case `SUB_` spelling also keeps generated
+ * names visually distinct from authored names.
  */
 
 /** Formats an RVA the way placeholder names do: bare uppercase hex, no `0x`. */
@@ -23,9 +22,9 @@ function bareHex(rva: bigint): string {
 	return rva.toString(16).toUpperCase();
 }
 
-/** Placeholder for a function entry, e.g. `sub_140001000`. */
+/** Placeholder for a function entry, e.g. `SUB_1000`. */
 export function placeholderFunctionName(rva: bigint): string {
-	return `sub_${bareHex(rva)}`;
+	return `SUB_${bareHex(rva)}`;
 }
 
 /** Placeholder for a labelled address that is not a function entry. */
@@ -46,5 +45,7 @@ export function functionDisplayName(rva: bigint, authored: string | undefined): 
 
 /** Whether `name` is a placeholder this module produced rather than authored text. */
 export function isPlaceholderName(name: string): boolean {
-	return /^(sub|loc)_[0-9A-F]+$/.test(name);
+	// Lower-case sub_ is retained for project/log compatibility with builds
+	// created before Delver standardized its generated function spelling.
+	return /^(?:SUB|sub|loc)_[0-9A-F]+$/.test(name);
 }

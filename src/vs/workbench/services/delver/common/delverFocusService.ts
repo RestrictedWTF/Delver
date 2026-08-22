@@ -23,6 +23,8 @@ export interface IDelverFocus {
 	readonly moment: IMoment;
 	readonly location?: ILocation;
 	readonly selection?: IRange;
+	/** Exact discontiguous ranges represented by the focused semantic item. */
+	readonly selections?: readonly IRange[];
 }
 
 /**
@@ -60,6 +62,7 @@ export interface IFocusUpdate {
 	readonly moment?: IMoment;
 	readonly location?: ILocation | null;
 	readonly selection?: IRange | null;
+	readonly selections?: readonly IRange[] | null;
 }
 
 /**
@@ -143,6 +146,11 @@ export class DelverFocusService extends Disposable implements IDelverFocusServic
 			moment: update.moment ?? previous.moment,
 			location: update.location === undefined ? previous.location : (update.location ?? undefined),
 			selection: update.selection === undefined ? previous.selection : (update.selection ?? undefined),
+			// Exact semantic ranges belong to the location that published them. A
+			// later location-only navigation must not leave stale pseudocode paint.
+			selections: update.selections === undefined
+				? (update.location === undefined ? previous.selections : undefined)
+				: (update.selections ?? undefined),
 		};
 
 		if (isSameFocus(previous, next)) {
@@ -210,7 +218,8 @@ function isSameFocus(a: IDelverFocus, b: IDelverFocus): boolean {
 		a.moment.kind === b.moment.kind &&
 		a.moment.epoch === b.moment.epoch &&
 		sameLocation(a.location, b.location) &&
-		sameRange(a.selection, b.selection)
+		sameRange(a.selection, b.selection) &&
+		sameRanges(a.selections, b.selections)
 	);
 }
 
@@ -226,6 +235,13 @@ function sameRange(a: IRange | undefined, b: IRange | undefined): boolean {
 		return a === b;
 	}
 	return a.start === b.start && a.end === b.end;
+}
+
+function sameRanges(a: readonly IRange[] | undefined, b: readonly IRange[] | undefined): boolean {
+	if (!a || !b) {
+		return a === b;
+	}
+	return a.length === b.length && a.every((range, index) => sameRange(range, b[index]));
 }
 
 registerSingleton(IDelverFocusService, DelverFocusService, InstantiationType.Delayed);

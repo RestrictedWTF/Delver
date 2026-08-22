@@ -32,6 +32,47 @@ export interface IAnalysisSessionHandle {
 	readonly image: IOpenImageResult;
 }
 
+export type DelverDecompilerBackendState = 'unconfigured' | 'starting' | 'ready' | 'failed' | 'disabled';
+
+export type DelverDecompilerStatusWire =
+	| { readonly state: 'ready'; readonly backendId: string; readonly backendVersion: string; readonly adapterVersion: string; readonly label: string; readonly processGeneration: number; readonly spawnMs: number; readonly handshakeMs: number }
+	| { readonly state: 'unconfigured' | 'failed' | 'disabled'; readonly reason: string; readonly diagnostic?: string }
+	| { readonly state: 'starting'; readonly backendId: string; readonly label: string; readonly reason: string };
+
+export interface IDelverDecompilationTimingsWire {
+	readonly spawnMs: number;
+	readonly handshakeMs: number;
+	readonly targetOpenMs: number;
+	readonly functionRecoveryMs: number;
+	readonly decompilationMs: number;
+	readonly serializationMs: number;
+}
+
+export interface IDelverDecompilationWire {
+	readonly backendId: string;
+	readonly backendVersion: string;
+	readonly adapterVersion: string;
+	readonly processGeneration: number;
+	readonly timings: IDelverDecompilationTimingsWire;
+	readonly serialized: string;
+}
+
+export interface IDelverDecompilerCacheInfoWire {
+	readonly path: string;
+	readonly projectCount: number;
+	readonly fileCount: number;
+	readonly byteLength: number;
+}
+
+export interface IDelverDecompilerTargetPreparationWire {
+	readonly backendId: string;
+	readonly backendVersion: string;
+	readonly processGeneration: number;
+	readonly spawnMs: number;
+	readonly handshakeMs: number;
+	readonly targetOpenMs: number;
+}
+
 /**
  * Analysis, as the renderer sees it.
  *
@@ -105,6 +146,27 @@ export interface IDelverAnalysisService {
 	 * References **from** `rva` — what this address reaches.
 	 */
 	xrefsFrom(sessionId: AnalysisSessionId, rva: string): Promise<IXrefsResult>;
+
+	/** Starts the selected backend and reports the backend that actually answered. */
+	decompilerStatus(ghidraHome: string | undefined, pythonPath: string | undefined, backend?: 'pyghidra' | 'headless'): Promise<DelverDecompilerStatusWire>;
+
+	/** Terminates persistent backend state and starts a fresh worker generation. */
+	restartDecompiler(ghidraHome: string | undefined, pythonPath: string | undefined, backend?: 'pyghidra' | 'headless'): Promise<DelverDecompilerStatusWire>;
+
+	/** Measures Delver's fixed native decompiler cache without opening a backend. */
+	decompilerCacheInfo(): Promise<IDelverDecompilerCacheInfoWire>;
+
+	/** Stops persistent workers and removes only Delver's fixed native cache. */
+	clearDecompilerCache(): Promise<IDelverDecompilerCacheInfoWire>;
+
+	/** Runs one decompilation and identifies the backend that emitted its versioned JSON. */
+	decompileFunction(sessionId: AnalysisSessionId, rva: string, contentHash: string, ghidraHome: string, pythonPath: string, operationId: string, backend: 'pyghidra' | 'headless'): Promise<IDelverDecompilationWire>;
+
+	/** Starts and opens a verified target in PyGhidra before the first F5 request. */
+	prepareDecompilerTarget(sessionId: AnalysisSessionId, contentHash: string, ghidraHome: string, pythonPath: string): Promise<IDelverDecompilerTargetPreparationWire>;
+
+	/** Cancels an in-flight decompilation operation. */
+	cancelDecompile(operationId: string): Promise<void>;
 
 	/**
 	 * Ends a session and terminates its processes.

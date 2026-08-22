@@ -12,7 +12,8 @@ import { DisposableStore, MutableDisposable } from '../../../../base/common/life
 import { localize } from '../../../../nls.js';
 import { IContextKey, IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { IDelverAnalysisService } from '../../../../platform/delver/common/delverAnalysisService.js';
-import { FlowKindWire } from '../../../../platform/delver/common/protocol.generated.js';
+import { IRange } from '../../../../platform/delver/common/address.js';
+import { FlowKindWire, IFunctionWire } from '../../../../platform/delver/common/protocol.generated.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { WorkbenchTable } from '../../../../platform/list/browser/listService.js';
 import { IStorageService } from '../../../../platform/storage/common/storage.js';
@@ -40,6 +41,7 @@ import { DELVER_LISTING_EDITOR_ID, DelverListingInput } from './delverListingInp
 import { IListingInterpretationPresentation, listingInterpretationPresentation } from './delverListingInterpretation.js';
 import { DelverListingModel, IListingRow } from './delverListingModel.js';
 import { mouseHistoryDirection } from './delverListingMouseNavigation.js';
+import { isInstructionHighlighted } from './delverListingHighlights.js';
 
 /** Identifies this view on the focus bus, so it can ignore its own echo. */
 const FOCUS_ORIGIN = 'delver.editor.listing';
@@ -73,6 +75,8 @@ export class DelverListingEditor extends EditorPane {
 	 * `BigInt` parse per rendered row.
 	 */
 	private functionStarts = new Set<string>();
+	private functions: readonly IFunctionWire[] = [];
+	private highlightedRanges: readonly IRange[] = [];
 
 	/** Absolute ordinal of the row at the top of the viewport. */
 	private topRow = 0;
@@ -167,6 +171,10 @@ export class DelverListingEditor extends EditorPane {
 		if (token.isCancellationRequested) {
 			return;
 		}
+		if (!handle.sessionId || !handle.image) {
+			this.message.textContent = localize('delverListingNeedsTarget', "Locate the matching target to open the instruction listing.");
+			return;
+		}
 
 		this.session = handle;
 		this.publishedSession = handle;
@@ -177,10 +185,11 @@ export class DelverListingEditor extends EditorPane {
 		// module has ~178k entries and the rows only gain their separators once
 		// this lands.
 		try {
-			const { functions } = await this.analysisService.functions(handle.sessionId);
+			const { functions } = await this.sessionService.functions();
 			if (this.session !== handle) {
 				return;
 			}
+			this.functions = functions;
 			this.functionStarts = new Set(functions.map(f => f.rva));
 			// A splice, not a rerender: row heights change once starts are known,
 			// and heights are only recomputed when elements are spliced in.
@@ -202,12 +211,13 @@ export class DelverListingEditor extends EditorPane {
 		const model = new DelverListingModel(
 			{
 				listingWindow: async (startRow, count) =>
-					(await this.analysisService.listingWindow(handle.sessionId, startRow, count)).rows,
+					(await this.analysisService.listingWindow(handle.sessionId!, startRow, count)).rows,
 			},
-			handle.image.instruction_count,
+			handle.image!.instruction_count,
 		);
 		store.add(model);
 		this.model = model;
+		this.highlightedRanges = this.focusService.focus.selections ?? [];
 
 		// Authored labels share their instruction's element. This preserves the
 		// listing's exact row-to-address identity while giving the optional label
@@ -251,6 +261,7 @@ export class DelverListingEditor extends EditorPane {
 					target => this.followTarget(target),
 					rva => this.presentationFor(rva),
 					rva => this.functionStarts.has(rva),
+					row => this.isPseudocodeHighlighted(row),
 				),
 			],
 			{
@@ -325,6 +336,7 @@ export class DelverListingEditor extends EditorPane {
 		store.add(table.onDidScroll(() => this.updateVisibleRange()));
 		store.add(table.onDidChangeSelection(e => this.publishFocus(e.elements[0])));
 		store.add(this.focusService.onDidChangeFocus(e => {
+			this.updatePseudocodeHighlights(e.focus.selections ?? []);
 			if (e.origin !== FOCUS_ORIGIN && this.shouldFollow(e.reason)) {
 				this.applyFocus();
 			}
@@ -394,6 +406,62 @@ export class DelverListingEditor extends EditorPane {
 		this.followTarget(focused?.data?.branch_target);
 	}
 
+	private isPseudocodeHighlighted(row: IListingRow): boolean {
+		if (!row.data) {
+			return false;
+		}
+		return isInstructionHighlighted(row.data, this.highlightedRanges);
+	}
+
+	private updatePseudocodeHighlights(ranges: readonly IRange[]): void {
+		if (sameRanges(this.highlightedRanges, ranges)) {
+			return;
+		}
+		this.highlightedRanges = ranges;
+		const table = this.table;
+		const model = this.model;
+		if (!table || !model || table.length === 0) {
+			return;
+		}
+		const selection = table.getSelection();
+		const focus = table.getFocus();
+		// WorkbenchTable does not expose ListView's visible-index getters. The
+		// listing already uses this conservative estimate for page prefetching;
+		// interpretation headers only make it overdraw a few additional rows.
+		const first = Math.max(0, Math.floor(table.scrollTop / ROW_HEIGHT) - 2);
+		const visibleRows = Math.ceil((this.dimension?.height ?? ROW_HEIGHT) / ROW_HEIGHT) + 4;
+		const last = Math.min(table.length - 1, first + visibleRows);
+		const wasApplyingFocus = this.applyingFocus;
+		this.applyingFocus = true;
+		try {
+			for (let index = first; index <= last; index++) {
+				table.splice(index, 1, [model.rows[index]]);
+			}
+			table.setFocus(focus);
+			table.setSelection(selection);
+		} finally {
+			this.applyingFocus = wasApplyingFocus;
+		}
+	}
+
+	/** Returns the entry of the function containing the selected instruction. */
+	async selectedFunctionRva(): Promise<bigint | undefined> {
+		const selected = this.table?.getFocusedElements()[0] ?? this.table?.getSelectedElements()[0];
+		const session = this.session;
+		if (!selected?.data || !session) {
+			return undefined;
+		}
+		if (this.functions.length === 0) {
+			const { functions } = await this.sessionService.functions();
+			if (this.session !== session) {
+				return undefined;
+			}
+			this.functions = functions;
+			this.functionStarts = new Set(functions.map(f => f.rva));
+		}
+		return containingFunctionRva(this.functions, BigInt(selected.data.rva));
+	}
+
 	private followTarget(target: string | undefined): void {
 		if (target === undefined) {
 			return;
@@ -428,6 +496,9 @@ export class DelverListingEditor extends EditorPane {
 		}
 
 		const rva = `0x${location.address.toString(16).toUpperCase()}`;
+		if (!session.sessionId) {
+			return;
+		}
 		const row = await this.analysisService.rowForAddress(session.sessionId, rva, true);
 		if (row === undefined || this.model !== model) {
 			return;
@@ -505,7 +576,30 @@ export class DelverListingEditor extends EditorPane {
 		this.publishedSession = undefined;
 		this.session = undefined;
 		this.functionStarts = new Set();
+		this.functions = [];
+		this.highlightedRanges = [];
 	}
+}
+
+/** Finds a containing function without requiring the cursor to be on its entry row. */
+export function containingFunctionRva(functions: readonly IFunctionWire[], rva: bigint): bigint | undefined {
+	let low = 0;
+	let high = functions.length - 1;
+	let candidate: IFunctionWire | undefined;
+	while (low <= high) {
+		const middle = (low + high) >>> 1;
+		const start = BigInt(functions[middle].rva);
+		if (start <= rva) {
+			candidate = functions[middle];
+			low = middle + 1;
+		} else {
+			high = middle - 1;
+		}
+	}
+	if (!candidate || (candidate.end_rva !== undefined && rva >= BigInt(candidate.end_rva))) {
+		return undefined;
+	}
+	return BigInt(candidate.rva);
 }
 
 interface ICellTemplate {
@@ -553,6 +647,7 @@ class InstructionRenderer implements ITableRenderer<IListingRow, IInstructionTem
 		private readonly onFollow: (target: string) => void,
 		private readonly presentationFor: (rva: string) => IListingInterpretationPresentation,
 		private readonly isFunctionStart: (rva: string) => boolean,
+		private readonly isHighlighted: (row: IListingRow) => boolean,
 	) { }
 
 	renderTemplate(container: HTMLElement): IInstructionTemplate {
@@ -597,6 +692,7 @@ class InstructionRenderer implements ITableRenderer<IListingRow, IInstructionTem
 			template.mnemonic.classList.add('delver-listing-pending');
 			template.operands.classList.remove('delver-listing-link');
 			template.row.classList.remove('delver-listing-function-start');
+			template.row.classList.remove('delver-listing-pseudocode-highlight');
 			return;
 		}
 
@@ -608,6 +704,7 @@ class InstructionRenderer implements ITableRenderer<IListingRow, IInstructionTem
 		template.comment.textContent = presentation.comment ?? '';
 		template.tags.textContent = presentation.tags ?? '';
 		template.row.classList.toggle('delver-listing-function-start', this.isFunctionStart(row.data.rva));
+		template.row.classList.toggle('delver-listing-pseudocode-highlight', this.isHighlighted(row));
 
 		template.mnemonic.classList.remove('delver-listing-pending');
 		template.mnemonic.textContent = row.data.mnemonic;
@@ -630,6 +727,10 @@ function isBranch(flow: FlowKindWire): boolean {
 	return flow === FlowKindWire.Call
 		|| flow === FlowKindWire.Jump
 		|| flow === FlowKindWire.ConditionalJump;
+}
+
+function sameRanges(left: readonly IRange[], right: readonly IRange[]): boolean {
+	return left.length === right.length && left.every((range, index) => range.start === right[index].start && range.end === right[index].end);
 }
 
 function toMessage(error: unknown): string {

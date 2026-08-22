@@ -21,14 +21,14 @@ suite('Delver naming', () => {
 		// and must be recognisable to anyone coming from IDA.
 		assert.deepStrictEqual(
 			[placeholderFunctionName(0x140001000n), placeholderLocationName(0x1000n)],
-			['sub_140001000', 'loc_1000'],
+			['SUB_140001000', 'loc_1000'],
 		);
 	});
 
 	test('the full u64 range survives', () => {
 		assert.strictEqual(
 			placeholderFunctionName(0xFFFFFFFFFFFFFFFFn),
-			'sub_FFFFFFFFFFFFFFFF',
+			'SUB_FFFFFFFFFFFFFFFF',
 		);
 	});
 
@@ -39,7 +39,7 @@ suite('Delver naming', () => {
 	test('clearing a name restores the placeholder rather than blanking the row', () => {
 		assert.deepStrictEqual(
 			[functionDisplayName(0x1000n, undefined), functionDisplayName(0x1000n, '')],
-			['sub_1000', 'sub_1000'],
+			['SUB_1000', 'SUB_1000'],
 		);
 	});
 
@@ -47,7 +47,8 @@ suite('Delver naming', () => {
 		// Nothing may write a placeholder into the interpretation log: it would
 		// attribute a generated label to an analyst, and the log's whole value is
 		// that everything in it was actually decided by someone.
-		assert.ok(isPlaceholderName('sub_140001000'));
+		assert.ok(isPlaceholderName('SUB_1000'));
+		assert.ok(isPlaceholderName('sub_140001000'), 'legacy project placeholders remain generated names');
 		assert.ok(isPlaceholderName('loc_1000'));
 		assert.ok(!isPlaceholderName('decrypt_config'));
 		assert.ok(!isPlaceholderName('sub_process_packet'), 'a real name may start with sub_');

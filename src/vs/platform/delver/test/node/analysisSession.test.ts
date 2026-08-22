@@ -4,11 +4,12 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as assert from 'assert';
+import { spawn } from 'child_process';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, promises, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from '../../../../base/common/path.js';
-import { DelverAnalysisSession } from '../../node/analysisSession.js';
+import { DelverAnalysisSession, waitForListening } from '../../node/analysisSession.js';
 import { buildMinimalPe } from './minimalPe.js';
 
 suite('DelverAnalysisSession', () => {
@@ -28,8 +29,11 @@ suite('DelverAnalysisSession', () => {
 		writeFileSync(path, buildMinimalPe());
 	});
 
-	teardown(() => {
-		rmSync(dir, { recursive: true, force: true });
+	teardown(async () => {
+		// Child-process shutdown is asynchronous. Windows may briefly retain the
+		// sample handle after `dispose`, so use the asynchronous remover: its
+		// retries yield to the shutdown promise instead of blocking the event loop.
+		await promises.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	});
 
 	test('starts a provider and analysis server and serves listing rows', async function () {
@@ -135,5 +139,13 @@ suite('DelverAnalysisSession', () => {
 		} finally {
 			session.dispose();
 		}
+	});
+
+	test('reports a missing provider immediately instead of as a listening timeout', async () => {
+		const missing = spawn(`delver-provider-that-does-not-exist-${process.pid}`);
+		await assert.rejects(
+			waitForListening(missing, 'provider-file', 10_000),
+			/error|ENOENT|failed to start/i,
+		);
 	});
 });

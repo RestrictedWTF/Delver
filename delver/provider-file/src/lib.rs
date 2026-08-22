@@ -376,8 +376,10 @@ mod tests {
 /// Formats a digest as lowercase hex.
 fn hex_digest(bytes: &[u8]) -> String {
 	use std::fmt::Write;
-	bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut out, b| {
-		let _ = write!(out, "{b:02x}");
-		out
-	})
+	bytes
+		.iter()
+		.fold(String::with_capacity(bytes.len() * 2), |mut out, b| {
+			let _ = write!(out, "{b:02x}");
+			out
+		})
 }

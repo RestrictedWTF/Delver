@@ -15,14 +15,15 @@ use clap::Parser;
 use delver_analysis::FunctionSource;
 use delver_disasm::FlowKind;
 use delver_protocol::{
-	AddressForRowParams, AddressForRowResult, ErrorKind, FlowKindWire, FunctionSourceWire,
-	FunctionWire, FunctionsResult, ImageQueryParams, InitializeResult, ListingRowWire,
-	ListingWindowParams, ListingWindowResult, OpenImageParams, OpenImageResult, Request, Response,
-	RowForAddressParams, RowForAddressResult, RpcError, StringEncodingWire, StringWire,
-	StringsResult, TargetCapabilityWire, TargetDescriptorWire, XrefKindWire, XrefWire, XrefsParams,
-	XrefsResult,
+	AddressForRowParams, AddressForRowResult, ErrorKind, FlowKindWire, FunctionFingerprintWire,
+	FunctionSourceWire, FunctionWire, FunctionsResult, ImageQueryParams, InitializeResult,
+	ListingRowWire, ListingWindowParams, ListingWindowResult, OpenImageParams, OpenImageResult,
+	Request, Response, RowForAddressParams, RowForAddressResult, RpcError, StringEncodingWire,
+	StringWire, StringsResult, TargetCapabilityWire, TargetDescriptorWire, XrefKindWire, XrefWire,
+	XrefsParams, XrefsResult,
 };
 use delver_rpc::{Listener, Server};
+use sha2::{Digest, Sha256};
 
 use crate::image::{load, LoadedImage, ProviderConnection};
 
@@ -344,17 +345,110 @@ fn functions(request: &Request, state: &Arc<Mutex<State>>) -> Result<serde_json:
 			.analysis
 			.functions
 			.iter()
-			.map(|f| FunctionWire {
+			.enumerate()
+			.map(|(index, f)| FunctionWire {
 				rva: f.rva,
 				end_rva: f.end_rva,
 				source: function_source_wire(f.source),
 				authoritative: f.source.is_authoritative(),
+				fingerprint: function_fingerprint(image, index),
 			})
 			.collect();
 
 		serde_json::to_value(FunctionsResult { functions })
 			.map_err(|e| RpcError::protocol(-32603, format!("serialising result: {e}")))
 	})
+}
+
+fn function_fingerprint(
+	image: &LoadedImage,
+	function_index: usize,
+) -> Option<FunctionFingerprintWire> {
+	let function = image.analysis.functions.get(function_index)?;
+	let start_row = image.analysis.instructions.row_for_address(function.rva)?;
+	let end_rva = function
+		.end_rva
+		.or_else(|| {
+			image
+				.analysis
+				.functions
+				.get(function_index + 1)
+				.map(|next| next.rva)
+		})
+		.unwrap_or(u64::MAX);
+	let mut hasher = Sha256::new();
+	let mut instruction_count = 0usize;
+
+	for (_, rva, len) in image
+		.analysis
+		.instructions
+		.rows(start_row, image.analysis.instructions.len() - start_row)
+	{
+		if rva >= end_rva {
+			break;
+		}
+		let (mnemonic, operands, flow, branch_target) = decode_row(image, rva);
+		hasher.update(mnemonic.to_ascii_lowercase().as_bytes());
+		hasher.update([0]);
+		let normalized_operands = if matches!(
+			flow,
+			FlowKindWire::Jump | FlowKindWire::ConditionalJump | FlowKindWire::Call
+		) {
+			match branch_target {
+				Some(target) if target >= function.rva && target < end_rva => image
+					.analysis
+					.instructions
+					.row_for_address(target)
+					.map(|row| format!("local:{}", row - start_row))
+					.unwrap_or_else(|| "external".to_string()),
+				_ => "external".to_string(),
+			}
+		} else {
+			normalize_operand_text(&operands)
+		};
+		hasher.update(normalized_operands.as_bytes());
+		hasher.update([0]);
+		hasher.update(len.to_le_bytes());
+		hasher.update([flow_tag(flow)]);
+		instruction_count += 1;
+	}
+
+	(instruction_count > 0).then(|| FunctionFingerprintWire {
+		algorithm: "sha256".to_string(),
+		normalization: "delver-server-listing-v1".to_string(),
+		digest: lower_hex(&hasher.finalize()),
+	})
+}
+
+fn normalize_operand_text(operands: &str) -> String {
+	operands
+		.split_whitespace()
+		.collect::<Vec<_>>()
+		.join(" ")
+		.to_ascii_lowercase()
+}
+
+fn flow_tag(flow: FlowKindWire) -> u8 {
+	match flow {
+		FlowKindWire::Sequential => 0,
+		FlowKindWire::Jump => 1,
+		FlowKindWire::ConditionalJump => 2,
+		FlowKindWire::Call => 3,
+		FlowKindWire::Indirect => 4,
+		FlowKindWire::Return => 5,
+		FlowKindWire::Interrupt => 6,
+		FlowKindWire::Invalid => 7,
+	}
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+	const HEX: &[u8; 16] = b"0123456789abcdef";
+	let mut result = String::with_capacity(bytes.len() * 2);
+	for byte in bytes {
+		result.push(HEX[(byte >> 4) as usize] as char);
+		result.push(HEX[(byte & 0x0f) as usize] as char);
+	}
+	result
 }
 
 fn xrefs(
@@ -445,5 +539,18 @@ fn xref_kind_wire(kind: delver_analysis::XrefKind) -> XrefKindWire {
 		delver_analysis::XrefKind::Jump => XrefKindWire::Jump,
 		delver_analysis::XrefKind::ConditionalJump => XrefKindWire::ConditionalJump,
 		delver_analysis::XrefKind::Data => XrefKindWire::Data,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::normalize_operand_text;
+
+	#[test]
+	fn normalization_preserves_immediates_that_can_change_semantics() {
+		assert_eq!(
+			normalize_operand_text("RAX,  [RIP+140001000h], 0X2A, 17"),
+			"rax, [rip+140001000h], 0x2a, 17"
+		);
 	}
 }

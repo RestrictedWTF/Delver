@@ -46,4 +46,39 @@ suite('Delver imports filtering', () => {
 		symbols = await provider.getChildren(modules![0]);
 		assert.strictEqual(symbols?.[0].description, '0x4000');
 	});
+
+	test('clearing a filter after zero matches restores the imports', async () => {
+		const provider = new DelverImportsTreeDataProvider();
+		provider.setImports({
+			modules: [{ name: 'KERNEL32.dll', symbols: [{ name: 'CreateFileW', iat_rva: '0x3000' }] }],
+		});
+
+		provider.setFilter('does-not-exist');
+		assert.deepStrictEqual({ isFiltered: provider.isFiltered, rows: await provider.getChildren() }, { isFiltered: true, rows: [] });
+
+		provider.setFilter('');
+		assert.deepStrictEqual(
+			{ isFiltered: provider.isFiltered, labels: (await provider.getChildren())?.map(item => item.label?.label) },
+			{ isFiltered: false, labels: ['KERNEL32.dll'] },
+		);
+	});
+
+	test('filtered modules do not share expansion identity with normal modules', async () => {
+		const provider = new DelverImportsTreeDataProvider();
+		provider.setImports({
+			modules: [{ name: 'KERNEL32.dll', symbols: [{ name: 'CreateFileW', iat_rva: '0x3000' }] }],
+		});
+		const normal = (await provider.getChildren())![0];
+
+		provider.setFilter('kernel');
+		const filtered = (await provider.getChildren())![0];
+
+		assert.deepStrictEqual(
+			{ normal: { handle: normal.handle, state: normal.collapsibleState }, filtered: { handle: filtered.handle, state: filtered.collapsibleState } },
+			{
+				normal: { handle: 'delver.import.module.0', state: TreeItemCollapsibleState.Collapsed },
+				filtered: { handle: 'delver.import.filtered.module.0', state: TreeItemCollapsibleState.Expanded },
+			},
+		);
+	});
 });

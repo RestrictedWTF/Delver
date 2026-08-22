@@ -87,4 +87,49 @@ suite('DelverFunctionsTreeDataProvider interpretation actions', () => {
 
 		assert.strictEqual(matches?.[0].handle, 'delver.function.0x3000');
 	});
+
+	test('clearing a filter after zero matches restores the functions', async () => {
+		const provider = new DelverFunctionsTreeDataProvider();
+		provider.setFunctions([{
+			authoritative: true,
+			rva: '0x4000',
+			source: FunctionSourceWire.EntryPoint,
+		}]);
+
+		provider.setFilter('does-not-exist');
+		let groups = await provider.getChildren();
+		assert.deepStrictEqual(
+			{ isFiltered: provider.isFiltered, counts: groups?.map(item => item.description) },
+			{ isFiltered: true, counts: ['0', '0'] },
+		);
+
+		provider.setFilter('');
+		groups = await provider.getChildren();
+		const functions = await provider.getChildren(groups![0]);
+		assert.deepStrictEqual(
+			{ isFiltered: provider.isFiltered, handles: functions?.map(item => item.handle) },
+			{ isFiltered: false, handles: ['delver.function.0x4000'] },
+		);
+	});
+
+	test('filtered groups do not share expansion identity with normal groups', async () => {
+		const provider = new DelverFunctionsTreeDataProvider();
+		provider.setFunctions([{
+			authoritative: true,
+			rva: '0x5000',
+			source: FunctionSourceWire.EntryPoint,
+		}]);
+		const normal = await provider.getChildren();
+
+		provider.setFilter('entry');
+		const filtered = await provider.getChildren();
+
+		assert.deepStrictEqual(
+			{ normal: normal?.map(item => item.handle), filtered: filtered?.map(item => item.handle) },
+			{
+				normal: ['delver.functions.vouched', 'delver.functions.swept'],
+				filtered: ['delver.functions.vouched.filtered', 'delver.functions.swept.filtered'],
+			},
+		);
+	});
 });

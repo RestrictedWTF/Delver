@@ -39,6 +39,7 @@ export class DelverAnalysisSession extends Disposable {
 		private readonly analysis: ChildProcess,
 		private readonly rpc: DelverRpcClient,
 		private readonly providerRpc: DelverRpcClient,
+		readonly targetPath: string,
 		readonly image: IOpenImageResult,
 	) {
 		super();
@@ -92,6 +93,7 @@ export class DelverAnalysisSession extends Disposable {
 				analysis,
 				rpc,
 				providerRpc,
+				config.path,
 				json.result as IOpenImageResult,
 			);
 		} catch (e) {
@@ -230,7 +232,7 @@ function logStderr(child: ChildProcess, name: string): void {
  * Connecting before that races and fails intermittently, which is exactly the
  * kind of bug that only shows up on a loaded machine.
  */
-function waitForListening(child: ChildProcess, name: string, timeoutMs = 10_000): Promise<void> {
+export function waitForListening(child: ChildProcess, name: string, timeoutMs = 10_000): Promise<void> {
 	return new Promise<void>((resolve, reject) => {
 		const timer = setTimeout(() => {
 			cleanup();
@@ -247,14 +249,20 @@ function waitForListening(child: ChildProcess, name: string, timeoutMs = 10_000)
 			cleanup();
 			reject(new Error(`${name} exited with code ${code} before listening`));
 		};
+		const onError = (error: Error) => {
+			cleanup();
+			reject(new Error(`${name} failed to start: ${error.message}`));
+		};
 
 		function cleanup() {
 			clearTimeout(timer);
 			child.stderr?.off('data', onData);
 			child.off('exit', onExit);
+			child.off('error', onError);
 		}
 
 		child.stderr?.on('data', onData);
 		child.on('exit', onExit);
+		child.on('error', onError);
 	});
 }

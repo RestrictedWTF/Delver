@@ -8,17 +8,18 @@ import './media/delverListing.css';
 import './delverListingColors.js';
 
 import { Codicon } from '../../../../base/common/codicons.js';
+import { isCancellationError } from '../../../../base/common/errors.js';
 import { localize2 } from '../../../../nls.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
 import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
-import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
-import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
+import { DELVER_TARGET_ATTACHED, DELVER_TARGET_OPEN, IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
+import { IDialogService, IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../browser/editor.js';
-import { EditorExtensions } from '../../../common/editor.js';
+import { EditorExtensions, EditorsOrder } from '../../../common/editor.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import {
@@ -33,8 +34,11 @@ import {
 } from '../../../common/views.js';
 import { DelverListingEditor } from './delverListingEditor.js';
 import { DELVER_LISTING_EDITOR_ID, DelverListingInput } from './delverListingInput.js';
+import { DelverPseudocodeInput } from '../../delverPseudocode/browser/delverPseudocodeInput.js';
+import { DelverStringsInput } from '../../delverStrings/browser/delverStringsInput.js';
 import {
 	CommentAction,
+	DecompileFunctionAction,
 	FollowAction,
 	GoToAddressAction,
 	GoToFunctionAction,
@@ -87,6 +91,7 @@ class OpenTargetAction extends Action2 {
 		const fileDialogService = accessor.get(IFileDialogService);
 		const editorService = accessor.get(IEditorService);
 		const viewsService = accessor.get(IViewsService);
+		const sessionService = accessor.get(IDelverSessionService);
 
 		const result = await fileDialogService.showOpenDialog({
 			canSelectFiles: true,
@@ -105,7 +110,168 @@ class OpenTargetAction extends Action2 {
 		// their choice. `Delver: Reset Views` is the way back from it.
 		await viewsService.openViewContainer(DELVER_VIEW_CONTAINER_ID, false);
 
-		await editorService.openEditor(new DelverListingInput(result[0].fsPath), { pinned: true });
+		const targetPath = result[0].fsPath;
+		if (targetPath.toLowerCase().endsWith('.delverdb')) {
+			await openDelverProject(accessor, targetPath);
+			return;
+		}
+		let forceReload = false;
+		if (sessionService.activeSession?.targetPath === targetPath) {
+			try {
+				await sessionService.refreshTarget(targetPath);
+				forceReload = true;
+			} catch (error) {
+				if (isCancellationError(error)) {
+					return;
+				}
+				throw error;
+			}
+		}
+
+		const pane = await editorService.openEditor(new DelverListingInput(targetPath), { pinned: true, forceReload });
+		if (pane) {
+			await closeDelverEditors(editorService, editor => editor !== pane.input && targetPathForDelverEditor(editor) !== targetPath);
+		}
+	}
+}
+
+/** Opens a portable SQLite project without treating it as target bytes. */
+class OpenProjectAction extends Action2 {
+	constructor() {
+		super({
+			id: 'delver.project.open',
+			title: localize2('delverOpenProject', 'Open Project'),
+			category: localize2('delverCategory', 'Delver'),
+			f1: true,
+			icon: Codicon.database,
+			menu: [{
+				id: MenuId.ViewContainerTitle,
+				when: ContextKeyExpr.equals('viewContainer', DELVER_VIEW_CONTAINER_ID),
+				group: 'navigation',
+				order: 2,
+			}],
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const result = await accessor.get(IFileDialogService).showOpenDialog({
+			title: localize2('delverOpenProjectDialog', 'Open Delver Project').value,
+			openLabel: localize2('delverOpenProjectLabel', 'Open Project').value,
+			canSelectFiles: true,
+			canSelectFolders: false,
+			canSelectMany: false,
+			filters: [{ name: localize2('delverProjectFileFilter', 'Delver Project').value, extensions: ['delverdb'] }],
+			availableFileSystems: ['file'],
+		});
+		if (result?.[0]) {
+			await openDelverProject(accessor, result[0].fsPath);
+		}
+	}
+}
+
+async function openDelverProject(accessor: ServicesAccessor, projectPath: string): Promise<void> {
+	try {
+		await accessor.get(IDelverSessionService).openProject(projectPath);
+		await closeDelverEditors(accessor.get(IEditorService), () => true);
+		await accessor.get(IViewsService).openViewContainer(DELVER_VIEW_CONTAINER_ID, false);
+	} catch (error) {
+		if (!isCancellationError(error)) {
+			await accessor.get(IDialogService).error(
+				localize2('delverOpenProjectFailed', 'Could Not Open Delver Project').value,
+				error instanceof Error ? error.message : String(error),
+			);
+		}
+	}
+}
+
+/** Locates the original bytes for live operations in an offline project. */
+class LocateTargetAction extends Action2 {
+	constructor() {
+		super({
+			id: 'delver.project.locateTarget',
+			title: localize2('delverLocateTarget', 'Locate Target'),
+			category: localize2('delverCategory', 'Delver'),
+			f1: true,
+			icon: Codicon.fileBinary,
+			precondition: ContextKeyExpr.and(DELVER_TARGET_OPEN, DELVER_TARGET_ATTACHED.toNegated()),
+			menu: [{
+				id: MenuId.ViewContainerTitle,
+				when: ContextKeyExpr.and(
+					ContextKeyExpr.equals('viewContainer', DELVER_VIEW_CONTAINER_ID),
+					DELVER_TARGET_OPEN,
+					DELVER_TARGET_ATTACHED.toNegated(),
+				),
+				group: 'navigation',
+				order: 3,
+			}],
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const result = await accessor.get(IFileDialogService).showOpenDialog({
+			title: localize2('delverLocateTargetDialog', 'Locate Matching Target').value,
+			openLabel: localize2('delverAttachTargetLabel', 'Attach Target').value,
+			canSelectFiles: true,
+			canSelectFolders: false,
+			canSelectMany: false,
+		});
+		if (!result?.[0]) {
+			return;
+		}
+		try {
+			await accessor.get(IDelverSessionService).attachTarget(result[0].fsPath);
+		} catch (error) {
+			await accessor.get(IDialogService).error(
+				localize2('delverAttachTargetFailed', 'Could Not Attach Target').value,
+				error instanceof Error ? error.message : String(error),
+			);
+		}
+	}
+}
+
+/** Explicitly closes the active Delver project and all editors that could reopen it. */
+class CloseProjectAction extends Action2 {
+	constructor() {
+		super({
+			id: 'delver.project.close',
+			title: localize2('delverCloseProject', 'Close Project'),
+			category: localize2('delverCategory', 'Delver'),
+			f1: true,
+			icon: Codicon.close,
+			precondition: DELVER_TARGET_OPEN,
+			menu: [{
+				id: MenuId.ViewContainerTitle,
+				when: ContextKeyExpr.and(
+					ContextKeyExpr.equals('viewContainer', DELVER_VIEW_CONTAINER_ID),
+					DELVER_TARGET_OPEN,
+				),
+				group: 'navigation',
+				order: 4,
+			}],
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const sessionService = accessor.get(IDelverSessionService);
+		if (!await sessionService.closeTarget()) {
+			return;
+		}
+		await closeDelverEditors(accessor.get(IEditorService), () => true);
+	}
+}
+
+function targetPathForDelverEditor(editor: DelverListingInput | DelverPseudocodeInput | DelverStringsInput): string {
+	return editor.targetPath;
+}
+
+async function closeDelverEditors(editorService: IEditorService, predicate: (editor: DelverListingInput | DelverPseudocodeInput | DelverStringsInput) => boolean): Promise<void> {
+	const editors = editorService.getEditors(EditorsOrder.SEQUENTIAL).filter(identifier => {
+		const editor = identifier.editor;
+		return (editor instanceof DelverListingInput || editor instanceof DelverPseudocodeInput || editor instanceof DelverStringsInput)
+			&& predicate(editor);
+	});
+	if (editors.length > 0) {
+		await editorService.closeEditors(editors, { preserveFocus: true });
 	}
 }
 
@@ -128,7 +294,7 @@ class ResetViewsAction extends Action2 {
 				id: MenuId.ViewContainerTitle,
 				when: ContextKeyExpr.equals('viewContainer', DELVER_VIEW_CONTAINER_ID),
 				group: 'navigation',
-				order: 2,
+				order: 5,
 			}],
 		});
 	}
@@ -173,6 +339,9 @@ CommandsRegistry.registerCommand('delver.listing.openCurrent', async (accessor: 
 });
 
 registerAction2(OpenTargetAction);
+registerAction2(OpenProjectAction);
+registerAction2(LocateTargetAction);
+registerAction2(CloseProjectAction);
 registerAction2(ResetViewsAction);
 registerAction2(GoToAddressAction);
 registerAction2(GoToFunctionAction);
@@ -180,6 +349,7 @@ registerAction2(NavigateBackAction);
 registerAction2(NavigateForwardAction);
 registerAction2(TogglePinAction);
 registerAction2(FollowAction);
+registerAction2(DecompileFunctionAction);
 registerAction2(ReturnAction);
 registerAction2(RenameAction);
 registerAction2(CommentAction);

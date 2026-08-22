@@ -9,7 +9,6 @@ import { localize, localize2 } from '../../../../nls.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
 import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
-import { IDelverAnalysisService } from '../../../../platform/delver/common/delverAnalysisService.js';
 import { EditOp } from '../../../../platform/delver/common/interpretation.js';
 import { IFunctionWire } from '../../../../platform/delver/common/protocol.generated.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
@@ -18,6 +17,7 @@ import { Registry } from '../../../../platform/registry/common/platform.js';
 import { TreeView } from '../../../browser/parts/views/treeView.js';
 import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { Extensions as ViewExtensions, ITreeViewDescriptor, IViewsRegistry, TreeViewItemHandleArg } from '../../../common/views.js';
+import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { registerDelverView } from '../../../services/delver/browser/delverViewContainer.js';
 import { DelverFilterableTreeViewPane, registerDelverTreeFilterProvider } from '../../../services/delver/browser/delverFilterableTreeViewPane.js';
 import { editInterpretationAt } from '../../../services/delver/browser/delverInterpretationEditing.js';
@@ -27,6 +27,7 @@ import {
 } from '../../../services/delver/common/delverFocusService.js';
 import { DELVER_TARGET_OPEN, IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
+import { DelverPseudocodeInput } from '../../delverPseudocode/browser/delverPseudocodeInput.js';
 import {
 	DELVER_FUNCTIONS_OPEN_COMMAND,
 	DELVER_FUNCTIONS_VIEW_ID,
@@ -46,7 +47,6 @@ class DelverFunctionsViewContribution {
 	constructor(
 		@IInstantiationService instantiationService: IInstantiationService,
 		@IDelverSessionService sessionService: IDelverSessionService,
-		@IDelverAnalysisService analysisService: IDelverAnalysisService,
 		@IDelverInterpretationService interpretationService: IDelverInterpretationService,
 	) {
 		const treeView = instantiationService.createInstance(TreeView, DELVER_FUNCTIONS_VIEW_ID, viewName.value);
@@ -134,7 +134,7 @@ class DelverFunctionsViewContribution {
 				dataProvider.setFunctions(undefined);
 			} else {
 				try {
-					const { functions } = await analysisService.functions(session.sessionId);
+					const { functions } = await sessionService.functions();
 					if (token !== generation) {
 						return;
 					}
@@ -166,11 +166,25 @@ registerWorkbenchContribution2(
 	WorkbenchPhase.AfterRestored,
 );
 
-CommandsRegistry.registerCommand(DELVER_FUNCTIONS_OPEN_COMMAND, (accessor: ServicesAccessor, rva: string) => {
+CommandsRegistry.registerCommand(DELVER_FUNCTIONS_OPEN_COMMAND, async (accessor: ServicesAccessor, rva: string) => {
+	const session = accessor.get(IDelverSessionService).activeSession;
+	if (!session) {
+		return;
+	}
+	const address = BigInt(rva);
 	accessor.get(IDelverFocusService).setFocus(
-		{ location: { space: 'Image', address: BigInt(rva) } },
+		{ location: { space: 'Image', address } },
 		FOCUS_ORIGIN,
 		FocusReason.User,
+	);
+	const name = accessor.get(IDelverInterpretationService).nameAt({
+		kind: 'image',
+		contentHash: session.contentHash,
+		rva: address,
+	});
+	await accessor.get(IEditorService).openEditor(
+		new DelverPseudocodeInput(session.targetPath, address, name),
+		{ pinned: true },
 	);
 });
 

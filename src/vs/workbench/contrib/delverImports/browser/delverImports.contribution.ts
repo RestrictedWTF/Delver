@@ -6,7 +6,6 @@
 import { onUnexpectedError } from '../../../../base/common/errors.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
-import { IDelverAnalysisService } from '../../../../platform/delver/common/delverAnalysisService.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
@@ -43,7 +42,6 @@ class DelverImportsViewContribution {
 	constructor(
 		@IInstantiationService instantiationService: IInstantiationService,
 		@IDelverSessionService sessionService: IDelverSessionService,
-		@IDelverAnalysisService analysisService: IDelverAnalysisService,
 	) {
 		const treeView = instantiationService.createInstance(TreeView, DELVER_IMPORTS_VIEW_ID, viewName.value);
 		const dataProvider = new DelverImportsTreeDataProvider();
@@ -94,7 +92,7 @@ class DelverImportsViewContribution {
 				dataProvider.setImports(undefined);
 			} else {
 				try {
-					const result = await analysisService.imports(session.sessionId);
+					const result = await sessionService.imports();
 					if (token !== generation) {
 						return;
 					}

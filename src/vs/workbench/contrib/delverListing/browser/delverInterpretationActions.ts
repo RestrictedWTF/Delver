@@ -14,9 +14,9 @@ import { INotificationService } from '../../../../platform/notification/common/n
 import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
 import { DELVER_TARGET_OPEN, IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 
-const DELVERDB_FILTER = [{
+const DELVERLOG_FILTER = [{
 	name: localize('delverInterpretationFiles', "Delver Interpretation"),
-	extensions: ['delverdb'],
+	extensions: ['delverlog'],
 }];
 
 /** Exports the active image's authored log to a discoverable file. */
@@ -45,8 +45,8 @@ export class ExportInterpretationAction extends Action2 {
 		const destination = await fileDialogService.showSaveDialog({
 			title: localize('delverExportInterpretationDialog', "Export Delver Interpretation"),
 			availableFileSystems: [Schemas.file],
-			defaultUri: joinPath(await fileDialogService.defaultFilePath(), `${basename(session.targetPath)}.delverdb`),
-			filters: DELVERDB_FILTER,
+			defaultUri: joinPath(await fileDialogService.defaultFilePath(), `${basename(session.targetPath)}.delverlog`),
+			filters: DELVERLOG_FILTER,
 		});
 		if (!destination) {
 			return;
@@ -94,7 +94,7 @@ export class ImportInterpretationAction extends Action2 {
 			canSelectFiles: true,
 			canSelectFolders: false,
 			canSelectMany: false,
-			filters: DELVERDB_FILTER,
+			filters: DELVERLOG_FILTER,
 		});
 		if (!result?.[0]) {
 			return;

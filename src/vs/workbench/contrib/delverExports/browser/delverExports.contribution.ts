@@ -8,7 +8,6 @@ import { onUnexpectedError } from '../../../../base/common/errors.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
-import { IDelverAnalysisService } from '../../../../platform/delver/common/delverAnalysisService.js';
 import { IExportWire } from '../../../../platform/delver/common/protocol.generated.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
@@ -86,7 +85,6 @@ class DelverExportsViewContribution {
 	constructor(
 		@IInstantiationService instantiationService: IInstantiationService,
 		@IDelverSessionService sessionService: IDelverSessionService,
-		@IDelverAnalysisService analysisService: IDelverAnalysisService,
 	) {
 		const treeView = instantiationService.createInstance(TreeView, DELVER_EXPORTS_VIEW_ID, viewName.value);
 		const dataProvider = new DelverExportsTreeDataProvider();
@@ -138,7 +136,7 @@ class DelverExportsViewContribution {
 				dataProvider.setExports(undefined);
 			} else {
 				try {
-					const { exports } = await analysisService.exports(session.sessionId);
+					const { exports } = await sessionService.exports();
 					if (token !== generation) {
 						return;
 					}

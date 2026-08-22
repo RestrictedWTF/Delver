@@ -366,6 +366,20 @@ pub struct FunctionWire {
 	/// Whether the image itself vouches for this boundary. Consumers must
 	/// render an inferred boundary differently from a confirmed one.
 	pub authoritative: bool,
+	/// Relocation-insensitive identity of the function's normalized listing.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub fingerprint: Option<FunctionFingerprintWire>,
+}
+
+/// Versioned digest used to associate unchanged functions across binaries.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FunctionFingerprintWire {
+	/// Digest algorithm.
+	pub algorithm: String,
+	/// Versioned normalization profile.
+	pub normalization: String,
+	/// Lowercase hexadecimal digest.
+	pub digest: String,
 }
 
 /// Origin of a detected function, most authoritative first.

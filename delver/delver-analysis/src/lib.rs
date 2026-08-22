@@ -262,6 +262,18 @@ impl<'a> Descent<'a> {
 	/// Everything found here is `LinearSweep` — nothing in the image refers to
 	/// it, so its status as a function is inferred, not established.
 	fn linear_sweep(&mut self) {
+		// Compiler-provided ranges may contain unreachable code, jump tables, or
+		// embedded data. None of those gaps are evidence for a nested function.
+		// Keep the sweep from manufacturing weak starts inside a stronger range.
+		let authoritative_ranges: Vec<_> = self
+			.functions
+			.iter()
+			.filter_map(|(&start, &(end, source))| {
+				(source.is_authoritative())
+					.then_some(end.map(|end| (start, end)))
+					.flatten()
+			})
+			.collect();
 		let executable: Vec<_> = self
 			.image
 			.sections
@@ -278,6 +290,15 @@ impl<'a> Descent<'a> {
 		for (start, end) in executable {
 			let mut rva = start;
 			while rva < end {
+				if let Some((_, function_end)) =
+					authoritative_ranges
+						.iter()
+						.find(|&&(function_start, function_end)| {
+							function_start <= rva && rva < function_end
+						}) {
+					rva = *function_end;
+					continue;
+				}
 				if self.state.is_visited(rva) {
 					// Skip the whole instruction if we know its length.
 					rva += self.state.instruction_len(rva).unwrap_or(1) as u64;
@@ -450,6 +471,30 @@ mod tests {
 		assert!(
 			!FunctionSource::LinearSweep.is_authoritative(),
 			"a swept boundary is a guess and must be marked as one"
+		);
+	}
+
+	#[test]
+	fn linear_sweep_does_not_invent_a_function_inside_an_authoritative_range() {
+		// The return leaves unreachable but decodable bytes inside the compiler's
+		// recorded function extent. They are not a second function.
+		let code = &[0xC3, 0x48, 0x89, 0xD8, 0xC3];
+		let (mut image, file) = image_with_code(code);
+		image.function_seeds = vec![FunctionSeed {
+			rva: 0x1000,
+			end_rva: Some(0x1005),
+			source: SeedSource::ExceptionDirectory,
+		}];
+
+		let analysis = analyze(&image, &file);
+
+		assert_eq!(
+			analysis.functions,
+			vec![Function {
+				rva: 0x1000,
+				end_rva: Some(0x1005),
+				source: FunctionSource::ExceptionDirectory,
+			}],
 		);
 	}
 

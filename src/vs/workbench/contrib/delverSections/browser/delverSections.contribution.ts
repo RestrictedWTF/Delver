@@ -5,7 +5,6 @@
 
 import { onUnexpectedError } from '../../../../base/common/errors.js';
 import { localize, localize2 } from '../../../../nls.js';
-import { IDelverAnalysisService } from '../../../../platform/delver/common/delverAnalysisService.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
@@ -39,7 +38,6 @@ class DelverSectionsViewContribution {
 	constructor(
 		@IInstantiationService instantiationService: IInstantiationService,
 		@IDelverSessionService sessionService: IDelverSessionService,
-		@IDelverAnalysisService analysisService: IDelverAnalysisService,
 	) {
 		const treeView = instantiationService.createInstance(TreeView, DELVER_SECTIONS_VIEW_ID, viewName.value);
 		const dataProvider = instantiationService.createInstance(DelverSectionsTreeDataProvider);
@@ -82,7 +80,7 @@ class DelverSectionsViewContribution {
 				dataProvider.setImageInfo(undefined);
 			} else {
 				try {
-					const info = await analysisService.imageInfo(session.sessionId);
+					const info = await sessionService.imageInfo();
 					if (token !== generation) {
 						return;
 					}

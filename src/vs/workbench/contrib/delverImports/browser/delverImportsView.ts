@@ -30,6 +30,10 @@ export class DelverImportsTreeDataProvider implements ITreeViewDataProvider {
 	private visible: readonly IVisibleModule[] = [];
 	private filter = '';
 
+	get isFiltered(): boolean {
+		return this.filter !== '';
+	}
+
 	setImports(result: IGetImportsResult | undefined): void {
 		this.result = result;
 		this.rebuildVisible();
@@ -74,7 +78,9 @@ interface IVisibleModule {
 
 function moduleItem(entry: IVisibleModule, filtered: boolean): ITreeItem {
 	return {
-		handle: `delver.import.module.${entry.index}`,
+		// Filtered roots use a separate identity so their automatic expansion does
+		// not leak into the normal tree when the query is cleared.
+		handle: `delver.import.${filtered ? 'filtered.' : ''}module.${entry.index}`,
 		label: { label: entry.module.name },
 		description: localize('delverImportSymbolCount', "{0} symbols", entry.symbols.length),
 		themeIcon: ThemeIcon.fromId(Codicon.library.id),
@@ -115,6 +121,6 @@ function symbolItem(symbol: IImportedSymbolWire, moduleIndex: number, index: num
 }
 
 function moduleIndexOf(handle: string): number | undefined {
-	const parsed = Number(handle.slice('delver.import.module.'.length));
-	return Number.isInteger(parsed) && parsed >= 0 ? parsed : undefined;
+	const match = /^delver\.import\.(?:filtered\.)?module\.(\d+)$/.exec(handle);
+	return match ? Number(match[1]) : undefined;
 }

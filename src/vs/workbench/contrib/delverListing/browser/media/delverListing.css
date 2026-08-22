@@ -48,6 +48,13 @@
 	overflow: hidden;
 }
 
+/* Exact source ranges represented by the active pseudocode line. */
+.delver-listing-instruction.delver-listing-pseudocode-highlight .delver-listing-instruction-line {
+	background: var(--vscode-editor-wordHighlightBackground);
+	outline: 1px solid var(--vscode-editor-wordHighlightBorder);
+	outline-offset: -1px;
+}
+
 .delver-listing-instruction.delver-listing-function-start {
 	border-top: 1px solid var(--vscode-editorWidget-border);
 }

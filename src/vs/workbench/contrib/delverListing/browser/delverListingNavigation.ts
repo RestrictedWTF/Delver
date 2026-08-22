@@ -9,7 +9,6 @@ import { localize, localize2 } from '../../../../nls.js';
 import { Action2, MenuId } from '../../../../platform/actions/common/actions.js';
 import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
 import { InputFocusedContextKey } from '../../../../platform/contextkey/common/contextkeys.js';
-import { IDelverAnalysisService } from '../../../../platform/delver/common/delverAnalysisService.js';
 import { IFunctionWire } from '../../../../platform/delver/common/protocol.generated.js';
 import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { KeybindingWeight } from '../../../../platform/keybinding/common/keybindingsRegistry.js';
@@ -24,6 +23,7 @@ import { IDelverSessionService } from '../../../services/delver/common/delverSes
 import { EditOp, EditStatus, IAuthor } from '../../../../platform/delver/common/interpretation.js';
 import { editInterpretationAt } from '../../../services/delver/browser/delverInterpretationEditing.js';
 import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
+import { DelverPseudocodeInput } from '../../delverPseudocode/browser/delverPseudocodeInput.js';
 import {
 	DELVER_LISTING_PINNED,
 	DELVER_NAVIGATION_ORIGIN,
@@ -130,7 +130,6 @@ export class GoToFunctionAction extends Action2 {
 
 	async run(accessor: ServicesAccessor): Promise<void> {
 		const quickInputService = accessor.get(IQuickInputService);
-		const analysisService = accessor.get(IDelverAnalysisService);
 		const focusService = accessor.get(IDelverFocusService);
 		const sessionService = accessor.get(IDelverSessionService);
 		const notificationService = accessor.get(INotificationService);
@@ -141,7 +140,7 @@ export class GoToFunctionAction extends Action2 {
 			return;
 		}
 
-		const { functions } = await analysisService.functions(session.sessionId);
+		const { functions } = await sessionService.functions();
 
 		// Only boundaries the image vouches for. A large module sweeps up
 		// hundreds of thousands of guessed starts, which would make this list
@@ -258,6 +257,59 @@ export class FollowAction extends Action2 {
 		if (pane instanceof DelverListingEditor) {
 			pane.followSelection();
 		}
+	}
+}
+
+/** Decompiles the function containing the selected instruction. */
+export class DecompileFunctionAction extends Action2 {
+	constructor() {
+		super({
+			id: 'delver.listing.decompileFunction',
+			title: localize2('delverDecompileFunction', 'Decompile Function'),
+			category: localize2('delverCategory', 'Delver'),
+			f1: true,
+			precondition: LISTING_ACTIVE,
+			keybinding: {
+				when: LISTING_ACTIVE,
+				primary: KeyCode.F5,
+				// Debug's Continue binding is WorkbenchContrib + 10. The listing's
+				// explicit F5 workflow must win even while another target is paused.
+				weight: KeybindingWeight.WorkbenchContrib + 20,
+			},
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const editorService = accessor.get(IEditorService);
+		const focusService = accessor.get(IDelverFocusService);
+		const interpretationService = accessor.get(IDelverInterpretationService);
+		const pane = editorService.activeEditorPane;
+		const session = accessor.get(IDelverSessionService).activeSession;
+		const notifications = accessor.get(INotificationService);
+		if (!(pane instanceof DelverListingEditor) || !session) {
+			return;
+		}
+
+		const functionRva = await pane.selectedFunctionRva();
+		if (functionRva === undefined) {
+			notifications.info(localize('delverNoFunctionAtSelection', "The selected instruction is not inside a detected function."));
+			return;
+		}
+
+		focusService.setFocus(
+			{ location: { space: 'Image', address: functionRva } },
+			NAVIGATION_ORIGIN,
+			FocusReason.User,
+		);
+		const name = interpretationService.nameAt({
+			kind: 'image',
+			contentHash: session.contentHash,
+			rva: functionRva,
+		});
+		await editorService.openEditor(
+			new DelverPseudocodeInput(session.targetPath, functionRva, name),
+			{ pinned: true },
+		);
 	}
 }
 

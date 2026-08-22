@@ -4,15 +4,23 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as assert from 'assert';
+import { CancellationError } from '../../../../../base/common/errors.js';
+import { IPrompt, IPromptResult, IPromptResultWithCancel, IPromptWithCustomCancel, IPromptWithDefaultCancel } from '../../../../../platform/dialogs/common/dialogs.js';
+import { TestDialogService } from '../../../../../platform/dialogs/test/common/testDialogService.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { getSingletonServiceDescriptors } from '../../../../../platform/instantiation/common/extensions.js';
 import { IDelverAnalysisService } from '../../../../../platform/delver/common/delverAnalysisService.js';
+import { IDelverProjectSnapshot } from '../../../../../platform/delver/common/delverProjectStoreService.js';
 import { MockContextKeyService } from '../../../../../platform/keybinding/test/common/mockKeybindingService.js';
 import { IDelverInterpretationService } from '../../common/delverInterpretationService.js';
 import {
 	DelverSessionService,
+	IDelverSession,
 	IDelverSessionService,
 } from '../../common/delverSessionService.js';
+import { IDelverOpenedProject, IDelverProjectService } from '../../common/delverProjectService.js';
+import { TestLifecycleService } from '../../../../test/common/workbenchTestServices.js';
+import { ShutdownReason } from '../../../lifecycle/common/lifecycle.js';
 
 /** Records opens and closes so lifetime can be asserted. */
 class FakeAnalysisService implements Partial<IDelverAnalysisService> {
@@ -57,15 +65,86 @@ class FakeInterpretationService implements Partial<IDelverInterpretationService>
 	}
 }
 
+class FakeProjectLifecycleDelegate implements IDelverProjectService {
+	declare readonly _serviceBrand: undefined;
+	readonly saved: string[] = [];
+	saveResult = true;
+	addRevisionResult = true;
+	createProjectResult = true;
+	projectPaths = new Map<string, string>();
+	readonly revisions: { previous: string; updated: string }[] = [];
+	openedProject: IDelverOpenedProject | undefined;
+
+	async save(session: IDelverSession): Promise<boolean> {
+		this.saved.push(session.targetPath);
+		return this.saveResult;
+	}
+
+	async close(): Promise<void> { }
+
+	async addRevision(previous: IDelverSession, updated: IDelverSession): Promise<boolean> {
+		this.revisions.push({ previous: previous.contentHash, updated: updated.contentHash });
+		if (this.addRevisionResult) {
+			const path = this.projectPaths.get(previous.contentHash);
+			if (path) {
+				this.projectPaths.set(updated.contentHash, path);
+			}
+		}
+		return this.addRevisionResult;
+	}
+
+	async createProject(session: IDelverSession): Promise<boolean> {
+		if (this.createProjectResult) {
+			this.projectPaths.clear();
+			this.projectPaths.set(session.contentHash, 'C:\\projects\\updated.delverdb');
+		}
+		return this.createProjectResult;
+	}
+
+	async openProject(): Promise<IDelverOpenedProject> {
+		if (!this.openedProject) {
+			throw new Error('not configured');
+		}
+		return this.openedProject;
+	}
+
+	async recordDecompilation(): Promise<void> { }
+
+	projectPath(contentHash: string): string | undefined { return this.projectPaths.get(contentHash); }
+
+	projectSnapshot(contentHash: string): IDelverProjectSnapshot | undefined {
+		return this.openedProject?.contentHash === contentHash ? this.openedProject.snapshot : undefined;
+	}
+}
+
+class FakeDialogService extends TestDialogService {
+	decision: 'save' | 'discard' | 'addRevision' | 'createProject' | 'cancel' = 'discard';
+	prompts = 0;
+
+	override prompt<T>(prompt: IPromptWithCustomCancel<T>): Promise<IPromptResultWithCancel<T>>;
+	override prompt<T>(prompt: IPromptWithDefaultCancel<T>): Promise<IPromptResult<T>>;
+	override prompt<T>(prompt: IPrompt<T>): Promise<IPromptResult<T>>;
+	override async prompt<T>(_prompt: IPrompt<T>): Promise<IPromptResultWithCancel<T>> {
+		this.prompts++;
+		return { result: this.decision as T };
+	}
+}
+
 function createService(store: Pick<ReturnType<typeof ensureNoDisposablesAreLeakedInTestSuite>, 'add'>) {
 	const analysis = new FakeAnalysisService();
 	const interpretation = new FakeInterpretationService();
+	const projectLifecycle = new FakeProjectLifecycleDelegate();
+	const dialog = new FakeDialogService();
+	const lifecycle = store.add(new TestLifecycleService());
 	const service = store.add(new DelverSessionService(
 		analysis as unknown as IDelverAnalysisService,
 		interpretation as unknown as IDelverInterpretationService,
+		projectLifecycle,
+		dialog,
+		lifecycle,
 		new MockContextKeyService(),
 	));
-	return { service, analysis, interpretation };
+	return { service, analysis, interpretation, projectLifecycle, dialog, lifecycle };
 }
 
 suite('DelverSessionService', () => {
@@ -87,9 +166,87 @@ suite('DelverSessionService', () => {
 		const session = await service.openTarget('C:\\samples\\a.exe');
 
 		assert.deepStrictEqual(
-			{ path: session.targetPath, hash: session.contentHash, loaded: interpretation.loaded, seen },
-			{ path: 'C:\\samples\\a.exe', hash: 'a'.repeat(64), loaded: ['a'.repeat(64)], seen: ['C:\\samples\\a.exe'] },
+			{ path: session.targetPath, hash: session.contentHash, dirty: service.isProjectDirty, loaded: interpretation.loaded, seen },
+			{ path: 'C:\\samples\\a.exe', hash: 'a'.repeat(64), dirty: true, loaded: ['a'.repeat(64)], seen: ['C:\\samples\\a.exe'] },
 		);
+	});
+
+	test('opening a project publishes saved categories without opening an analysis provider', async () => {
+		const { service, analysis, projectLifecycle } = createService(store);
+		const hash = 'b'.repeat(64);
+		const snapshot = {
+			metadata: {
+				schemaVersion: 1,
+				currentRevisionId: 'revision-1',
+				contentHash: hash,
+				displayName: 'offline.exe',
+				sourcePath: 'C:\\missing\\offline.exe',
+				createdAt: 1,
+				updatedAt: 1,
+			},
+			interpretations: [],
+			functions: JSON.stringify({ functions: [{ rva: '0x1080' }] }),
+			strings: JSON.stringify({ strings: [], truncated: false }),
+		} as IDelverProjectSnapshot;
+		projectLifecycle.openedProject = {
+			path: 'C:\\projects\\offline.delverdb',
+			contentHash: hash,
+			displayName: 'offline.exe',
+			sourcePath: 'C:\\missing\\offline.exe',
+			snapshot,
+		};
+
+		const session = await service.openProject('C:\\projects\\offline.delverdb');
+		const functions = await service.functions();
+
+		assert.deepStrictEqual({
+			providerOpens: analysis.opened,
+			session: { id: session.sessionId, path: session.targetPath, projectPath: session.projectPath, hash: session.contentHash },
+			functions: functions.functions.map(fn => fn.rva),
+			dirty: service.isProjectDirty,
+		}, {
+			providerOpens: [],
+			session: { id: undefined, path: 'C:\\missing\\offline.exe', projectPath: 'C:\\projects\\offline.delverdb', hash },
+			functions: ['0x1080'],
+			dirty: false,
+		});
+	});
+
+	test('attaching mismatched bytes preserves the offline project session', async () => {
+		const { service, analysis, projectLifecycle } = createService(store);
+		const projectHash = 'b'.repeat(64);
+		const snapshot = {
+			metadata: {
+				schemaVersion: 1,
+				currentRevisionId: 'revision-1',
+				contentHash: projectHash,
+				displayName: 'offline.exe',
+				createdAt: 1,
+				updatedAt: 1,
+			},
+			interpretations: [],
+		} as IDelverProjectSnapshot;
+		projectLifecycle.openedProject = {
+			path: 'C:\\projects\\offline.delverdb',
+			contentHash: projectHash,
+			displayName: 'offline.exe',
+			snapshot,
+		};
+		const offline = await service.openProject('C:\\projects\\offline.delverdb');
+
+		await assert.rejects(() => service.attachTarget('C:\\samples\\wrong.exe'), /SHA-256 differs/);
+
+		assert.deepStrictEqual({
+			activeIsOffline: service.activeSession === offline,
+			activeHash: service.activeSession?.contentHash,
+			opened: analysis.opened,
+			closed: analysis.closed,
+		}, {
+			activeIsOffline: true,
+			activeHash: projectHash,
+			opened: ['C:\\samples\\wrong.exe'],
+			closed: ['session-1'],
+		});
 	});
 
 	test('a stale provider without a content hash closes with an actionable error', async () => {
@@ -172,6 +329,189 @@ suite('DelverSessionService', () => {
 		assert.deepStrictEqual(
 			{ same: a.sessionId === b.sessionId, opens: analysis.opened.length },
 			{ same: true, opens: 1 },
+		);
+	});
+
+	test('refreshing unchanged bytes keeps the hot session', async () => {
+		const { service, analysis, dialog } = createService(store);
+		const first = await service.openTarget('C:\\samples\\a.exe');
+
+		const refreshed = await service.refreshTarget('C:\\samples\\a.exe');
+
+		assert.deepStrictEqual(
+			{ session: refreshed.sessionId, opened: analysis.opened, closed: analysis.closed, prompts: dialog.prompts },
+			{ session: first.sessionId, opened: ['C:\\samples\\a.exe', 'C:\\samples\\a.exe'], closed: ['session-2'], prompts: 0 },
+		);
+	});
+
+	test('canceling an updated binary preserves the old revision and session', async () => {
+		const { service, analysis, projectLifecycle, dialog } = createService(store);
+		const first = await service.openTarget('C:\\samples\\a.exe');
+		projectLifecycle.projectPaths.set(first.contentHash, 'C:\\projects\\a.delverdb');
+		service.markProjectSaved('C:\\projects\\a.delverdb');
+		analysis.contentHash = 'b'.repeat(64);
+		dialog.decision = 'cancel';
+
+		await assert.rejects(() => service.refreshTarget(first.targetPath), error => error instanceof CancellationError);
+
+		assert.deepStrictEqual(
+			{ active: service.activeSession?.sessionId, hash: service.activeSession?.contentHash, closed: analysis.closed, revisions: projectLifecycle.revisions },
+			{ active: first.sessionId, hash: 'a'.repeat(64), closed: ['session-2'], revisions: [] },
+		);
+	});
+
+	test('updated binary can be appended as a new revision without replacing the old one', async () => {
+		const { service, analysis, projectLifecycle, dialog } = createService(store);
+		const first = await service.openTarget('C:\\samples\\a.exe');
+		projectLifecycle.projectPaths.set(first.contentHash, 'C:\\projects\\a.delverdb');
+		service.markProjectSaved('C:\\projects\\a.delverdb');
+		analysis.contentHash = 'b'.repeat(64);
+		dialog.decision = 'addRevision';
+
+		const refreshed = await service.refreshTarget(first.targetPath);
+
+		assert.deepStrictEqual(
+			{
+				hash: refreshed.contentHash,
+				closed: analysis.closed,
+				revisions: projectLifecycle.revisions,
+				oldPath: projectLifecycle.projectPath(first.contentHash),
+				newPath: projectLifecycle.projectPath(refreshed.contentHash),
+				dirty: service.isProjectDirty,
+			},
+			{
+				hash: 'b'.repeat(64),
+				closed: ['session-1'],
+				revisions: [{ previous: 'a'.repeat(64), updated: 'b'.repeat(64) }],
+				oldPath: 'C:\\projects\\a.delverdb',
+				newPath: 'C:\\projects\\a.delverdb',
+				dirty: false,
+			},
+		);
+	});
+
+	test('updated binary can be saved as a separate project', async () => {
+		const { service, analysis, projectLifecycle, dialog } = createService(store);
+		const first = await service.openTarget('C:\\samples\\a.exe');
+		projectLifecycle.projectPaths.set(first.contentHash, 'C:\\projects\\a.delverdb');
+		service.markProjectSaved('C:\\projects\\a.delverdb');
+		analysis.contentHash = 'b'.repeat(64);
+		dialog.decision = 'createProject';
+
+		const refreshed = await service.refreshTarget(first.targetPath);
+
+		assert.deepStrictEqual(
+			{ hash: refreshed.contentHash, closed: analysis.closed, projectPath: service.projectPath, dirty: service.isProjectDirty },
+			{ hash: 'b'.repeat(64), closed: ['session-1'], projectPath: 'C:\\projects\\updated.delverdb', dirty: false },
+		);
+	});
+
+	test('canceling new-project Save As preserves the previous project', async () => {
+		const { service, analysis, projectLifecycle, dialog } = createService(store);
+		const first = await service.openTarget('C:\\samples\\a.exe');
+		projectLifecycle.projectPaths.set(first.contentHash, 'C:\\projects\\a.delverdb');
+		projectLifecycle.createProjectResult = false;
+		service.markProjectSaved('C:\\projects\\a.delverdb');
+		analysis.contentHash = 'b'.repeat(64);
+		dialog.decision = 'createProject';
+
+		await assert.rejects(() => service.refreshTarget(first.targetPath), error => error instanceof CancellationError);
+
+		assert.deepStrictEqual(
+			{ active: service.activeSession?.contentHash, closed: analysis.closed, projectPath: service.projectPath },
+			{ active: 'a'.repeat(64), closed: ['session-2'], projectPath: 'C:\\projects\\a.delverdb' },
+		);
+	});
+
+	test('canceling the save prompt keeps the current target open', async () => {
+		const { service, analysis, dialog } = createService(store);
+		const first = await service.openTarget('C:\\samples\\a.exe');
+		dialog.decision = 'cancel';
+
+		await assert.rejects(() => service.openTarget('C:\\samples\\b.exe'), error => error instanceof CancellationError);
+
+		assert.deepStrictEqual(
+			{ active: service.activeSession?.targetPath, opened: analysis.opened, closed: analysis.closed },
+			{ active: first.targetPath, opened: ['C:\\samples\\a.exe'], closed: [] },
+		);
+	});
+
+	test('saving before target replacement clears the old project state', async () => {
+		const { service, projectLifecycle, dialog } = createService(store);
+		await service.openTarget('C:\\samples\\a.exe');
+		dialog.decision = 'save';
+
+		await service.openTarget('C:\\samples\\b.exe');
+
+		assert.deepStrictEqual(
+			{ saved: projectLifecycle.saved, active: service.activeSession?.targetPath, dirty: service.isProjectDirty },
+			{ saved: ['C:\\samples\\a.exe'], active: 'C:\\samples\\b.exe', dirty: true },
+		);
+	});
+
+	test('a failed or canceled save prevents closing the target', async () => {
+		const { service, projectLifecycle, dialog } = createService(store);
+		await service.openTarget('C:\\samples\\a.exe');
+		dialog.decision = 'save';
+		projectLifecycle.saveResult = false;
+
+		const closed = await service.closeTarget();
+
+		assert.deepStrictEqual(
+			{ closed, active: service.activeSession?.targetPath, dirty: service.isProjectDirty },
+			{ closed: false, active: 'C:\\samples\\a.exe', dirty: true },
+		);
+	});
+
+	test('saved projects close without repeatedly prompting', async () => {
+		const { service, dialog } = createService(store);
+		await service.openTarget('C:\\samples\\a.exe');
+		service.markProjectSaved('C:\\projects\\a.delver');
+
+		const closed = await service.closeTarget();
+
+		assert.deepStrictEqual(
+			{ closed, prompts: dialog.prompts, active: service.activeSession, projectPath: service.projectPath },
+			{ closed: true, prompts: 0, active: undefined, projectPath: undefined },
+		);
+	});
+
+	test('canceling the shutdown prompt vetoes shutdown', async () => {
+		const { service, dialog, lifecycle } = createService(store);
+		await service.openTarget('C:\\samples\\a.exe');
+		dialog.decision = 'cancel';
+		let veto: boolean | Promise<boolean> = false;
+
+		lifecycle.fireBeforeShutdown({
+			reason: ShutdownReason.QUIT,
+			veto: value => veto = value,
+			finalVeto: () => undefined,
+		});
+
+		assert.deepStrictEqual(
+			{ veto: await veto, active: service.activeSession?.targetPath, dirty: service.isProjectDirty },
+			{ veto: true, active: 'C:\\samples\\a.exe', dirty: true },
+		);
+	});
+
+	test('successful shutdown save allows shutdown and does not prompt again', async () => {
+		const { service, projectLifecycle, dialog, lifecycle } = createService(store);
+		await service.openTarget('C:\\samples\\a.exe');
+		dialog.decision = 'save';
+		const vetos: (boolean | Promise<boolean>)[] = [];
+		const event = {
+			reason: ShutdownReason.QUIT,
+			veto: (value: boolean | Promise<boolean>) => vetos.push(value),
+			finalVeto: () => undefined,
+		};
+
+		lifecycle.fireBeforeShutdown(event);
+		assert.strictEqual(await vetos[0], false);
+		lifecycle.fireBeforeShutdown(event);
+
+		assert.deepStrictEqual(
+			{ secondVeto: await vetos[1], saved: projectLifecycle.saved, prompts: dialog.prompts, dirty: service.isProjectDirty },
+			{ secondVeto: false, saved: ['C:\\samples\\a.exe'], prompts: 1, dirty: false },
 		);
 	});
 });

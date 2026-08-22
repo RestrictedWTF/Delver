@@ -5,9 +5,11 @@
 
 import * as assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
+import { FunctionSourceWire } from '../../../../../platform/delver/common/protocol.generated.js';
 import { shouldFollowWhilePinned } from '../../browser/delverListingContext.js';
 import { FocusReason } from '../../../../services/delver/common/delverFocusService.js';
 import { parseAddress } from '../../browser/delverListingNavigation.js';
+import { containingFunctionRva } from '../../browser/delverListingEditor.js';
 
 /** Mocha cannot serialize a BigInt, so failures print nothing useful without this. */
 function show(value: bigint | undefined): string {
@@ -49,6 +51,17 @@ suite('Delver listing navigation', () => {
 		for (const input of ['', '   ', 'ghij', '0x', '0n', '12g4', '-1', '0n0x10']) {
 			assert.strictEqual(show(parseAddress(input)), '<invalid>', `input: "${input}"`);
 		}
+	});
+
+	test('any instruction row inside a function resolves to its entry', () => {
+		const functions = [
+			{ rva: '0x1000', end_rva: '0x1010', authoritative: true, source: FunctionSourceWire.ExceptionDirectory },
+			{ rva: '0x1020', end_rva: '0x1030', authoritative: true, source: FunctionSourceWire.ExceptionDirectory },
+		];
+		assert.strictEqual(containingFunctionRva(functions, 0x1000n), 0x1000n);
+		assert.strictEqual(containingFunctionRva(functions, 0x100fn), 0x1000n);
+		assert.strictEqual(containingFunctionRva(functions, 0x1010n), undefined);
+		assert.strictEqual(containingFunctionRva(functions, 0x1028n), 0x1020n);
 	});
 
 	suite('pinning', () => {

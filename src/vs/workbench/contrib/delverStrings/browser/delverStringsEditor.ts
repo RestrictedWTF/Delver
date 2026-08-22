@@ -9,7 +9,6 @@ import { ITableRenderer, ITableVirtualDelegate } from '../../../../base/browser/
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { DisposableStore, MutableDisposable } from '../../../../base/common/lifecycle.js';
 import { localize } from '../../../../nls.js';
-import { IDelverAnalysisService } from '../../../../platform/delver/common/delverAnalysisService.js';
 import { IStringWire, StringEncodingWire } from '../../../../platform/delver/common/protocol.generated.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { WorkbenchTable } from '../../../../platform/list/browser/listService.js';
@@ -57,7 +56,6 @@ export class DelverStringsEditor extends EditorPane {
 		@IThemeService themeService: IThemeService,
 		@IStorageService storageService: IStorageService,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
-		@IDelverAnalysisService private readonly analysisService: IDelverAnalysisService,
 		@IDelverSessionService private readonly sessionService: IDelverSessionService,
 		@IDelverFocusService private readonly focusService: IDelverFocusService,
 	) {
@@ -100,7 +98,7 @@ export class DelverStringsEditor extends EditorPane {
 
 		let result;
 		try {
-			result = await this.analysisService.strings(session.sessionId);
+			result = await this.sessionService.strings();
 		} catch (error) {
 			this.message.textContent = localize('delverStringsFailed', "Could not read strings: {0}", toMessage(error));
 			return;

@@ -19,6 +19,7 @@ export const FUNCTION_PAGE_SIZE = 1_000;
 
 const VOUCHED_HANDLE = 'delver.functions.vouched';
 const SWEPT_HANDLE = 'delver.functions.swept';
+const FILTERED_HANDLE_SUFFIX = '.filtered';
 const PAGE_PREFIX = 'delver.functions.page.';
 
 export class DelverFunctionsTreeDataProvider implements ITreeViewDataProvider {
@@ -29,6 +30,10 @@ export class DelverFunctionsTreeDataProvider implements ITreeViewDataProvider {
 	private loaded = false;
 	private names = new Map<string, string>();
 	private filter = '';
+
+	get isFiltered(): boolean {
+		return this.filter !== '';
+	}
 
 	setFunctions(functions: readonly IFunctionWire[] | undefined): void {
 		this.loaded = functions !== undefined;
@@ -56,23 +61,23 @@ export class DelverFunctionsTreeDataProvider implements ITreeViewDataProvider {
 		if (!element) {
 			return [
 				group(
-					VOUCHED_HANDLE,
+					this.filter ? VOUCHED_HANDLE + FILTERED_HANDLE_SUFFIX : VOUCHED_HANDLE,
 					localize('delverFunctionsVouched', "Compiler-vouched"),
 					this.visibleVouched.length,
 					TreeItemCollapsibleState.Expanded,
 				),
 				group(
-					SWEPT_HANDLE,
+					this.filter ? SWEPT_HANDLE + FILTERED_HANDLE_SUFFIX : SWEPT_HANDLE,
 					localize('delverFunctionsSwept', "Found by sweep"),
 					this.visibleSwept.length,
 					this.filter ? TreeItemCollapsibleState.Expanded : TreeItemCollapsibleState.Collapsed,
 				),
 			];
 		}
-		if (element.handle === VOUCHED_HANDLE) {
+		if (element.handle === VOUCHED_HANDLE || element.handle === VOUCHED_HANDLE + FILTERED_HANDLE_SUFFIX) {
 			return categoryChildren('vouched', this.visibleVouched, this.names);
 		}
-		if (element.handle === SWEPT_HANDLE) {
+		if (element.handle === SWEPT_HANDLE || element.handle === SWEPT_HANDLE + FILTERED_HANDLE_SUFFIX) {
 			return categoryChildren('swept', this.visibleSwept, this.names);
 		}
 		const page = parsePageHandle(element.handle);
@@ -143,7 +148,7 @@ function functionItem(fn: IFunctionWire, name: string | undefined): ITreeItem {
 		collapsibleState: TreeItemCollapsibleState.None,
 		command: {
 			id: DELVER_FUNCTIONS_OPEN_COMMAND,
-			title: localize('delverFunctionGoTo', "Go to Function"),
+			title: localize('delverFunctionOpenPseudocode', "Open Pseudocode"),
 			arguments: [fn.rva],
 		},
 	};

@@ -24,7 +24,7 @@ suite('Delver references function-relative labels', () => {
 	});
 
 	test('uses placeholders at exact entries and does not claim unknown gaps', () => {
-		assert.strictEqual(referenceAddressLabel('0x2000', functions, new Map()), 'sub_2000');
+		assert.strictEqual(referenceAddressLabel('0x2000', functions, new Map()), 'SUB_2000');
 		assert.strictEqual(referenceAddressLabel('0x2001', functions, new Map()), '0x2001');
 		assert.strictEqual(referenceAddressLabel('0x1800', functions, new Map()), '0x1800');
 	});

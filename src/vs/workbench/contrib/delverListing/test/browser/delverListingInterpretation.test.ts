@@ -14,7 +14,7 @@ suite('Delver listing interpretation presentation', () => {
 		assert.deepStrictEqual(
 			listingInterpretationPresentation(0x1000n, true, undefined),
 			{
-				label: 'sub_1000',
+				label: 'SUB_1000',
 				comment: undefined,
 				tags: undefined,
 				linesBeforeInstruction: 1,

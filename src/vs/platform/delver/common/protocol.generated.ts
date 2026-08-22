@@ -196,6 +196,24 @@ export interface IFrameRef {
 }
 
 /**
+ * Versioned digest used to associate unchanged functions across binaries.
+ */
+export interface IFunctionFingerprintWire {
+	/**
+	 * Digest algorithm.
+	 */
+	algorithm: string;
+	/**
+	 * Lowercase hexadecimal digest.
+	 */
+	digest: string;
+	/**
+	 * Versioned normalization profile.
+	 */
+	normalization: string;
+}
+
+/**
  * A candidate function start on the wire.
  */
 export interface IFunctionSeedWire {
@@ -255,6 +273,10 @@ export interface IFunctionWire {
 	 * Exclusive end, when known.
 	 */
 	end_rva?: string;
+	/**
+	 * Relocation-insensitive identity of the function's normalized listing.
+	 */
+	fingerprint?: IFunctionFingerprintWire;
 	/**
 	 * Entry RVA.
 	 */

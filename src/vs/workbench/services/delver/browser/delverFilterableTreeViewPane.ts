@@ -23,6 +23,7 @@ import { IAccessibleViewInformationService } from '../../accessibility/common/ac
 import './media/delverFilterableTreeViewPane.css';
 
 export interface IDelverFilterableTreeDataProvider extends ITreeViewDataProvider {
+	readonly isFiltered: boolean;
 	setFilter(query: string): void;
 }
 
@@ -79,6 +80,13 @@ export class DelverFilterableTreeViewPane extends TreeViewPane {
 				}
 			}).catch(onUnexpectedError);
 		}));
+	}
+
+	override shouldShowWelcome(): boolean {
+		// View welcome content replaces every other body child, including the
+		// filter input. A filter with no matches is not an empty dataset: keep the
+		// normal tree body visible so the query can always be changed or cleared.
+		return !filterProviders.get(this.treeView)?.isFiltered && super.shouldShowWelcome();
 	}
 
 	protected override layoutTreeView(height: number, width: number): void {

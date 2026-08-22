@@ -80,6 +80,31 @@ suite('DelverFocusService', () => {
 		);
 	});
 
+	test('preserves exact discontiguous selections independently of their bounding range', () => {
+		const { service, events } = createService();
+		const selections = [{ start: 0x1000n, end: 0x1004n }, { start: 0x1010n, end: 0x1012n }];
+
+		service.setFocus({
+			location: at(0x1000n),
+			selection: { start: 0x1000n, end: 0x1012n },
+			selections,
+		}, 'pseudocode', FocusReason.User);
+
+		assert.deepStrictEqual({ focus: service.focus, eventCount: events.length }, {
+			focus: { moment: service.focus.moment, location: at(0x1000n), selection: { start: 0x1000n, end: 0x1012n }, selections },
+			eventCount: 1,
+		});
+	});
+
+	test('location-only navigation clears stale exact semantic selections', () => {
+		const { service } = createService();
+		service.setFocus({ location: at(0x1000n), selections: [{ start: 0x1000n, end: 0x1004n }] }, 'pseudocode', FocusReason.User);
+
+		service.setFocus({ location: at(0x2000n) }, 'listing', FocusReason.User);
+
+		assert.strictEqual(service.focus.selections, undefined);
+	});
+
 	test('nearby positions coalesce into one history entry', () => {
 		const { service } = createService();
 
