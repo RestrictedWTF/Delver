@@ -7,6 +7,7 @@ that keeps the codebase clean. Changes rarely.
 | --- | --- |
 | [working-with-ai.md](working-with-ai.md) | Invariants, the three records, lint enforcement, skills, what not to automate, sizing work |
 | [patch-surface.md](patch-surface.md) | Every upstream file Delver modifies, and the merge checklist |
+| [external-agents.md](external-agents.md) | Wiring an MCP client to a Delver window: the generic `.mcp.json`, client recipes, approval, troubleshooting |
 
 ## To add here as the project grows
 

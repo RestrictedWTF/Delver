@@ -76,10 +76,22 @@ async function ensureCompiled() {
 	}
 }
 
+async function ensureDelverBinaries() {
+	const extension = process.platform === 'win32' ? '.exe' : '';
+	const binaryDirectory = path.join('delver', 'target', 'debug');
+	const requiredBinaries = ['provider-file', 'server-analysis', 'delver-agent-relay', 'delver-mcp'];
+	const missingBinary = await Promise.all(requiredBinaries.map(binary => exists(path.join(binaryDirectory, binary + extension))))
+		.then(results => results.some(present => !present));
+	if (missingBinary) {
+		await runProcess(npm, ['run', 'compile-delver']);
+	}
+}
+
 async function main() {
 	await ensureNodeModules();
 	await getElectron();
 	await ensureCompiled();
+	await ensureDelverBinaries();
 
 	// Can't require this until after dependencies are installed
 	const { getBuiltInExtensions } = await import('./builtInExtensions.ts');

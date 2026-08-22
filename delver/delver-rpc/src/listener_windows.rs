@@ -7,8 +7,10 @@
 #![allow(unsafe_code)]
 
 use std::fs::File;
-use std::os::windows::io::FromRawHandle;
+use std::io::{self, Read, Write};
+use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::ptr;
+use std::sync::{Arc, Mutex};
 
 use windows_sys::Win32::Foundation::{
 	CloseHandle, DuplicateHandle, LocalFree, FALSE, HANDLE, HLOCAL, TRUE,
@@ -18,16 +20,20 @@ use windows_sys::Win32::Security::{
 	InitializeSecurityDescriptor, SetSecurityDescriptorDacl, TokenUser, ACL, ACL_REVISION,
 	PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
 };
-use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
+use windows_sys::Win32::Storage::FileSystem::{
+	FlushFileBuffers, FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX,
+};
 use windows_sys::Win32::System::Memory::{LocalAlloc, LPTR};
 use windows_sys::Win32::System::Pipes::{
-	ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_TYPE_BYTE,
-	PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+	ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
+	PeekNamedPipe, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-use crate::listener::{last_error, DuplexStream, Endpoint, ListenerError};
+use crate::listener::{
+	last_error, DuplexStream, Endpoint, ListenerError, PeerAuthenticatedDuplexStream, PeerIdentity,
+};
 
 const PIPE_BUFFER_SIZE: u32 = 65536;
 const GENERIC_READ: u32 = 0x80000000;
@@ -36,6 +42,9 @@ const GENERIC_WRITE: u32 = 0x40000000;
 pub(crate) struct WindowsListenerImpl {
 	/// The Win32 path of the named pipe, e.g. `\\.\pipe\delver-...`.
 	pipe_path: String,
+	/// Reserved first instance. Keeping it open prevents namespace squatting
+	/// between bind/readiness and the first accept.
+	first_instance: Mutex<Option<usize>>,
 }
 
 impl WindowsListenerImpl {
@@ -101,21 +110,28 @@ impl WindowsListenerImpl {
 			));
 		};
 
-		// Create the first instance so the pipe namespace exists. ACL is set
-		// on the kernel object at creation time.
+		// Create and retain the first instance so the namespace and its ACL are
+		// already authoritative when the caller publishes readiness.
 		let handle = create_pipe_instance(pipe_path, FILE_FLAG_FIRST_PIPE_INSTANCE)?;
-		// Close the bootstrap instance; subsequent accepts create fresh ones.
-		unsafe {
-			CloseHandle(handle);
-		}
 
 		Ok(Self {
 			pipe_path: pipe_path.clone(),
+			first_instance: Mutex::new(Some(handle as usize)),
 		})
 	}
 
-	pub(crate) fn accept(&self) -> Result<DuplexStream, ListenerError> {
-		let handle = create_pipe_instance(&self.pipe_path, 0)?;
+	pub(crate) fn accept_shutdownable_with_peer(
+		&self,
+	) -> Result<PeerAuthenticatedDuplexStream, ListenerError> {
+		let first = self
+			.first_instance
+			.lock()
+			.map_err(|_| ListenerError::new("named-pipe first-instance lock is poisoned"))?
+			.take();
+		let handle = match first {
+			Some(handle) => handle as HANDLE,
+			None => create_pipe_instance(&self.pipe_path, 0)?,
+		};
 
 		let connected = unsafe { ConnectNamedPipe(handle, ptr::null_mut()) };
 		if connected == FALSE {
@@ -130,11 +146,20 @@ impl WindowsListenerImpl {
 				return Err(ListenerError::io(err, "waiting for pipe connection"));
 			}
 		}
+		let mut process_id = 0;
+		if unsafe { GetNamedPipeClientProcessId(handle, &mut process_id) } == FALSE {
+			unsafe {
+				DisconnectNamedPipe(handle);
+				CloseHandle(handle);
+			}
+			return Err(last_error("querying named-pipe client process"));
+		}
 
 		// Split the handle into independent read and write halves so the
 		// framed transport can own them separately.
 		let read_handle = duplicate_handle(handle)?;
 		let write_handle = duplicate_handle(handle)?;
+		let shutdown_handle = duplicate_handle(handle)?;
 
 		unsafe {
 			CloseHandle(handle);
@@ -142,8 +167,92 @@ impl WindowsListenerImpl {
 
 		let read_file = unsafe { File::from_raw_handle(read_handle) };
 		let write_file = unsafe { File::from_raw_handle(write_handle) };
+		let shutdown = Arc::new(WindowsPipeShutdown(shutdown_handle as usize));
 
-		Ok((Box::new(read_file), Box::new(write_file)))
+		Ok((
+			Box::new(PollingPipeReader(read_file)),
+			Box::new(FlushingPipeWriter(write_file)),
+			Arc::new(move || shutdown.disconnect()),
+			PeerIdentity::new(Some(process_id), None),
+		))
+	}
+}
+
+/// Avoids holding a synchronous duplex pipe read while the relay's other
+/// thread needs to write through a duplicated handle for the same pipe object.
+struct PollingPipeReader(File);
+
+impl Read for PollingPipeReader {
+	fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+		if buffer.is_empty() {
+			return Ok(0);
+		}
+		loop {
+			let mut available = 0;
+			if unsafe {
+				PeekNamedPipe(
+					self.0.as_raw_handle(),
+					ptr::null_mut(),
+					0,
+					ptr::null_mut(),
+					&mut available,
+					ptr::null_mut(),
+				)
+			} == FALSE
+			{
+				return Err(io::Error::last_os_error());
+			}
+			if available > 0 {
+				let read = buffer.len().min(available as usize);
+				return self.0.read(&mut buffer[..read]);
+			}
+			std::thread::sleep(std::time::Duration::from_millis(1));
+		}
+	}
+}
+
+struct FlushingPipeWriter(File);
+
+impl Write for FlushingPipeWriter {
+	fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+		self.0.write(buffer)
+	}
+
+	fn flush(&mut self) -> io::Result<()> {
+		if unsafe { FlushFileBuffers(self.0.as_raw_handle()) } == FALSE {
+			return Err(io::Error::last_os_error());
+		}
+		Ok(())
+	}
+}
+
+impl Drop for WindowsListenerImpl {
+	fn drop(&mut self) {
+		if let Ok(first) = self.first_instance.get_mut() {
+			if let Some(handle) = first.take() {
+				unsafe {
+					CloseHandle(handle as HANDLE);
+				}
+			}
+		}
+	}
+}
+
+struct WindowsPipeShutdown(usize);
+
+impl WindowsPipeShutdown {
+	fn disconnect(&self) {
+		unsafe {
+			let _ = DisconnectNamedPipe(self.0 as HANDLE);
+		}
+	}
+}
+
+impl Drop for WindowsPipeShutdown {
+	fn drop(&mut self) {
+		unsafe {
+			CloseHandle(self.0 as HANDLE);
+		}
 	}
 }
 
@@ -156,7 +265,7 @@ fn create_pipe_instance(path: &str, extra_flags: u32) -> Result<HANDLE, Listener
 		CreateNamedPipeW(
 			name_wide.as_ptr(),
 			PIPE_ACCESS_DUPLEX | extra_flags,
-			PIPE_TYPE_BYTE | PIPE_WAIT,
+			PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
 			PIPE_UNLIMITED_INSTANCES,
 			PIPE_BUFFER_SIZE,
 			PIPE_BUFFER_SIZE,

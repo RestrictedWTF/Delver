@@ -154,6 +154,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "delver-agent-relay"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "delver-rpc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "delver-analysis"
 version = "0.1.0"
 dependencies = [
@@ -197,6 +208,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "delver-mcp"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "delver-rpc",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "delver-protocol"
 version = "0.1.0"
 dependencies = [
@@ -213,6 +235,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "delver-protocol",
+ "libc",
  "serde",
  "serde_json",
  "thiserror",
@@ -483,6 +506,7 @@ dependencies = [
  "delver-rpc",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

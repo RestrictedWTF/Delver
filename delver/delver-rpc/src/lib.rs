@@ -9,6 +9,7 @@
 pub mod client;
 pub mod framed;
 pub mod listener;
+mod private_directory;
 pub mod server;
 
 #[cfg(unix)]
@@ -17,8 +18,9 @@ mod listener_unix;
 mod listener_windows;
 
 pub use client::Client;
-pub use framed::{Message, Transport};
-pub use listener::{connect, Endpoint, Listener, ListenerError};
+pub use framed::{Message, Transport, TransportLimits};
+pub use listener::{connect, Endpoint, Listener, ListenerError, PeerIdentity};
+pub use private_directory::{ensure_private_directory, PrivateDirectoryError};
 pub use server::Server;
 
 use std::io;
@@ -33,6 +35,17 @@ pub enum TransportError {
 	/// A header was malformed or missing a required field.
 	#[error("malformed header: {0}")]
 	MalformedHeader(String),
+
+	/// A declared or outgoing frame exceeded the transport limit.
+	#[error("{kind} frame is too large: {size} bytes exceeds the {limit} byte limit")]
+	MessageTooLarge {
+		/// Frame kind used for diagnostics.
+		kind: &'static str,
+		/// Declared or outgoing payload size.
+		size: usize,
+		/// Maximum accepted payload size.
+		limit: usize,
+	},
 
 	/// A JSON frame contained invalid UTF-8.
 	#[error("invalid utf-8 in json frame")]

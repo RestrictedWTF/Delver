@@ -10,12 +10,54 @@
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// The reader and writer halves of one accepted connection.
 ///
 /// Boxed rather than generic so that the Windows named-pipe and Unix socket
 /// backends can return the same type from a single cross-platform signature.
 pub type DuplexStream = (Box<dyn Read + Send>, Box<dyn Write + Send>);
+
+/// Reader, writer, and an idempotent callback that tears down both directions.
+pub type ShutdownableDuplexStream = (
+	Box<dyn Read + Send>,
+	Box<dyn Write + Send>,
+	Arc<dyn Fn() + Send + Sync>,
+);
+
+/// OS-derived identity for the process connected to a local endpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerIdentity {
+	process_id: Option<u32>,
+	user_id: Option<u32>,
+}
+
+impl PeerIdentity {
+	pub(crate) fn new(process_id: Option<u32>, user_id: Option<u32>) -> Self {
+		Self {
+			process_id,
+			user_id,
+		}
+	}
+
+	/// Returns the kernel-reported peer process id when the platform supports it.
+	pub fn process_id(&self) -> Option<u32> {
+		self.process_id
+	}
+
+	/// Returns the kernel-reported peer user id on Unix-like platforms.
+	pub fn user_id(&self) -> Option<u32> {
+		self.user_id
+	}
+}
+
+/// A shutdownable stream plus its OS-derived connected-peer identity.
+pub type PeerAuthenticatedDuplexStream = (
+	Box<dyn Read + Send>,
+	Box<dyn Write + Send>,
+	Arc<dyn Fn() + Send + Sync>,
+	PeerIdentity,
+);
 
 /// Errors that can occur when binding or accepting on a local endpoint.
 #[derive(Debug)]
@@ -118,7 +160,24 @@ impl Listener {
 	///
 	/// Blocks until a client connects.
 	pub fn accept(&self) -> Result<DuplexStream, ListenerError> {
-		self.inner.accept()
+		let (reader, writer, _shutdown, _peer) = self.inner.accept_shutdownable_with_peer()?;
+		Ok((reader, writer))
+	}
+
+	/// Accepts the next connection with a callback that unblocks both halves.
+	///
+	/// Long-lived relays use this so EOF in either copy direction tears down the
+	/// other direction instead of leaving a process blocked forever.
+	pub fn accept_shutdownable(&self) -> Result<ShutdownableDuplexStream, ListenerError> {
+		let (reader, writer, shutdown, _peer) = self.inner.accept_shutdownable_with_peer()?;
+		Ok((reader, writer, shutdown))
+	}
+
+	/// Accepts a connection with shutdown control and OS-derived peer identity.
+	pub fn accept_shutdownable_with_peer(
+		&self,
+	) -> Result<PeerAuthenticatedDuplexStream, ListenerError> {
+		self.inner.accept_shutdownable_with_peer()
 	}
 
 	/// Returns the endpoint this listener is bound to.
@@ -146,21 +205,44 @@ type ListenerImpl = super::listener_windows::WindowsListenerImpl;
 #[cfg(unix)]
 pub(crate) fn ensure_private_parent(path: &Path) -> Result<(), ListenerError> {
 	use std::fs;
-	use std::os::unix::fs::PermissionsExt;
+	use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 
 	let Some(parent) = path.parent() else {
 		return Err(ListenerError::new("socket path has no parent directory"));
 	};
 
-	if !parent.exists() {
-		fs::create_dir_all(parent)
-			.map_err(|e| ListenerError::io(e, "creating socket directory"))?;
-		let mut perms = fs::metadata(parent)
-			.map_err(|e| ListenerError::io(e, "reading socket directory permissions"))?
-			.permissions();
-		perms.set_mode(0o700);
-		fs::set_permissions(parent, perms)
-			.map_err(|e| ListenerError::io(e, "setting socket directory permissions"))?;
+	let metadata = match fs::symlink_metadata(parent) {
+		Ok(metadata) => metadata,
+		Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+			fs::create_dir_all(parent)
+				.map_err(|e| ListenerError::io(e, "creating socket directory"))?;
+			let mut permissions = fs::metadata(parent)
+				.map_err(|e| ListenerError::io(e, "reading socket directory permissions"))?
+				.permissions();
+			permissions.set_mode(0o700);
+			fs::set_permissions(parent, permissions)
+				.map_err(|e| ListenerError::io(e, "setting socket directory permissions"))?;
+			fs::symlink_metadata(parent)
+				.map_err(|e| ListenerError::io(e, "checking socket directory"))?
+		}
+		Err(error) => {
+			return Err(ListenerError::io(error, "checking socket directory"));
+		}
+	};
+
+	let file_type = metadata.file_type();
+	if file_type.is_symlink() || !file_type.is_dir() || file_type.is_socket() {
+		return Err(ListenerError::new("socket parent must be a real directory"));
+	}
+	if metadata.permissions().mode() & 0o077 != 0 {
+		return Err(ListenerError::new(
+			"socket parent must not be accessible by group or other users",
+		));
+	}
+	if metadata.uid() != super::listener_unix::effective_user_id() {
+		return Err(ListenerError::new(
+			"socket parent must be owned by the current user",
+		));
 	}
 
 	Ok(())
@@ -185,16 +267,22 @@ mod tests {
 		#[cfg(windows)]
 		let endpoint = format!("pipe://delver-test-{}", std::process::id());
 		#[cfg(unix)]
-		let endpoint = format!(
-			"unix://{}/delver-test-{}.sock",
-			std::env::temp_dir().to_string_lossy(),
-			std::process::id()
-		);
+		let socket_directory = std::env::temp_dir().join(format!("delver-test-{}", std::process::id()));
+		#[cfg(unix)]
+		let endpoint = format!("unix://{}", socket_directory.join("session.sock").display());
 
 		let listener = Listener::bind(&endpoint).expect("bind listener");
 
 		let server = thread::spawn(move || {
-			let (mut reader, mut writer) = listener.accept().expect("accept");
+			let (mut reader, mut writer, _shutdown, peer) =
+				listener.accept_shutdownable_with_peer().expect("accept");
+			#[cfg(any(windows, target_os = "linux", target_os = "android"))]
+			assert_eq!(peer.process_id(), Some(std::process::id()));
+			#[cfg(unix)]
+			assert_eq!(
+				peer.user_id(),
+				Some(super::super::listener_unix::effective_user_id())
+			);
 			let mut buf = [0u8; 5];
 			reader.read_exact(&mut buf).expect("server read");
 			assert_eq!(&buf, b"hello");
@@ -211,5 +299,19 @@ mod tests {
 		assert_eq!(&buf, b"world");
 
 		server.join().expect("server thread");
+
+		#[cfg(unix)]
+		std::fs::remove_dir(socket_directory).expect("remove socket directory");
+	}
+
+	#[cfg(windows)]
+	#[test]
+	fn bind_reserves_first_named_pipe_instance() {
+		let endpoint = format!("pipe://delver-reservation-test-{}", std::process::id());
+		let _listener = Listener::bind(&endpoint).expect("bind first listener");
+		assert!(
+			Listener::bind(&endpoint).is_err(),
+			"a second listener must not claim a published pipe namespace"
+		);
 	}
 }

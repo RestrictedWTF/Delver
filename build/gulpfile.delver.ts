@@ -19,7 +19,7 @@ const rootAbs = path.resolve(import.meta.dirname, '..', root);
 const src = `${root}/**/*.rs`;
 const cargoFiles = [`${root}/Cargo.toml`, `${root}/**/Cargo.toml`];
 
-const binaries = ['provider-file', 'delverctl'];
+const binaries = ['provider-file', 'server-analysis', 'delverctl', 'delver-agent-relay', 'delver-mcp'];
 const platform = process.platform;
 const binExt = platform === 'win32' ? '.exe' : '';
 
@@ -51,7 +51,7 @@ const warnIfRustNotInstalled = () => {
 const targetDir = (release: boolean) => path.join(rootAbs, 'target', release ? 'release' : 'debug');
 const outDir = () => path.resolve(import.meta.dirname, '..', 'resources', 'delver', 'bin', platform);
 
-const compileDelver = (release: boolean, callback: (err?: string) => void) => {
+const compileDelver = (release: boolean, callback: (err?: Error) => void) => {
 	const args = ['--color', 'always', 'build', '--workspace'];
 	if (release) {
 		args.push('--release');
@@ -68,7 +68,7 @@ const compileDelver = (release: boolean, callback: (err?: string) => void) => {
 	proc.on('error', callback);
 	proc.on('exit', code => {
 		if (code !== 0) {
-			callback(Buffer.concat(stdoutErr).toString());
+			callback(new Error(Buffer.concat(stdoutErr).toString()));
 		} else {
 			callback();
 		}
@@ -88,13 +88,13 @@ const stageBinaries = (release: boolean) => {
 	}
 };
 
-const compileDelverTask = (release: boolean) => es.map((_, callback: (err?: unknown) => void) => {
+const compileDelverTask = (release: boolean) => es.map((_, callback: (err?: Error, data?: void) => void) => {
 	compileDelver(release, err => {
 		if (err) {
-			callback(err as Error);
+			callback(err);
 		} else {
 			stageBinaries(release);
-			callback(undefined, '');
+			callback();
 		}
 	});
 });
@@ -105,7 +105,7 @@ const compileDelverDebugTask = task.define('compile-delver', () => {
 		.pipe(compileDelverTask(false));
 });
 
-const compileDelverReleaseTask = task.define('compile-delver-release', () => {
+export const compileDelverReleaseTask = task.define('compile-delver-release', () => {
 	warnIfRustNotInstalled();
 	return gulp.src(`${root}/Cargo.toml`)
 		.pipe(compileDelverTask(true));

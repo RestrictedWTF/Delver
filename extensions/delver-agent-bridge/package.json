@@ -1,0 +1,39 @@
+{
+	"name": "delver-agent-bridge",
+	"displayName": "Delver Agent Bridge",
+	"description": "Private local transport bridge for Delver agent clients.",
+	"version": "0.1.0",
+	"publisher": "vscode",
+	"license": "MIT",
+	"engines": {
+		"vscode": "^1.109.0"
+	},
+	"extensionKind": [
+		"ui"
+	],
+	"activationEvents": [
+		"onStartupFinished"
+	],
+	"main": "./out/extension",
+	"contributes": {
+		"commands": [
+			{
+				"command": "delver.agent.copyMcpConfiguration",
+				"title": "%delver.agent.copyMcpConfiguration.title%",
+				"category": "%delver.category%"
+			}
+		]
+	},
+	"scripts": {
+		"compile": "gulp compile-extension:delver-agent-bridge",
+		"test": "node --test out/test/protocol.test.js out/test/connection.test.js out/test/relayProcess.test.js out/test/registryDirectoryProcess.test.js out/test/relayTransport.test.js out/test/relaySupervisor.test.js out/test/dtpProvision.test.js out/test/tokenLease.test.js out/test/bootstrap.test.js out/test/authorization.test.js out/test/approvalUi.test.js out/test/rootFingerprint.test.js out/test/rendezvousRegistry.test.js out/test/rendezvousLifecycle.test.js out/test/productionBridge.test.js out/test/bootstrapRelayTransport.test.js out/test/bootstrapRelayManager.test.js out/test/clientConfiguration.test.js",
+		"test-integration": "node --test out/test/registryDirectoryProcess.integration.test.js out/test/bootstrapProcess.integration.test.js",
+		"watch": "gulp watch-extension:delver-agent-bridge"
+	},
+	"capabilities": {
+		"virtualWorkspaces": false,
+		"untrustedWorkspaces": {
+			"supported": false
+		}
+	}
+}
