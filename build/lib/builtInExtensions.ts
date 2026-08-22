@@ -21,6 +21,9 @@ export interface IExtensionDefinition {
 	version: string;
 	sha256: string;
 	repo: string;
+	// DELVER: Keep selected built-ins on their checksum-matching official release assets.
+	/** Download this extension's official release asset even when a gallery is configured. */
+	source?: 'github';
 	platforms?: string[];
 	vsix?: string;
 	/**
@@ -93,6 +96,9 @@ function getExtensionDownloadStream(extension: IExtensionDefinition) {
 			return es.readArray([]);
 		}
 		input = ext.fromGithub(extension, { asset, latest: isInsiders() });
+	// DELVER: Open VSX can repackage a version without preserving the upstream VSIX checksum.
+	} else if (extension.source === 'github') {
+		input = ext.fromGithub(extension, { latest: isInsiders() });
 	} else if (productjson.extensionsGallery?.serviceUrl) {
 		input = ext.fromMarketplace(productjson.extensionsGallery.serviceUrl, extension);
 	} else {

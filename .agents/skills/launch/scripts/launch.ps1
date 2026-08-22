@@ -287,11 +287,11 @@ function Ensure-SimpleDialogSetting([string]$settingsFile) {
 
 	$lastBrace = $maskedText.LastIndexOf('}')
 	if ($lastBrace -eq -1) {
-		throw "settings.json has no closing brace — refusing to clobber it: $settingsFile"
+		throw "settings.json has no closing brace - refusing to clobber it: $settingsFile"
 	}
 	$firstBrace = $maskedText.IndexOf('{')
 	if ($firstBrace -eq -1 -or $firstBrace -ge $lastBrace) {
-		throw "settings.json has no opening brace — refusing to clobber it: $settingsFile"
+		throw "settings.json has no opening brace - refusing to clobber it: $settingsFile"
 	}
 
 	# Whether a leading comma is needed depends only on real content, so decide
