@@ -37,3 +37,7 @@ for reconsideration, and let the ADR carry the *change*, not the history.
 | --- | --- | --- | --- |
 | [0001](0001-wire-protocol-framing-and-encoding.md) | Wire protocol: framing, number encoding, and errors | accepted | 2026-08-06 |
 | [0002](0002-wire-types-separate-from-domain-types.md) | Wire types separate from domain types | accepted | 2026-08-06 |
+| [0003](0003-unsafe-code-in-transport-listener.md) | Unsafe code in the transport listener | accepted | 2026-08-07 |
+| [0004](0004-interpretation-store-location.md) | Where authored interpretation is stored | superseded by 0005 | 2026-08-08 |
+| [0005](0005-portable-project-database.md) | Portable project database and session save lifecycle | accepted | 2026-08-11 |
+| [0006](0006-proposal-resolution-in-the-edit-log.md) | Accepting and rejecting proposals in an append-only log | accepted | 2026-08-19 |

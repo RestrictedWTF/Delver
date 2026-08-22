@@ -94,14 +94,16 @@ P2 is built on exactly what P1 produces.
 | Address history on Alt+Left / Alt+Right | S | Free once views are `EditorInput`s |
 | Focus bus with `origin` tagging + per-view pin | M | Prevents update loops from day one |
 | Rename, comment, tag — anchored, attributed, undoable | M | The append-only edit log. **P2 writes through this** |
-| `.delverdb` SQLite project; opens with no target attached | M | |
+| Portable `.delverdb` SQLite project | M | Untitled raw-binary session; Save / Don't Save / Cancel when dirty; named projects autosave; opens without target; excludes sample bytes |
 | Outline view = function list | S | |
 | Golden corpus + regression suite in CI | M | Start it here or it never starts |
 
 ## Can slide out of P1 if you want P2 sooner
 
 - **Hex view** (M) — genuinely useful, but nothing in P2 needs it. Slide to P4
-  where it pairs with live memory.
+  where it pairs with live memory. A smaller post-P2 read-only data-section
+  viewer may land first: double-clicking a Strings row should open `.rdata` or
+  `.data` at that string's RVA, with address history and focus-bus integration.
 - Resource and TLS parsing — entry points and code matter first.
 
 ## Explicitly not in P1
@@ -120,52 +122,89 @@ tomorrow, and everything is there.
 # P2 — Decompilation and p-code · **the new priority**
 
 The largest single integration in the roadmap. Staged so the product questions
-get answered before the expensive engineering.
+get answered before the expensive engineering, without coupling the workbench to
+one decompiler engine.
 
 ## Why this is staged
 
-Ghidra's decompiler is a native process that **queries the frontend back** for
-bytes, symbols, and types — you implement the responder, and that responder
-protocol is an internal Ghidra interface, not a stable public API. It changes
-between versions. Plan to **pin a Ghidra version and vendor the decompiler
-source.**
+Ghidra and IDA expose different lifecycles, data models, and intermediate
+representations. Ghidra is most directly automated through PyGhidra, which owns
+a long-lived JVM and Ghidra project; IDA/Hex-Rays is most directly automated
+through IDAPython inside an installed, licensed IDA environment. They must not
+share a runtime.
 
-So: prove the value with a scaffold, then build the real thing.
+The durable boundary is therefore a **backend-neutral decompiler host protocol**,
+not a Ghidra library API. The host supervises one isolated worker per engine.
+PyGhidra is the first production adapter; a separate IDAPython/Hex-Rays adapter
+can follow without changing the workbench or pseudocode editor. A native Ghidra
+responder remains an optional optimization if profiling later justifies its
+maintenance cost.
 
-## P2a — Scaffold (Ghidra headless)
+## P2a — Headless proving path
 
 | Item | Size | Notes |
 | --- | --- | --- |
-| Headless Ghidra script → `{C text, address↔line map, variables}` as JSON | S | Days, not weeks |
-| `IDecompilerService` interface + headless backend behind it | M | The interface is what survives |
+| Headless Ghidra script → `{C text, address↔line map, variables}` as JSON | S | Compatibility fallback after P2b |
+| `IDecompilerService` interface + headless backend behind it | M | The backend-neutral interface survives |
 | `delver-pseudo:` scheme + `delver-c` language in Monaco | M | Free highlighting, folding, find, peek |
 | **Line ↔ address map**, bidirectional sync with the listing | M | This is the feature; text rendering is free |
 | Rename/comment in pseudocode writes through to the interpretation layer | M | |
-
-**Hard constraint: the JVM must never reach a shipped build.** P2a is a scaffold
-you delete. If it starts looking permanent, that's a schedule problem, not an
-architecture decision.
 
 **Exit of P2a:** click a pseudocode line, the listing highlights the matching
 instructions; rename in either view and both update. You now know whether
 AI-on-decompilation works for your samples — before paying for P2b.
 
-## P2b — Native decompiler process
+## P2b — Persistent backend-neutral decompiler host
+
+Implementation sequencing and acceptance tests are defined in the
+[P2b Project and Decompiler Integration Plan](p2b-project-decompiler-integration-plan.md).
 
 | Item | Size | Notes |
 | --- | --- | --- |
-| Vendor + build Ghidra's `decompile` at a pinned version | M | Document the pin and the update procedure |
-| `delver-decompile` responder: bytes, functions, symbols, comments, types | L | Fed by P1's fact store |
-| Swap the backend behind `IDecompilerService`; delete the JVM path | M | A second integration, not a continuation |
-| Caching + invalidation keyed by content hash and the edit log | M | Renames must not force a full re-decompile |
+| Project/session lifecycle | M | Raw binaries open untitled; prompt Save / Don't Save / Cancel on close, target replacement, and shutdown only after durable analysis content exists |
+| Portable SQLite `.delverdb` | L | One shareable analysis file containing facts, pseudocode, interpretation, findings, provenance, and restorable session state; never sample bytes |
+| Incremental autosave + migration | M | Named projects commit durable changes transactionally; migrate the current per-hash interpretation JSONL without losing append-only history |
+| Exact function revision matcher | S | Versioned normalized listing fingerprints; unique exact matches expose confidence/method/provenance; duplicates stay ambiguous |
+| Structural fuzzy revision matcher | M | **Follow-up.** CFG/call-shape/string evidence with disclosed lower confidence; never guess by RVA/size or silently move authored edits |
+| Versioned host protocol + capability handshake | M | Backend identity/version, architectures, decompilation, mappings, variables/types, cancellation, persistence, and optional IR capabilities |
+| Persistent PyGhidra worker | M | Start one JVM, retain the analyzed project/program, and decompile many functions |
+| Backend discovery and selection | S | Report missing Ghidra/IDA installations, incompatible versions, and unavailable Hex-Rays licenses explicitly |
+| Persistent per-engine analysis state | M | A local content-hash-keyed Ghidra project now; an IDA database when its adapter lands. Both are disposable, nonportable accelerators outside `.delverdb` |
+| Keep the headless Ghidra backend as a fallback | S | Recovery and compatibility path, not the normal per-function path |
+| Caching + invalidation keyed by content hash, backend/version, analysis profile, schema version, and edit log | M | Never reuse output across incompatible engines, schemas, or analysis settings |
 | Decompiler timeout / failure handling as first-class UI state | S | Big obfuscated functions will fail. Say so, don't hang |
+
+The common result schema owns only semantics the UI can rely on: backend
+identity and version, function identity, pseudocode text, recovered variables,
+diagnostics, and line↔RVA mappings. Ghidra p-code and Hex-Rays microcode/ctree are
+advertised and returned as optional backend-specific capabilities. Do not invent
+a lossy common IR just to make the field names match.
+
+The portable project is the record of analysis and user work. Backend-native
+state is only an accelerator: deleting the local Ghidra/IDA cache may make the
+next analysis slow, but must not remove anything the user authored or prevent a
+`.delverdb` from opening without the sample. See
+[session-persistence.md](../architecture/session-persistence.md).
+
+## P2c — IDA/Hex-Rays adapter
+
+| Item | Size | Notes |
+| --- | --- | --- |
+| Separate IDAPython worker | M | Runs in the user's configured IDA installation; never import IDAPython into the PyGhidra process |
+| Hex-Rays decompilation and mappings | M | Adapt C text, variables, diagnostics, and line/address provenance into the common schema |
+| IDA database persistence and invalidation | M | Reuse a content-hash-keyed database only when IDA, decompiler, and analysis-profile versions match |
+| License/capability reporting | S | IDA may be installed while the required Hex-Rays decompiler or architecture license is unavailable |
+
+IDA and Hex-Rays remain optional user-provided integrations. Delver does not
+bundle or redistribute them. The C++ IDA SDK is a later escape hatch for APIs or
+performance that IDAPython cannot provide; it does not change the host protocol.
 
 ## p-code
 
 | Item | Size | Notes |
 | --- | --- | --- |
 | Expose raw p-code per instruction/block | M | SLEIGH lifting; a C++ FFI dependency if done natively |
-| Expose refined p-code from the decompiler | S | Comes with P2b for free |
+| Expose refined p-code from Ghidra | S | Optional PyGhidra capability; never required of other backends |
 | p-code query surface for semantic passes | M | |
 
 **Ranking for AI grounding: C ≫ refined p-code > assembly ≫ raw p-code.**
@@ -184,13 +223,17 @@ the cheapest fix: it exercises threads, registers, modules, and multiple address
 spaces, and "open a crash dump" is a real static workflow on its own.
 
 **Exit of P2:** decompiled C for an arbitrary function, synced to the listing,
-with renames flowing both ways, produced by a shipped binary with no JVM.
+with renames flowing both ways and repeated requests served by a persistent,
+discoverable backend. Adding IDA/Hex-Rays changes an adapter, not the workbench.
 
 ---
 
 # P3 — AI core
 
 Now the model has something worth reading. See [05-AI-Analyst.md](../architecture/ai-analyst.md).
+The implementation sequence, direct-versus-external transport boundary, tool
+catalog, latency budgets, and large-binary investigation memory are specified in
+the [P3 AI integration plan](ai-integration-plan.md).
 
 | Item | Size |
 | --- | --- |

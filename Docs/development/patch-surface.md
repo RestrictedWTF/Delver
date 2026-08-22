@@ -23,12 +23,13 @@ one-day monthly merge and a one-week one.
 
 | File | Nature of change | Conflict risk | Owner | Notes |
 | --- | --- | --- | --- | --- |
-| `product.json` | Branding, app IDs, gallery URL, telemetry defaults | Medium | — | Active: Delver identity, fresh GUIDs/mutexes, Open VSX gallery, telemetry off, empty issue/update URLs. Upstream changes this often; expect to re-apply |
+| `product.json` | Branding, app IDs, gallery URL, telemetry defaults | Medium | — | Active: Delver identity, fresh GUIDs/mutexes, Open VSX gallery, telemetry off, empty issue/update URLs. `vscode-js-profile-table` uses its checksum-matching official GitHub release because Open VSX repackages the pinned version. Upstream changes this often; expect to re-apply |
 | `src/vs/platform/product/common/product.ts` | Fallback product name and telemetry defaults | Low | — | Active: fallback identity set to Delver; report/issue URLs cleared |
 | `build/win32/code.iss` | Publisher, output filename, `.delverdb` association | Low | — | Active: Delver publisher; OutputBaseFilename changed; `.delverdb` file-association block added. Full source-file association trim still pending |
 | `build/hygiene.ts` | Allow Open VSX in `product.json` extensionsGallery | Low | — | Active: hygiene blocked any `extensionsGallery`; now only blocks Microsoft Marketplace URLs |
 | `build/filters.ts` | Exclude `scripts/generate-artwork.py` from hygiene | Low | — | Active: Python dev script uses `#` comments and spaces, not the repo's TS-style header/tabs |
-| `build/lib/preLaunch.ts` | Detect stale Electron executable after rebrand | Low | — | Active: version match alone is not enough; also checks the executable name matches `product.json` |
+| `build/lib/preLaunch.ts` | Prepare Electron and Delver native binaries | Low | — | Active: version match alone is not enough, so the executable name is checked against `product.json`; fresh clones also build `provider-file` and `server-analysis` before launch when either debug binary is absent |
+| `build/lib/builtInExtensions.ts` | Per-extension official GitHub source override | Low | — | Active: preserves upstream checksums when Open VSX serves a repackaged archive for the same extension version |
 | `scripts/code.bat` | Find Electron executable when nameShort changes | Low | — | Active: falls back to the first `.exe` in `.build\electron` when `nameShort.exe` is missing (stale download) |
 | `resources/win32/code.ico` and tiles | Icon contents replaced with Delver logo | Low | — | Filenames unchanged; regenerate via `scripts/generate-artwork.py` |
 | `resources/win32/inno-big-*.bmp`, `inno-small-*.bmp` | Installer artwork replaced with Delver logo | Low | — | Filenames unchanged; dark background matches Delver Dark chrome |
@@ -38,7 +39,7 @@ one-day monthly merge and a one-week one.
 | `src/vs/workbench/browser/media/code-icon.svg` | In-workbench app icon replaced with Delver logo | Low | — | Filenames unchanged; regenerate via `scripts/generate-artwork.py`. Drives the titlebar app icon plus the banner, update tooltip, getting-started, onboarding and walkthrough surfaces — the OS icons under `resources/` do **not** cover these |
 | `src/vs/workbench/browser/parts/editor/media/letterpress-*.svg` | Empty-editor watermark replaced with Delver logo | Low | — | Filenames unchanged; regenerate via `scripts/generate-artwork.py`. Upstream's per-theme opacity/fill is carried over verbatim, only the mark changes |
 | `build/lib/stylelint/vscode-known-variables.json` | One entry per registered Delver color | Low | — | Active: `--vscode-delver-listing-functionName`. Generated file — stylelint rejects any CSS variable missing from it, so every new `registerColor` needs an entry. Regenerate with `scripts/test-documentation.bat` rather than hand-editing where possible |
-| `src/vs/workbench/workbench.common.main.ts` | One import line per Delver contribution | **High** | — | Active: Delver service and contribution imports under the `// DELVER:` marker — focus/session services, view container, and the `delverSections`, `delverImports`, `delverListing`, `delverXrefs` contributions. Keep all Delver imports contiguous. |
+| `src/vs/workbench/workbench.common.main.ts` | One import line per Delver contribution | **High** | — | Active: Delver service and contribution imports under the `// DELVER:` marker — focus/session/interpretation/decompiler/agent services, view container, and the `delverSections`, `delverImports`, `delverListing`, `delverPseudocode`, `delverXrefs`, `delverAI` contributions. Keep all Delver imports contiguous. |
 | `src/vs/workbench/services/environment/…` *(TBD)* | Inject `DELVER_SESSION` into terminal + kernel environments | Low | — | Prefer an existing env-contribution point over a direct edit |
 | `.eslint-plugin-local/code-import-patterns.ts` | Layer rules for `delver` folders | Low | — | Only if new layer boundaries are introduced |
 | `eslint.config.js` | Delver lint rules (`delver-address-is-bigint`, `delver-no-target-kind-branch`) | Low | — | Active: delver file glob with two custom rules |
@@ -46,7 +47,7 @@ one-day monthly merge and a one-week one.
 | `src/vs/code/electron-utility/sharedProcess/sharedProcessMain.ts` | Register Delver shared-process channels | Low | — | Active: service and channel registration for process hosting, analysis, and the node-side interpretation store |
 | `src/vs/workbench/workbench.desktop.main.ts` | Register Delver renderer-side services | Low | — | Active: imports target, process, analysis, and interpretation-store remote services |
 | `build/gulpfile.vscode.ts` (and platform variants) | Stage provider/analysis binaries into the package | Medium | — | Model on `gulpfile.cli.ts` |
-| `package.json` | `delver:*` scripts | Low | — | Active: `delver:build`, `delver:test`, `delver:protocol` |
+| `package.json` | `delver:*` scripts | Low | — | Active: `delver:build`, `delver:test`, `delver:corpus`, `delver:protocol`, `delver:launch` |
 | `src/vs/workbench/browser/web.api.ts` | Only if Delver needs web-facing config | Low | — | Avoid if possible |
 
 Rows are placeholders until the corresponding work lands. Delete a row if the

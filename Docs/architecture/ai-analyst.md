@@ -20,16 +20,28 @@ are the same operations the Python client exposes over DTP — one capability
 surface, three consumers: the UI, AI tools, and user scripts. See
 [04-IDE-Architecture.md](ide-architecture.md) §5.
 
-Starting tool set:
+**The tool catalog lives in the
+[P3 AI integration plan](../planning/ai-integration-plan.md) §5, not here.** It
+moved because a second list is a second source of truth, and the two drifted
+apart within one phase: this document still said `delver_findStrings` after the
+implementation had settled on `delver_search_strings`. Names are snake_case and
+identical across the built-in registry, MCP, and Python.
+
+Shipped in P3a (read and UI only):
 
 ```
-delver_listTargets            delver_readMemory        delver_disassemble
-delver_decompile              delver_listProcesses     delver_listThreads
-delver_readRegisters          delver_listModules       delver_listRegions
-delver_xrefsTo / xrefsFrom    delver_findStrings       delver_searchBytes
-delver_diffImage              delver_graphQuery        delver_getInterpretation
-delver_proposeRename          delver_proposeComment    delver_reportFinding
+delver_capabilities      delver_session_info      delver_current_context
+delver_focus             delver_image_info        delver_list_functions
+delver_lookup_function   delver_disassemble       delver_decompile
+delver_xrefs_to          delver_xrefs_from        delver_list_strings
+delver_search_strings    delver_imports           delver_exports
+delver_get_interpretation
 ```
+
+The runtime tools this section once listed — processes, threads, registers,
+modules, regions, image diff — belong to P4 and are not stubs waiting to be
+filled in. `delver_propose_*` and `delver_report_finding` arrive with the
+proposal layer in P3c (§3).
 
 Design rules for these tools:
 

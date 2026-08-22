@@ -101,7 +101,10 @@ Done:
   verdict: a section full of compressed resources trips the same test.
 - Container title actions for Open Target and Reset Views.
 - Persistent filter boxes on Functions and Imports. The Strings editor page has
-  its own filter and encoding column.
+  its own filter and encoding column. A zero-match query stays in the ordinary
+  tree body rather than activating welcome content, so its filter remains
+  reachable and recoverable. Search-only root identities keep automatic filter
+  expansion from changing the unfiltered tree's expansion state.
 - Every function remains reachable. Because `TreeView.getChildren` materializes
   its returned array even though DOM rows are virtualized, large categories are
   split into lazy 1,000-item pages. A 178k-function image therefore creates about
@@ -129,7 +132,7 @@ or a sidebar you keep closing.
 
 Both can exist for one dataset, and for some of them both should.
 
-### R1 · Overview rows navigate — S
+### R1 · Overview rows navigate — **done**
 
 Each Overview row becomes an action rather than a readout:
 
@@ -139,6 +142,9 @@ Each Overview row becomes an action rather than a readout:
 
 Cheap, and it turns the pane from a label into a table of contents. The focus
 bus already carries every one of these.
+
+The actionable row model is covered independently of workbench contribution
+registration, including preservation of wire addresses above `2^53`.
 
 ### R2 · Strings as a page — **done**
 

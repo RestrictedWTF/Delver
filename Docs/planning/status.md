@@ -8,10 +8,405 @@ something is the way it is, see [adr/](../history/adr/).
 
 ---
 
-**Last updated:** 2026-08-08
-**Current phase:** Stage G6 — workspace pane polish complete
+**Last updated:** 2026-08-19
+**Current phase:** P3c — proposals, evidence, and review (P3b client conformance and P3a/P2b real-project smoke continue alongside)
 
 ## Just landed
+
+P3c step 1 is done: proposed and rejected interpretation is a complete state
+rather than an enum nothing could leave. A review decision is an ordinary
+append carrying `resolves`, so invariant 5 holds — nothing mutates, and a
+proposal is pending exactly while no later append decides it. Accepting copies
+the proposal's anchor, op, and value under the *reviewer's* authorship, with the
+model's proposal still readable one `resolves` hop away; rejecting records what
+was declined and leaves the picture untouched. `resolves` is deliberately not
+`compensates`: undoing an effect the picture had and declining one it never had
+read identically if they share a field, and the review surface has to tell them
+apart. [ADR 0006](../history/adr/0006-proposal-resolution-in-the-edit-log.md)
+records the decision and the two alternatives that lost.
+
+`propose`, `pendingProposals`, and `resolveProposals` are on the interpretation
+service. Batch review builds every resolution against the pre-batch log before
+appending anything, so an invalid mixed batch writes nothing. Valid decisions
+remain independent append-only records, and an I/O failure may commit a prefix.
+Appending a resolution fails closed
+on an unknown, non-proposed, or already-decided sequence; replaying a stored log
+stays tolerant of the same references, because a log naming a sequence it does
+not contain is still the user's work. The field round-trips through the JSONL
+record and is resequenced along with `compensates` on import.
+
+P3b's integration assets are published. `Docs/development/external-agents.md` is
+the client-facing surface: the generic stdio `.mcp.json`, the staged adapter
+paths for development and packaged builds, per-client arrangements for Claude
+Code, Codex, Cursor, Kimi, Delver's own workbench, and a minimal reference
+client, the lazy discovery/approval sequence, and a troubleshooting table keyed
+to the adapter's real error strings. It states plainly that none of those clients
+has been through the conformance run yet, so the recipes are not mistaken for
+verified ones.
+
+A **Copy External Agent (MCP) Configuration** command now generates that recipe
+rather than asking a human to transcribe two absolute paths. It resolves the
+staged `delver-mcp` binary through the same Delver-owned candidate scheme the
+relay uses — never a `PATH` fallback — and takes the root from the window's own
+selection. Its eligibility check *is* activation's: `describeBridgeEligibility`
+returns the single reason a window cannot publish, and
+`isWorkspaceSelectionEligibleForBridge` is now derived from it. Two gates that
+could disagree would produce the worst outcome available here — a copied
+configuration for a window whose bridge is permanently inert — so there is only
+one. Untrusted, remote, untitled, zero-root, multi-root, non-local, unsupported-
+platform, and unstaged-adapter cases each yield their own localized sentence
+instead of a generic failure.
+
+P3a's contract and direct vertical slice exist. `IDelverAgentService` is the
+single place an agent capability is implemented: the built-in chat tools call
+it now, and the P3b command gateway, MCP adapter, and Python client will call
+the same `invoke`. Adapters translate protocol and nothing else — the moment
+one of them resolves a function boundary for itself there are two analysis
+implementations that disagree, and the disagreement surfaces as a model citing
+an address no pane ever showed.
+
+Sixteen read/UI capabilities are live: session info, capability discovery,
+current context, focus, image info, function listing and lookup, disassembly,
+decompilation, both xref directions, string listing and search, imports,
+exports, and interpretation lookup. Every result is a versioned envelope
+carrying byte identity, revision, provenance, and `completeness`, so a
+truncated answer cannot be read as a complete one.
+
+The stable contract now distinguishes malformed requests with
+`INVALID_ARGUMENT`; `ADDRESS_NOT_MAPPED` is reserved for syntactically valid
+addresses with no decoded mapping. Direct prompt references retain their full
+`#delver_...` names so generic tools from another extension cannot collide.
+Dispatcher and direct-tool telemetry now records dispatch, backing-service,
+serialization, adapter transport, and model-visible total durations. The events
+contain only bounded capability/outcome metadata and measurements, never sample
+paths, hashes, arguments, model ids, or extracted content.
+
+P3b now has its private renderer command gateway. `_delver.agent.capabilities`
+and `_delver.agent.invoke` are the only extension-host entry points, and both
+delegate directly to `IDelverAgentService`. The gateway validates a bounded
+plain-JSON request before dispatch, rejects cycles, non-finite numbers, bigint,
+oversized/deep payloads, unknown top-level fields, and spoofed caller kinds, and
+returns stable failures as JSON data rather than lossy remote exceptions. It
+opens no target, starts no analysis, and owns no capability logic. Cancellable
+bridge calls multiplex `invoke` and `cancel` operation envelopes through the
+existing invoke command, with bounded request ids and active-call counts; a
+third private command was not added.
+
+The built-in `delver-agent-bridge` extension now has the first external-
+transport slice: bounded `Content-Length` framing and a transport-independent
+authenticated DTP connection state machine. It accepts only `initialize`,
+`agent/capabilities`, `agent/invoke`, and `agent/cancel`; binds caller identity to the
+authenticated connection; rejects duplicate ids and excess concurrency; and
+propagates explicit cancellation and disconnects into the renderer before
+suppressing late writes. The shared Rust transport now bounds
+headers, JSON payloads, and bulk binary frames before allocation and rejects
+duplicate or non-decimal length headers.
+
+The `delver-agent-relay` Rust executable now provides the thin OS
+boundary needed by the bridge: one owner-only named pipe/Unix socket connection
+is copied byte-for-byte to stdio and the process returns when either direction
+ends. Windows retains `FILE_FLAG_FIRST_PIPE_INSTANCE` through the first accept,
+rejects remote clients, and keeps its current-user DACL. Unix refuses existing
+socket paths and requires a current-user-owned mode-0700 parent. Readiness is one
+exact bounded JSON line on stderr; stdout remains protocol bytes only. The relay
+is staged with the other native binaries and starts only for a trusted,
+single-root local workspace.
+Its opt-in bootstrap mode now queries the connected peer from the kernel—named-
+pipe client PID on Windows, `SO_PEERCRED` PID/UID on Linux/Android, and peer UID
+on BSD-family systems—and emits one bounded control record before starting byte
+copying. Normal DTP mode emits no peer metadata.
+
+The extension-side supervisor and backpressure-safe stdio transport are now
+composed by the production activation owner. The
+supervisor resolves only Delver-owned absolute binaries, creates a fresh
+endpoint/token per attempt, strips ambient credentials from the relay process,
+requires strict bounded readiness within five seconds, drains but never logs
+post-readiness stderr, bounds queued writes to 8 MiB, and deduplicates
+error/exit cleanup and capped exponential restarts. Credential handoff to an
+independently launched MCP adapter now has a live bootstrap protocol core: one bounded
+claim must match the registry entry, window instance, and canonical root
+fingerprint; verified-peer authorization defaults to deny; DTP is provisioned
+before a 15-second, 256-bit lease is issued; and atomic endpoint-generation-bound
+consumption rejects replay. Disconnect, write failure, endpoint death, expiry,
+and disposal revoke unconsumed leases. A concrete in-memory authorizer now holds
+at most one 30-second approval for the currently connected, OS-attested peer.
+Each request has a fresh opaque ID; disconnect, expiry, denial, disposal, and
+stale approvals fail closed, so PID reuse cannot inherit authorization. The
+localized modal adapter now offers only **Allow Once** and **Deny**,
+shows OS-attested PID/UID separately from the explicitly unverified application
+name, and grants only the exact live request ID. Dismissal, prompt failure,
+expiry, disconnect, and adapter disposal deny; a stale unresolved modal also
+prevents prompt stacking. Client display names containing control or bidi
+formatting characters are rejected before authorization. `activate()` publishes
+no endpoint until all eligibility and security gates pass.
+
+The bootstrap relay manager now owns the race between the native
+relay's stderr attestation and stdout claim bytes. It attaches a combined,
+bounded READY/PEER decoder and a one-claim input gate before invoking the
+publication seam. Publication is one-shot and is removed before buffered claim
+fragments are released to a verified-peer bootstrap session. Cross-stream
+arrival order, reentrant publication, oversized input, readiness/peer timeout,
+response-write backpressure, and idempotent cleanup are covered in both injected
+tests and production activation.
+
+The non-secret rendezvous registry format and file store are now
+implemented. Each publication is one immutable, bounded JSON file with a fresh
+entry/window generation, root fingerprint, local bootstrap endpoint, owner PID,
+and the relay's absolute peer deadline; it contains no token, nonce, path, target
+metadata, or client label. Same-directory temp write/fsync plus atomic no-replace
+link publication avoids a shared manifest and cross-window locking. Readers cap
+enumeration and per-file allocation, reject malformed/future/expired/wrong-
+platform entries, and prune only well-formed expired entries or old temp files.
+Disposing one window removes only its exact entry. POSIX preparation requires
+the four Delver-owned directories to be current-user 0700 and creates each
+component only after checking the previous one. Windows now has an audited native
+provider in `delver-agent-relay --prepare-registry-directory`: every owned
+component is opened without following reparse points and must have the current
+token user as owner plus one exact, protected, inheritable full-control ACE for
+that SID. New components receive that descriptor at creation; mismatched
+existing directories are rejected, never repaired. The TypeScript one-shot
+controller supplies only whitelisted `LOCALAPPDATA`/Windows boot variables,
+requires empty stdout, one bounded exact readiness record, clean exit, and a
+five-second deadline. Production activation injects this provider on Windows
+and uses strict owner/mode validation on POSIX.
+
+The `root-v1` module now gives the extension and future MCP adapter one
+normative workspace-routing fingerprint. It requires exactly one local,
+non-remote, non-untitled directory, resolves filesystem aliases before hashing,
+uses strict platform-specific canonical forms with no Unicode normalization,
+and locks the domain-separated SHA-256 preimage with drive, UNC, POSIX, and
+composed/decomposed Unicode vectors. Unsupported platforms and malformed,
+missing, inaccessible, non-directory, or ambiguous roots fail closed. The
+fingerprint contains no path and remains routing metadata rather than identity.
+
+The per-window rendezvous lifecycle is now production-composed behind the
+startup activation gate. Bootstrap sessions and relay attempts expose first-wins close outcomes;
+silent or partially framed peers have a five-second claim deadline; authorization
+distinguishes grants, denial, expiry, cancellation, busy suppression, and an
+unavailable verifier. Registry removal is awaited before buffered claim bytes
+are released, and shutdown waits for in-flight publication and endpoint cleanup.
+Token-free lease events let the lifecycle block publication while a credential
+is live, penalize an unconsumed/invalidated grant, and reset counters only after
+successful DTP initialization consumes the token. One scheduling gate serializes
+root generation changes, stale modal prompts, active leases, asynchronous
+teardown, and ±20% jittered idle/technical/prompt backoff. Rapid root changes
+rotate IDs and cannot resurrect an old publication. Every root refresh first
+unpublishes bootstrap, aborts pending provisioning, and closes authenticated
+private DTP relays before applying the next fingerprint. Extension shutdown
+awaits registry removal, native process exit, and endpoint cleanup.
+
+Production activation now runs on `onStartupFinished` but remains inert for
+Restricted Mode, remote/virtual/untitled workspaces, unsupported platforms, and
+zero or multiple roots. A real workbench launch verified that Restricted Mode
+creates no registry, granting trust publishes one token-free 30-second entry,
+and closing the window removes the entry and reaps the relay.
+
+The gated real-process path now passes on Windows: a raw Node client claims the
+real bootstrap pipe, receives an explicitly granted 256-bit one-time token,
+connects a second real relay, initializes DTP, reaches capabilities/invoke, and
+cancels the pending renderer request on disconnect. That test exposed two native
+duplex bugs that unit-memory streams had hidden. The relay now flushes every
+forwarded chunk, and the Windows server polls pipe availability before reading
+so a pending synchronous read on a duplicated handle cannot serialize and
+deadlock the response write. The Windows writer flushes kernel pipe buffers
+before considering delivery complete.
+
+The standalone native `delver-mcp` adapter is now implemented and staged with
+the other Delver binaries. It requires an explicit absolute `--root`, computes
+the same root-v1 fingerprint as the extension, strictly selects one current
+registry publication, performs the one-shot bootstrap claim, consumes the
+private DTP token, and keeps one authenticated session for dynamic tool calls.
+Its stdout is bounded UTF-8 MCP JSON-RPC over newline-delimited stdio; it
+negotiates public protocol revisions through `2025-11-25`, enforces initialize
+lifecycle, keeps ping responsive while tool workers run, maps MCP cancellation
+to `agent/cancel`, suppresses late responses, and bounds shutdown even when a
+backend does not cooperate. The gateway capability response now carries the
+canonical title, model description, and input schema for all sixteen tools, so
+the adapter does not duplicate TypeScript tool definitions. Successful calls
+preserve the full Delver result envelope as text and structured content; stable
+Delver failures remain MCP tool errors rather than protocol errors.
+
+Discovery costs nothing. `delver_capabilities` answers with no project open and
+starts no target, no analysis, and no decompiler — the plan's hard performance
+rule, and now an asserted one rather than an intention. Saved pseudocode is
+likewise a zero-backend hit: an offline `.delverdb` answers `delver_decompile`
+from the project while `delver_disassemble` and the xref capabilities report
+`TARGET_NOT_ATTACHED`, which tells an agent to ask for the sample rather than
+conclude the function is empty.
+
+Pagination cursors are bound to the content hash, revision, capability, **and**
+the filter arguments that produced the sequence. Byte binding was designed in;
+filter binding was not, and was found by the test pass — an offset into the
+functions matching `crypt` is meaningless against those matching `alloc`, and
+reusing it skips and repeats rows with nothing in the result to say so. Both
+now fail as `STALE_REVISION` instead.
+
+Addresses cross the boundary as canonical lowercase `"0x..."` strings in both
+directions. A JSON number above 2⁵³ is rejected outright rather than mapped to
+a nearby instruction, since by the time it reaches the dispatcher the precision
+is already gone.
+
+Sample-derived payloads — strings, symbol names, pseudocode identifiers — are
+labelled `untrusted` in provenance, and the tool layer prepends a separate
+warning part so a payload that quotes or truncates cannot swallow it.
+
+The direct tools register into a `delver-analysis` tool set built from the
+dispatcher's own capability list, so the chat picker cannot advertise a
+capability the dispatcher lacks. `delver_capabilities` is the only tool without
+a `delverTargetOpen` `when` clause.
+
+Generated function names are now backend-neutral and image-relative throughout
+the UI and pseudocode: unnamed entries display as `SUB_<RVA>`, and PyGhidra C
+output rewrites only Ghidra-generated `FUN_<VA>` identifiers by subtracting the
+program image base. Meaningful backend symbols and analyst-authored names remain
+unchanged, while legacy lower-case `sub_` project placeholders are still
+recognized as generated names. The Ghidra Program itself is not renamed.
+
+Pseudocode failures now expose copyable diagnostics plus explicit Retry and
+Restart Decompiler actions. Retry bypasses read-through caches for that exact
+function. Restart cancels active PyGhidra operations, disposes the persistent
+worker, starts a fresh process generation through the backend-neutral IPC seam,
+and only then re-decompiles; existing saved pseudocode remains durable if
+recovery fails.
+
+Native decompiler cache inspection and cleanup are now explicit Command Palette
+actions. Inventory reports the fixed cache path, Ghidra project count, files,
+and total bytes without starting a backend. Cleanup requires confirmation,
+cancels active work, disposes PyGhidra, validates that the recursive-delete
+target is the absolute `delver/decompiler-cache` directory, and never touches
+portable `.delverdb` files. Live pseudocode provenance shows request duration;
+the latest-performance action breaks out startup, handshake, target analysis,
+function recovery, decompilation, and serialization timings.
+
+Live sessions now prepare PyGhidra in the background before the first F5:
+worker startup, target hash verification, and persistent project/program import
+begin as soon as the session opens, with delayed status-bar progress. Target
+opens are coalesced by session and content hash, so an F5 arriving during
+preparation joins the same operation and cannot enqueue a duplicate Ghidra
+import. Full auto-analysis is deliberately not scheduled yet because Ghidra
+would monopolize the single JVM-owning thread and could make interactive F5
+slower; it needs an interruptible, resumable scheduling design first.
+
+Pseudocode-to-listing synchronization now preserves exact discontiguous source
+ranges. The focus bus carries those half-open ranges alongside its legacy
+contiguous bounding selection, and the virtualized listing highlights only
+instructions whose `[RVA, RVA + length)` overlaps a real source range. Gaps
+between blocks stay unpainted, newly materialized rows read the current ranges,
+and location-only navigation clears stale semantic highlighting.
+
+Function revision comparison now has a bounded backend-independent primitive in
+`platform/delver/common/functionRevisionMatcher.ts`. It creates versioned SHA-256
+fingerprints from listing rows, ignoring row/RVA movement and representing direct
+targets as local instruction indices or external edges. Matching accepts only a
+fingerprint unique in both revisions; repeated thunks remain ambiguous. Results
+carry confidence, method, source/target content hashes, and fingerprint
+provenance. Structural fuzzy matching and instruction-level remapping remain
+explicit future work.
+
+Portable projects now use revision-aware SQLite schema v2. Explicitly opening
+the same target path probes the current bytes and, when their SHA-256 changed,
+offers Add as New Revision / Create New Project / Cancel. Adding a revision is
+atomic and preserves every prior snapshot. The analysis server emits normalized
+function fingerprints; unique exact matches are stored with confidence and
+provenance, then existing names, comments, and tags are copied as attributed
+import edits only when the destination has no authored value. Ambiguous or
+changed functions are left untouched, and decompiler output is regenerated.
+Schema-v1 projects upgrade in place without losing their initial analysis.
+
+Session persistence is now specified as a portable, IDA-like project lifecycle.
+Opening a raw binary creates an untitled session. Once durable analysis content
+exists, close, target replacement, and shutdown prompt Save / Don't Save /
+Cancel. Saving creates a user-chosen `.delverdb`; named projects then autosave
+incrementally. The single SQLite file retains functions, strings, facts,
+pseudocode, interpretation, findings, provenance, and useful session state, but
+never sample bytes, and it can open without the original target.
+
+ADR 0005 supersedes the current per-content-hash JSONL location decision. The
+existing JSONL implementation is now a migration source, not the future project
+format. Ghidra projects remain content-hash-keyed local user-data caches qualified
+by backend version and analysis profile. They are disposable, nonportable
+accelerators; `.delverdb` is the backend-neutral record of analysis and user
+work. Future IDA native databases follow the same boundary.
+
+The production decompiler direction is now a backend-neutral persistent host,
+with isolated workers per engine. The first PyGhidra adapter keeps one JVM plus
+an analyzed Ghidra Program and DecompInterface alive across function requests. The current
+headless Ghidra path remains a compatibility fallback. A future IDAPython worker
+will use an installed, licensed IDA/Hex-Rays environment through the same host
+protocol without sharing a runtime with PyGhidra. Common results stop at text,
+variables, diagnostics, and line↔RVA mappings; p-code, microcode, and ctree remain
+optional backend-specific capabilities.
+
+The versioned JSON-lines host and PyGhidra worker are implemented. The shared
+process supervises one worker, negotiates backend identity and capabilities,
+multiplexes requests, forwards cancellation, retains targets per analysis
+session, clears stale target state after a worker restart, and falls back to the
+one-shot headless backend only when discovery or the initial handshake fails.
+Errors from a successfully started backend are reported directly instead of
+triggering a second slow decompilation. The Python worker verifies the target's
+SHA-256, serializes all Ghidra work on the JVM-owning main thread, and reserves
+stdout exclusively for protocol frames.
+
+P2a now has an injectable `IDelverDecompilerService` boundary. Its stable result
+shape carries C text, recovered variables, backend identity, and one-based source
+lines mapped to discontiguous half-open RVA ranges. Bidirectional lookup helpers
+handle overlapping mappings without flattening provenance. The registered
+scaffold reports unavailable explicitly until the headless Ghidra backend lands,
+and cancellation is rejected before invoking a backend.
+
+The Ghidra adapter now pins the scaffold to Ghidra 12.1 and strictly decodes a
+versioned JSON wire format. RVAs remain hexadecimal strings until validation, so
+addresses above `2^53` retain precision. Unknown fields, incompatible schema
+versions, invalid ranges, and output for the wrong function are rejected. The
+node-side backend boundary discovers the configured platform launcher and
+bundled script, reports actionable unavailable states, forwards cancellation to
+an injected runner, and validates its response before exposing it to consumers.
+
+The scaffold is now executable end to end through the shared process. The
+`DelverDecompile.java` post-script uses the pinned 12.1 API to emit pseudocode,
+recovered high variables, and merged line provenance. Each request copies the
+target into an isolated temporary project, verifies that snapshot against the
+session SHA-256, launches without interpolating target paths into a shell command,
+kills the full process tree on cancellation, and removes the project afterward.
+`delver.decompiler.ghidraHome` is a machine-scoped setting; without it the service
+continues to report the backend as unavailable.
+
+The official Ghidra 12.1 distribution has now been exercised end to end on
+Windows against `provider-file.exe`. The entry function produced schema-v1 JSON,
+160 characters of pseudocode, three line mappings, and two recovered variables.
+That smoke test corrected the pinned `HighSymbol` storage call to `getStorage()`;
+a source-level regression test now prevents the nonexistent
+`getVariableStorage()` call from returning.
+
+Functions now open a read-only `delver-pseudo:` editor for the selected RVA.
+The editor uses Monaco's existing C mode so syntax coloring, folding, find, and
+the normal code-editor navigation work without a second grammar. Moving its
+cursor publishes the line's first instruction plus the bounding recovered RVA
+selection; focus changes from the listing move the pseudocode cursor back to the
+first matching line. The unavailable-backend path stays inside the editor and
+points directly to the Ghidra 12.1 setting instead of failing the open command.
+
+Overview now acts as the workspace table of contents: Entry Point publishes its
+wire-safe RVA through the focus bus, Instructions opens the listing, Functions
+and References reveal their panes, and Strings opens its editor page. The row
+model is separated from contribution registration and has a focused navigation
+contract test, including an address above `2^53`.
+
+Built-in extension synchronization now keeps `vscode-js-profile-table` on its
+official GitHub release asset. Open VSX serves different bytes for version
+1.0.11, while both Microsoft Marketplace and the official GitHub release match
+the upstream-pinned SHA-256; the integrity pin remains unchanged.
+
+Fresh development checkouts now build the Rust provider and analysis server
+during pre-launch when their debug binaries are absent. Release staging includes
+`server-analysis`, and a missing executable reports its spawn error immediately
+instead of masquerading as a ten-second listener timeout.
+
+Functions and Imports filters now keep their input visible when a query has no
+matches. Filtered-empty state no longer activates the view welcome overlay, so
+clearing or editing the query always restores matching rows. Filtered roots use
+search-only tree identities, preventing automatic search expansion from leaving
+every normal module or function group open after the query is cleared.
 
 Functions and Imports now have persistent, debounced filter boxes. Function
 filtering covers authored/placeholder names, RVAs, and source across the complete
@@ -83,26 +478,200 @@ with the OS icons, so the whole set regenerates from one master.
 
 ## Verification
 
+- Agent dispatcher and contract: 20 passing. They cover zero-analysis
+  discovery, per-capability missing-project handling, attachment refusal, the
+  zero-backend saved pseudocode path, an address above 2⁵³, unsafe JSON
+  numbers, count clamping, cursor binding to bytes/capability/filter,
+  containing-function resolution including padding after a known end,
+  untrusted string labelling, authored names beating placeholders,
+  cancellation, and envelope shape
+- Proposal review state: 5 log-level tests (proposal invisible to the view but
+  present in the log, acceptance authored by the reviewer with the proposal
+  traceable, rejection recording the declined value, fail-closed resolution of
+  unknown/non-proposed/already-decided sequences, replay restoring pending and
+  decided state), 2 service-level tests (persisted proposal then decision, and a
+  invalid batch that writes no resolutions), and 1 store test covering resequenced `resolves`
+  references and refusal of a malformed one
+- MCP client configuration: 5 focused tests covering absolute-path binding,
+  optional untrusted-label validation, rejection of relative paths and
+  control/bidi or oversized labels, the exact pasteable serialization, staged
+  adapter resolution with no `PATH` fallback, and one distinct availability
+  reason per ineligible window shape
+- Private command gateway: 8 passing, covering the two-command surface,
+  canonical delegation, JSON round-tripping, structured failures, bounded
+  request/operation validation, cancellation propagation, and idempotent
+  cancellation multiplexing
+- DTP bridge, relay supervision, bootstrap manager, authorization UI, root fingerprinting, rendezvous lifecycle/registry, production activation, private relay ownership, and leases: 95 passing, covering fragmented/coalesced bounded framing,
+  malformed and oversized input, authentication, caller binding, pre-init
+  refusal, duplicate ids, concurrency limits, out-of-order correlation, and
+  explicit/disconnect cancellation with late-write suppression; absolute
+  executable resolution, 256-bit token rotation, credential-free child
+  environments, strict readiness, backpressure, overflow/error closure,
+  restart backoff/stability reset, dispose/no-respawn, default-deny and exact
+  one-shot peer authorization, PID-reuse isolation, platform identity checks,
+  modal allow/deny/dismiss/failure behavior, exact-item grant identity,
+  stale-modal prompt suppression, verified/untrusted prompt labelling, and
+  control/bidi display-name rejection,
+  exact window/root routing, provisioning order, failure
+  revocation, TTL boundaries, one-time consumption, replay rejection, strict
+  peer-control decoding, cancellation before attestation, publication/listener
+  ordering, cross-stream claim buffering, bounded pre-attestation input,
+  truthful response-write backpressure, and one-shot unpublication;
+  lock-free multi-window registry publication, strict non-secret schema and
+  platform paths, atomic collision refusal, bounded stale/malformed filtering,
+  selective pruning, relay-deadline propagation, and late-publication cleanup;
+  exact native-helper arguments/environment, fragmented bounded readiness,
+  stdout/extra/oversize/nonzero/timeout/cancellation refusal, and path matching;
+  focused extension compile and ESLint clean
+- Shared Rust DTP transport: 15 passing, including owner-only listener
+  round-trip, first-instance namespace reservation, remote-client rejection in
+  the bind flags, header/JSON/binary size enforcement before allocation, and
+  protected private-directory creation, reaudit, concurrency, and file-component
+  rejection
+- Rust agent relay: 2 passing bidirectional byte-transparency/lifecycle and CLI-mode tests;
+  the same connection asserts the OS-derived peer identity, and the executable
+  emits exact JSON readiness only after a successful bind
+- Live Windows relay smoke: readiness followed by an opt-in peer control record
+  whose kernel-reported named-pipe client PID matched the connecting process;
+  relay exited after disconnect
+- Real bootstrap→private-DTP process integration: 1 passing, covering in-memory
+  publication, kernel peer identity, explicit one-shot authorization, private
+  relay provisioning, 256-bit lease handoff/consumption, DTP initialization,
+  gateway caller binding, disconnect cancellation, both child exits, and
+  consumed-bootstrap reconnect refusal
+- Real Windows registry-helper integration: 1 passing, covering protected native
+  hierarchy creation/reaudit followed by actual file-registry publish, list, and
+  disposal; the legacy bootstrap process integration still passes unchanged
+- Tool reference contract: 1 passing; every prompt reference retains its full
+  globally unambiguous `delver_...` capability id
+- Isolated workbench: the renderer registers exactly `_delver.agent.capabilities`
+  and `_delver.agent.invoke`; no third `_delver.agent.*` command exists. All 16
+  compiled chat definitions expose their full `delver_...` ids as prompt
+  references
+- Live workbench, `provider-file.exe` (5,282 functions, 203,588 instructions),
+  Claude Haiku 4.5 in the built-in chat:
+  - all 16 tools plus the `delverAnalysis` set register; with no target open
+    only `delver_capabilities` and the set are offered, and the remaining 15
+    appear once a target opens — the `delverTargetOpen` clause holds in both
+    directions
+  - `delver_capabilities` reported 16 capabilities, 4 core / 12 analysis, and
+    an unconfigured decompiler with its actionable reason rather than a
+    generic failure
+  - a real investigation resolved `SUB_1000`/`SUB_1350`/`SUB_1510`, decoded the
+    x86-64 prologue at `0x1000` with exact instruction lengths, and attributed
+    the single xref as `SUB_1350+0x113` (`0x1463 − 0x1350`, confirmed by hand)
+  - the model reported `list_functions` and `disassemble` as partial and
+    `xrefs_to` as complete, which is the envelope doing the job it exists for
+  - **not yet exercised:** decompilation (Ghidra home unset in this profile),
+    the offline `.delverdb` path, and the §4 latency budgets
+- Targeted ESLint on the agent service, contract, tests, and both `delverAI`
+  contribution files: clean. The custom `delver-address-is-bigint` rule caught
+  pagination indices named `offset`, which reads as an address offset in this
+  codebase; they are now `startIndex`/`nextIndex` rather than suppressed
+- Client typecheck: clean
+- Generated function naming: 5 common tests and 8 Python worker tests passing
+- Listing and reference placeholder presentation: 6 passing
+- SQLite multi-function pseudocode persistence: 8 project-store tests passing
+- Decompiler recovery/restart service: 14 focused tests passing
+- Cache cleanup boundary: 1 focused filesystem test passing
+- Decompiler cache/performance service: 15 focused tests passing
+- Background target preparation: 5 PyGhidra adapter and 16 service tests passing
+- Discontiguous focus/highlighting: 13 focus-bus and 2 range tests passing
+- Client typecheck and transpilation: clean
+- Native MCP adapter: 20 Rust tests passing; Clippy clean with warnings denied
+- Agent bridge: 95 unit tests and 2 real-process integration tests passing
+- Build-tool typecheck: clean with `delver-mcp` staged and marked executable
+
+- Function revision normalization/matching: 8 passing; targeted ESLint clean
+- Revision-aware SQLite store and v1 migration: 8 passing
+- Updated-target prompt/session lifecycle: 19 passing
 - Interpretation model/service/store, listing presentation, and handles: 25 passing
 - Mouse history mapping plus focus-history behavior: 12 passing
 - Function-relative reference labels: 2 passing
-- Functions paging/filtering and Imports filtering: 5 passing
+- Functions paging/filtering and Imports filtering: 9 passing
 - Listing paging/model: 12 passing
 - Functions interpretation handles: 2 passing
+- Overview navigation contract: 1 passing
 - Targeted ESLint: clean on all changed interpretation and pane-action files
+- Client typecheck: clean
+- Build-tool typecheck: clean
+- Fresh native debug build: `provider-file` and `server-analysis` staged
+- Missing-provider startup error: 1 passing
+- Decompiler contract, protocol validation, worker lifecycle/discovery, IPC
+  bridging, cancellation, caching, and line maps: 21 passing
+- Python worker protocol and JPype compatibility: 5 passing
+- Real persistent Ghidra 12.1 / PyGhidra 3.1.0 smoke: handshake in about 3 s;
+  one target analysis plus two successful `0xd8580` decompilations in one
+  77.5 s worker lifetime
+- Pseudocode line/focus mapping: 2 passing in Chromium
+- Real Ghidra 12.1 headless smoke: schema v1, `0xd8580`, 3 line mappings,
+  2 recovered variables
+- Isolated workbench check: opening `provider-file.exe`, expanding Functions,
+  and clicking `sub_1000` opened a full-size `Pseudocode: sub_1000` editor with
+  the expected Ghidra configuration guidance
 - Existing navigation test cannot run in the Node harness because its EditorPane
   import reaches CSS; this is a harness limitation, not a test assertion failure.
 
 ## Next
 
-Visually verify inline tags, sequential `Ctrl+Z`, author reversion, and the row
-actions in Functions, Imports, Exports, and References. EditorPanes have no UI
-tests in this fork.
+P3c continues at step 2: proposal and finding tools with validation-atomic batches, over
+the state that now exists. The dispatcher's authored operations
+(`delver_propose_rename`, `delver_propose_comment`, `delver_propose_tag`,
+`delver_report_finding`) are the next capability additions, and they are the
+first agent writes — every one of them lands as `proposed`, never as accepted
+interpretation. The pending-proposals review surface is step 4 and needs the
+tools first, so a human has something to review that a model actually wrote.
 
-After visual acceptance, the next bounded workspace follow-up is R1: make Overview
-rows navigate to the entry point, listing, Functions, and References. Types remain
-a later interpretation extension; merge and conflict detection remain collaboration
-work.
+For P3b, root-v1, the per-window lifecycle/backoff owner, production extension
+composition, approval adapter, root-scoped private relay ownership,
+`onStartupFinished` activation, and the native stdio MCP adapter are complete.
+The generic `.mcp.json`, client recipes, and the configuration-generating
+command are published. Next run the same real-binary workflow through Codex,
+Claude Code, Kimi, Cursor, and the minimal reference client. Add cross-transport result conformance and latency
+measurements before calling P3b complete. Dynamic `tools/list_changed` and
+operation progress remain deliberately unadvertised until DTP has real events;
+the adapter does not synthesize capabilities it cannot observe.
+The two-command cancellation path, owner-only relay, peer attestation,
+connection-bound authorization primitive, supervisor, race-safe one-shot
+bootstrap manager, bootstrap validation, single-use lease primitive, and real
+bootstrap-to-DTP process conformance are complete.
+
+In parallel, finish the one remaining P3a acceptance check: open the real Auto-updater
+`.delverdb` without its sample, ask built-in chat for saved pseudocode, verify no
+provider or decompiler starts, then attach the matching sample and exercise live
+decompilation. Capture the new stage measurements against the §4 budgets. The
+direct live-session investigation and private command conformance suite already
+pass.
+
+Registering the tools means `contrib/delverAI` imports the chat contrib's
+`ILanguageModelToolsService`, a knowing exception to invariant 9. There is no
+other contribution point for language-model tools, and upstream's own
+`browserView` contrib does the same; the exception is noted here so it is not
+mistaken for drift.
+
+The P2b project/decompiler integration slices now open `.delverdb` as an offline
+project, restore saved analysis categories and pseudocode without a provider or
+Ghidra call, attach matching bytes only after SHA-256 verification, and expose
+actual backend state and phase timings. PyGhidra failure no longer silently
+starts the minute-long headless path; headless selection is explicit.
+
+Combined verification: session lifecycle 21 passing, decompiler/worker/status
+29 passing, SQLite project store 8 passing, Python worker 6 passing, client
+typecheck and transpilation clean.
+
+Next, visually exercise Open Project, Locate Target, saved pseudocode provenance,
+Close Project, explicit recovery, and explicit headless selection against the
+real Auto-updater project. Then design interruptible/resumable full-analysis
+scheduling or begin the backend-neutral IDA test-double boundary. The isolated launch helper was repaired for
+Windows PowerShell parsing, but automated visual verification remains blocked
+while the only complete source profile has a Chromium Cookies lock; EditorPanes
+still have no unit UI harness in this fork.
+
+After the host boundary is covered by backend-neutral contract tests, add an IDA
+test double so Ghidra-specific names cannot creep back into the protocol. Exact
+discontiguous pseudocode selection painting remains the next UI-side P2 slice.
+Types remain a later interpretation extension; merge and conflict detection
+remain collaboration work.
 
 ## Known limitation
 

@@ -71,17 +71,18 @@ reason for it.
 State-changing methods stay single-client. The file provider has none, so the
 policy costs nothing now and is already correct when P4 introduces `halt`.
 
-### E2 — Facts live in memory; only interpretation persists
+### E2 — Superseded: portable projects persist useful facts
 
-The analysis server holds the fact store in RAM and rebuilds it on open.
-`.delverdb` persists the **edit log and project metadata only**.
+P1 initially kept the fact store in RAM and persisted only the interpretation
+log and project metadata. Decompilation made that boundary too narrow: reopening
+should not discard expensive functions, strings, mappings, or pseudocode.
 
-Recomputing a 5 MB module takes seconds, and this avoids designing the fact
-schema under schedule pressure. Content-hash keying stays in the design
-([data-model.md](../architecture/data-model.md) §3), so a persistent fact cache
-drops in later without a migration.
-
-Revisit when reopen time on a realistic target becomes annoying.
+ADR [0005](../history/adr/0005-portable-project-database.md) supersedes this
+planning decision. The portable SQLite `.delverdb` persists useful normalized
+facts and decompiler results alongside the append-only interpretation log. It
+never embeds sample bytes. Backend-native databases remain separate local
+accelerators; see
+[session-persistence.md](../architecture/session-persistence.md).
 
 ### E3 — `delver-store` is Rust, owned by the analysis server
 

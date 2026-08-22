@@ -1,6 +1,6 @@
 # 0004 — Where authored interpretation is stored
 
-**Status:** accepted
+**Status:** superseded by [0005 — Portable project database and session save lifecycle](0005-portable-project-database.md)
 **Date:** 2026-08-08
 **Affects:** [`architecture/data-model.md`](../../architecture/data-model.md) §3–4 ·
 `delver/delver-store` · `services/delver/common/delverInterpretationService.ts`

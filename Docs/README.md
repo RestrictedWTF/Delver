@@ -30,24 +30,26 @@ new doc doesn't force a renumber.
 3. [`architecture/data-model.md`](architecture/data-model.md) — address spaces,
    `Moment`, facts vs. interpretation, anchors, storage. *The expensive-to-change
    part.*
-4. [`architecture/target-providers.md`](architecture/target-providers.md) — the
+4. [`architecture/session-persistence.md`](architecture/session-persistence.md) —
+   untitled/saved project lifecycle, portable analysis, and local backend caches
+5. [`architecture/target-providers.md`](architecture/target-providers.md) — the
    modular attach layer, capability negotiation, the wire protocol
-5. [`architecture/project-structure.md`](architecture/project-structure.md) —
+6. [`architecture/project-structure.md`](architecture/project-structure.md) —
    directory layout, crate boundaries, naming, build wiring
-6. [`development/working-with-ai.md`](development/working-with-ai.md) —
+7. [`development/working-with-ai.md`](development/working-with-ai.md) —
    invariants, records, lint enforcement, what not to automate
 
 **Before writing UI**
 
-7. [`architecture/ide-architecture.md`](architecture/ide-architecture.md) —
+8. [`architecture/ide-architecture.md`](architecture/ide-architecture.md) —
    where code lives in the fork, what to reuse from VS Code, view design
-8. [`design/README.md`](design/README.md) — design principles and surface specs
+9. [`design/README.md`](design/README.md) — design principles and surface specs
 
 **Before wiring an LLM**
 
-9. [`architecture/ai-analyst.md`](architecture/ai-analyst.md) — grounding,
+10. [`architecture/ai-analyst.md`](architecture/ai-analyst.md) — grounding,
    provenance, the proposal layer, tools, notebooks, evals
-10. [`architecture/security-model.md`](architecture/security-model.md) — running
+11. [`architecture/security-model.md`](architecture/security-model.md) — running
     an IDE that opens malware, and prompt injection from samples
 
 **Component specs**
@@ -59,6 +61,14 @@ new doc doesn't force a renumber.
 
 - [`planning/roadmap.md`](planning/roadmap.md) — phases P0–P7, core and depth
   tracks
+- [`planning/ai-integration-plan.md`](planning/ai-integration-plan.md) — direct
+  in-workbench AI tools, the external MCP/DTP bridge, investigation memory, and
+  the staged route to autonomous static reversing
+
+**Connecting an external agent**
+
+- [`development/external-agents.md`](development/external-agents.md) — the
+  generic `.mcp.json`, per-client recipes, and what the first tool call does
 
 ## Living records
 
@@ -90,8 +100,8 @@ Priority is **static reverse engineering with decompilation and AI, first**:
 
 1. **P1** — static core: listing, navigation, xrefs, annotation. The prototype
    the team uses, and the foundation the decompiler queries.
-2. **P2** — decompilation and p-code, staged through a throwaway Ghidra-headless
-   scaffold before the native decompiler process.
+2. **P2** — decompilation and p-code through a backend-neutral persistent host;
+   PyGhidra first, with a separate future IDA/Hex-Rays adapter.
 3. **P3** — the AI analyst, grounded in decompiled output.
 4. **P4** — runtime: live attach, a basic debugger, memory-vs-disk diffing.
 
