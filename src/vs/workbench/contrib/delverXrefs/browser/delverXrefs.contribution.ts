@@ -19,7 +19,7 @@ import {
 	FocusReason,
 	IDelverFocusService,
 } from '../../../services/delver/common/delverFocusService.js';
-import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
+import { DELVER_TARGET_OPEN, IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
 import { registerDelverView } from '../../../services/delver/browser/delverViewContainer.js';
 import { registerInterpretationViewActions } from '../../../services/delver/browser/delverInterpretationEditing.js';
@@ -68,10 +68,17 @@ class DelverXrefsViewContribution {
 
 		viewsRegistry.registerViewWelcomeContent(DELVER_XREFS_VIEW_ID, {
 			content: localize(
-				'delverXrefsWelcome',
-				"References appear here for whatever you are looking at.\n[Open Target](command:delver.target.open)",
+				'delverXrefsNoTargetWelcome',
+				"Open a target to inspect its references.\n[Open Target](command:delver.target.open)",
 			),
-			when: 'default',
+			when: DELVER_TARGET_OPEN.toNegated(),
+		});
+		viewsRegistry.registerViewWelcomeContent(DELVER_XREFS_VIEW_ID, {
+			content: localize(
+				'delverXrefsNoAddressWelcome',
+				"Select an address in the listing to see its incoming and outgoing references.",
+			),
+			when: DELVER_TARGET_OPEN,
 		});
 
 		/** Guards against a slow lookup overwriting a newer one. */
@@ -108,7 +115,12 @@ class DelverXrefsViewContribution {
 			}
 		};
 
-		sessionService.onDidChangeActiveSession(() => loadFunctions());
+		sessionService.onDidChangeActiveSession(() => {
+			generation++;
+			dataProvider.setContent(undefined);
+			treeView.refresh().catch(onUnexpectedError);
+			void loadFunctions();
+		});
 		interpretationService.onDidChange(event => {
 			const session = sessionService.activeSession;
 			if (!session || event.edit.op !== EditOp.Rename || event.edit.anchor.contentHash !== session.contentHash) {

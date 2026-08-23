@@ -6,8 +6,9 @@
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { CancellationError } from '../../../../base/common/errors.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
-import { extname } from '../../../../base/common/path.js';
+import { extname, isAbsolute, normalize } from '../../../../base/common/path.js';
 import Severity from '../../../../base/common/severity.js';
+import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
 import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import {
@@ -19,6 +20,7 @@ import { isContentHash } from '../../../../platform/delver/common/delverInterpre
 import { IContextKey, IContextKeyService, RawContextKey } from '../../../../platform/contextkey/common/contextkey.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
+import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IDelverInterpretationService } from './delverInterpretationService.js';
 import { IDelverProjectService } from './delverProjectService.js';
 import { ILifecycleService } from '../../lifecycle/common/lifecycle.js';
@@ -78,7 +80,7 @@ export interface IDelverSessionService {
 	 */
 	openTarget(targetPath: string): Promise<IDelverSession>;
 
-	/** Opens a portable project without starting a target provider. */
+	/** Opens a portable project and attaches its hash-matching target when the saved path is inside the workspace. */
 	openProject(projectPath: string): Promise<IDelverSession>;
 
 	/** Attaches matching bytes to an offline project. The active project is unchanged on mismatch. */
@@ -101,6 +103,9 @@ export interface IDelverSessionService {
 
 	/** Marks the current project as persisted, optionally remembering its path. */
 	markProjectSaved(projectPath?: string): void;
+
+	/** Saves the active analysis to its current project or prompts for a project path. */
+	saveProject(): Promise<boolean>;
 
 	/** Closes the open target. Returns false when the user cancels. */
 	closeTarget(): Promise<boolean>;
@@ -155,6 +160,7 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 		@IDialogService private readonly dialogService: IDialogService,
 		@ILifecycleService lifecycleService: ILifecycleService,
 		@IContextKeyService contextKeyService: IContextKeyService,
+		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
 	) {
 		super();
 		this.targetOpenContext = DELVER_TARGET_OPEN.bindTo(contextKeyService);
@@ -214,13 +220,34 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 			throw new CancellationError();
 		}
 		const project = await this.projectService.openProject(projectPath);
-		const session: IDelverSession = {
+		const offlineSession: IDelverSession = {
 			targetPath: project.sourcePath ?? project.path,
 			projectPath: project.path,
 			contentHash: project.contentHash,
 		};
+		const session = await this.tryAttachSavedWorkspaceTarget(project.sourcePath, offlineSession);
 		this.adoptSession(session, false);
 		return session;
+	}
+
+	private async tryAttachSavedWorkspaceTarget(sourcePath: string | undefined, offlineSession: IDelverSession): Promise<IDelverSession> {
+		if (!sourcePath || !isAbsolute(sourcePath)) {
+			return offlineSession;
+		}
+		const targetPath = normalize(sourcePath);
+		if (!this.workspaceContextService.getWorkspaceFolder(URI.file(targetPath))) {
+			return offlineSession;
+		}
+		try {
+			const candidate = await this.createSession(targetPath, false);
+			if (candidate.contentHash !== offlineSession.contentHash) {
+				await this.analysisService.closeImage(candidate.sessionId).catch(() => undefined);
+				return offlineSession;
+			}
+			return { ...candidate, projectPath: offlineSession.projectPath };
+		} catch {
+			return offlineSession;
+		}
 	}
 
 	async refreshTarget(targetPath: string): Promise<IDelverSession> {
@@ -297,7 +324,7 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 		}
 	}
 
-	private async createSession(targetPath: string): Promise<IDelverLiveSession> {
+	private async createSession(targetPath: string, loadInterpretation = true): Promise<IDelverLiveSession> {
 		const handle = await this.analysisService.openImage({ kind: 'file', path: targetPath });
 		let contentHash: string;
 		try {
@@ -306,7 +333,9 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 				throw new Error('The target provider did not return a valid content hash. Rebuild or update provider-file.');
 			}
 			contentHash = info.content_hash;
-			await this.interpretationService.load(contentHash);
+			if (loadInterpretation) {
+				await this.interpretationService.load(contentHash);
+			}
 		} catch (error) {
 			await this.analysisService.closeImage(handle.sessionId).catch(() => undefined);
 			throw error;
@@ -341,6 +370,15 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 				this._projectPath = projectPath;
 			}
 		}
+	}
+
+	async saveProject(): Promise<boolean> {
+		const session = this._activeSession;
+		if (!session || !await this.projectService.save(session)) {
+			return false;
+		}
+		this.markProjectSaved(this.projectService.projectPath(session.contentHash));
+		return true;
 	}
 
 	imageInfo(): Promise<IGetImageInfoResult> {
@@ -428,10 +466,9 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 
 		switch (result) {
 			case ProjectCloseDecision.Save:
-				if (!await this.projectService.save(session)) {
+				if (!await this.saveProject()) {
 					return false;
 				}
-				this.markProjectSaved(this.projectService.projectPath(session.contentHash));
 				return true;
 			case ProjectCloseDecision.Discard:
 				this._isProjectDirty = false;

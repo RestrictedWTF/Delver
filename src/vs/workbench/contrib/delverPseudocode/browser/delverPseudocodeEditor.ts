@@ -153,8 +153,8 @@ export class DelverPseudocodeEditor extends EditorPane {
 		const source = new CancellationTokenSource();
 		this.recoveryOperation.value = source;
 		this.showMessage(restart
-			? localize('delverPseudocodeRestarting', "Restarting decompilerâ€¦")
-			: localize('delverPseudocodeRetrying', "Retrying decompilationâ€¦"));
+			? localize('delverPseudocodeRestarting', "Restarting decompiler…")
+			: localize('delverPseudocodeRetrying', "Retrying decompilation…"));
 		try {
 			if (restart) {
 				const status = await this.decompilerService.restart();
@@ -197,8 +197,16 @@ export class DelverPseudocodeEditor extends EditorPane {
 		// The same function can be split into two editor groups. Give each pane its
 		// own model so disposing one side cannot invalidate the other side's view.
 		const modelResource = input.resource.with({ query: `group=${this.group.id}` });
-		const textModel = this.modelService.createModel(result.text, this.languageService.createById('c'), modelResource);
-		this.model.value = textModel;
+		this.inputDisposables.clear();
+		let textModel = this.model.value;
+		if (textModel?.uri.toString() === modelResource.toString()) {
+			textModel.setValue(result.text);
+		} else {
+			this.editor.setModel(null);
+			this.model.clear();
+			textModel = this.modelService.createModel(result.text, this.languageService.createById('c'), modelResource);
+			this.model.value = textModel;
+		}
 		this.editor.setModel(textModel);
 
 		const store = new DisposableStore();

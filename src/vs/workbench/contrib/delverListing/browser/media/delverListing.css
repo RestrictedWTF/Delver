@@ -48,6 +48,29 @@
 	overflow: hidden;
 }
 
+/* File information is one ordinary tall row, so it scrolls with the listing. */
+.delver-listing-address.delver-listing-metadata-row,
+.delver-listing-instruction.delver-listing-metadata-row .delver-listing-instruction-line {
+	line-height: 22px;
+}
+
+.delver-listing-instruction.delver-listing-metadata-row .delver-listing-instruction-line {
+	display: block;
+}
+
+.delver-listing-instruction.delver-listing-metadata-row .delver-listing-operands {
+	display: block;
+	color: var(--vscode-descriptionForeground);
+	white-space: pre;
+	overflow: visible;
+	text-overflow: clip;
+}
+
+/* Decoded data uses the same row grammar as instructions in every section. */
+.delver-listing-instruction.delver-listing-data-row .delver-listing-mnemonic {
+	color: var(--vscode-symbolIcon-stringForeground);
+}
+
 /* Exact source ranges represented by the active pseudocode line. */
 .delver-listing-instruction.delver-listing-pseudocode-highlight .delver-listing-instruction-line {
 	background: var(--vscode-editor-wordHighlightBackground);

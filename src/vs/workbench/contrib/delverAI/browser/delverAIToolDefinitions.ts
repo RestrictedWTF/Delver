@@ -73,6 +73,26 @@ function objectSchema(properties: Record<string, IJSONSchema>, required?: readon
 	};
 }
 
+function proposalSchema(valueKey: string, value: IJSONSchema): IJSONSchema {
+	return objectSchema({
+		proposals: {
+			type: 'array',
+			minItems: 1,
+			maxItems: DELVER_AGENT_LIMITS.proposals.max,
+			description: 'A validation-atomic batch. Every item is checked before any proposal is appended, and one address may appear only once.',
+			items: {
+				type: 'object',
+				additionalProperties: false,
+				properties: {
+					address: addressProperty('The interpretation anchor for this proposal.'),
+					[valueKey]: value,
+				},
+				required: ['address', valueKey],
+			},
+		},
+	}, ['proposals']);
+}
+
 /** Everything about a capability that only the model-facing layer knows. */
 interface IDelverToolPresentation {
 	readonly icon: ThemeIcon;
@@ -156,6 +176,26 @@ const PRESENTATIONS = new Map<string, IDelverToolPresentation>([
 				description: 'Exact function name; matched case-insensitively as a fallback.',
 			},
 		}),
+	}],
+	[DelverAgentCapabilityId.ReadBytes, {
+		icon: Codicon.fileBinary,
+		displayName: localize('delverTool.readBytes.displayName', "Delver Read Bytes"),
+		userDescription: localize('delverTool.readBytes.userDescription', "Read raw bytes or little-endian integers at an address"),
+		usage: `Use this to verify the exact bytes behind a low-level claim. The image space interprets the address as an RVA; the file space interprets it as a raw file offset. Integer values are returned as hexadecimal strings so 64-bit values remain exact. A partial result means the request reached the end of provider-backed data. ${ATTACHED_NOTE} ${UNTRUSTED_NOTE}`,
+		inputSchema: objectSchema({
+			address: addressProperty('Image RVA or raw file offset at which to start reading.'),
+			count: countProperty('bytes', DELVER_AGENT_LIMITS.bytes),
+			space: {
+				type: 'string',
+				enum: ['image', 'file'],
+				description: 'Address space. Defaults to image, where address is an RVA.',
+			},
+			format: {
+				type: 'string',
+				enum: ['hex', 'u8', 'u16le', 'u32le', 'u64le'],
+				description: 'Output interpretation. Defaults to hex; integer formats decode complete little-endian elements.',
+			},
+		}, ['address']),
 	}],
 	[DelverAgentCapabilityId.Disassemble, {
 		icon: Codicon.chip,
@@ -273,6 +313,104 @@ const PRESENTATIONS = new Map<string, IDelverToolPresentation>([
 		inputSchema: objectSchema({
 			address: addressProperty('The anchor to read authored interpretation for.'),
 		}, ['address']),
+	}],
+	[DelverAgentCapabilityId.ProposeRename, {
+		icon: Codicon.edit,
+		displayName: localize('delverTool.proposeRename.displayName', "Delver Propose Rename"),
+		userDescription: localize('delverTool.proposeRename.userDescription', "Propose names for analyst review"),
+		usage: 'Use only after inspecting the target and reading existing interpretation. Names remain provisional until an analyst accepts them. Group related, independently justified names into one batch; an empty name explicitly proposes clearing the accepted name.',
+		inputSchema: proposalSchema('name', {
+			type: 'string',
+			maxLength: DELVER_AGENT_LIMITS.proposals.renameCharacters,
+			description: 'Proposed name. Leading and trailing whitespace is removed; an empty string proposes clearing the field.',
+		}),
+	}],
+	[DelverAgentCapabilityId.ProposeComment, {
+		icon: Codicon.comment,
+		displayName: localize('delverTool.proposeComment.displayName', "Delver Propose Comment"),
+		userDescription: localize('delverTool.proposeComment.userDescription', "Propose comments for analyst review"),
+		usage: 'Record a concise interpretation supported by evidence already returned by Delver. Comments remain provisional until an analyst accepts them. Do not use comments as a substitute for structured findings; an empty comment explicitly proposes clearing the accepted comment.',
+		inputSchema: proposalSchema('comment', {
+			type: 'string',
+			maxLength: DELVER_AGENT_LIMITS.proposals.commentCharacters,
+			description: 'Proposed comment. Leading and trailing whitespace is removed; an empty string proposes clearing the field.',
+		}),
+	}],
+	[DelverAgentCapabilityId.ProposeTag, {
+		icon: Codicon.tag,
+		displayName: localize('delverTool.proposeTag.displayName', "Delver Propose Tags"),
+		userDescription: localize('delverTool.proposeTag.userDescription', "Propose tag sets for analyst review"),
+		usage: 'Each value replaces the complete tag set at its address after review; include every tag that should remain. Tags are trimmed, deduplicated, and sorted before being appended. An empty array explicitly proposes clearing all tags.',
+		inputSchema: proposalSchema('tags', {
+			type: 'array',
+			maxItems: DELVER_AGENT_LIMITS.proposals.tagsPerAddress,
+			items: {
+				type: 'string',
+				maxLength: DELVER_AGENT_LIMITS.proposals.tagCharacters,
+			},
+			description: 'Complete proposed tag set. Empty and duplicate normalized tags are removed.',
+		}),
+	}],
+	[DelverAgentCapabilityId.ReportFinding, {
+		icon: Codicon.warning,
+		displayName: localize('delverTool.reportFinding.displayName', "Delver Report Finding"),
+		userDescription: localize('delverTool.reportFinding.userDescription', "Report evidence-backed findings for analyst review"),
+		usage: 'Retain a conclusion only when every finding includes concrete Delver image ranges and a concise explanation of how each range supports it. When a prior Delver tool result supports the evidence, include its returned callId in sourceCallIds. Findings remain provisional until human review. Confidence is evidence strength, not severity. Do not report unsupported chat conclusions or use a comment as a substitute.',
+		inputSchema: objectSchema({
+			findings: {
+				type: 'array',
+				minItems: 1,
+				maxItems: DELVER_AGENT_LIMITS.findings.batch,
+				description: 'A validation-atomic batch of findings. Every finding and evidence range is checked before persistence.',
+				items: {
+					type: 'object',
+					additionalProperties: false,
+					properties: {
+						title: {
+							type: 'string', minLength: 1, maxLength: DELVER_AGENT_LIMITS.findings.titleCharacters,
+							description: 'Short claim suitable for a review list.',
+						},
+						description: {
+							type: 'string', minLength: 1, maxLength: DELVER_AGENT_LIMITS.findings.descriptionCharacters,
+							description: 'What was found and why it matters.',
+						},
+						severity: {
+							type: 'string', enum: ['info', 'suspicious', 'malicious'],
+							description: 'Impact classification, independent of confidence.',
+						},
+						confidence: {
+							type: 'number', minimum: 0, maximum: 1,
+							description: 'Evidence strength from 0 through 1; always visible to the analyst.',
+						},
+						evidence: {
+							type: 'array', minItems: 1, maxItems: DELVER_AGENT_LIMITS.findings.evidencePerFinding,
+							description: 'Concrete image ranges supporting this finding.',
+							items: {
+								type: 'object',
+								additionalProperties: false,
+								properties: {
+									address: addressProperty('Start of the supporting evidence.'),
+									endAddress: addressProperty('Optional exclusive end; it must be greater than address.'),
+									description: {
+										type: 'string', minLength: 1, maxLength: DELVER_AGENT_LIMITS.findings.evidenceDescriptionCharacters,
+										description: 'How this exact range supports the finding.',
+									},
+									sourceCallIds: {
+										type: 'array',
+										maxItems: DELVER_AGENT_LIMITS.findings.sourceCallsPerEvidence,
+										uniqueItems: true,
+										items: { type: 'string', minLength: 1, maxLength: 128 },
+										description: 'Call ids from prior Delver tool results that produced or corroborated this evidence.',
+									},
+								},
+								required: ['address', 'description'],
+							},
+						},
+					},
+					required: ['title', 'description', 'severity', 'confidence', 'evidence'],
+				},
+			},
+		}, ['findings']),
 	}],
 ]);
 

@@ -597,10 +597,13 @@ fn valid_list_parameters(params: Option<&Value>) -> bool {
 	let Some(params) = params.as_object() else {
 		return false;
 	};
-	params.keys().all(|key| key == "cursor")
+	params
+		.keys()
+		.all(|key| matches!(key.as_str(), "cursor" | "_meta"))
 		&& params
 			.get("cursor")
 			.is_none_or(|cursor| cursor.as_str().is_some())
+		&& params.get("_meta").is_none_or(Value::is_object)
 }
 
 fn call_parameters(params: Option<&Value>) -> Option<(String, Map<String, Value>)> {
@@ -902,6 +905,22 @@ mod tests {
 				error_response(json!(2), METHOD_NOT_FOUND, "Method not found"),
 				error_response(json!(3), INVALID_PARAMS, "Invalid initialize parameters"),
 			]
+		);
+	}
+
+	#[test]
+	fn accepts_standard_list_tools_metadata() {
+		let valid = json!({ "_meta": { "progressToken": "tools" } });
+		let invalid_metadata = json!({ "_meta": "metadata" });
+		let unknown_parameter = json!({ "unexpected": true });
+
+		assert_eq!(
+			(
+				valid_list_parameters(Some(&valid)),
+				valid_list_parameters(Some(&invalid_metadata)),
+				valid_list_parameters(Some(&unknown_parameter)),
+			),
+			(true, false, false)
 		);
 	}
 

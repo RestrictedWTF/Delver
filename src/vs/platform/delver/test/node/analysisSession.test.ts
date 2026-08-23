@@ -141,6 +141,32 @@ suite('DelverAnalysisSession', () => {
 		}
 	});
 
+	test('serves verified image and file bytes from provider frames', async function () {
+		this.timeout(30_000);
+
+		const session = await DelverAnalysisSession.start({ kind: 'file', path });
+		try {
+			const [image, file] = await Promise.all([
+				session.readMemory('Image', 0x1000n, 8),
+				session.readMemory('File', 0n, 2),
+			]);
+			assert.deepStrictEqual({ image, file }, {
+				image: {
+					bytesHex: '4889d84883c001c3',
+					valid: [{ start: '0x1000', end: '0x1008' }],
+					servedMoment: { kind: 'static', epoch: 0 },
+				},
+				file: {
+					bytesHex: '4d5a',
+					valid: [{ start: '0x0', end: '0x2' }],
+					servedMoment: { kind: 'static', epoch: 0 },
+				},
+			});
+		} finally {
+			session.dispose();
+		}
+	});
+
 	test('reports a missing provider immediately instead of as a listening timeout', async () => {
 		const missing = spawn(`delver-provider-that-does-not-exist-${process.pid}`);
 		await assert.rejects(

@@ -51,7 +51,7 @@ function snapshot(decompiledFunctions: IDelverProjectSnapshot['decompiledFunctio
 		metadata: {
 			contentHash: request.contentHash,
 			displayName: 'sample.exe',
-			schemaVersion: 2,
+			schemaVersion: 5,
 			currentRevisionId: request.contentHash,
 			createdAt: 1,
 			updatedAt: 2,
@@ -59,6 +59,9 @@ function snapshot(decompiledFunctions: IDelverProjectSnapshot['decompiledFunctio
 		functions: JSON.stringify({ functions: functions.map(rva => ({ rva })) }),
 		decompiledFunctions,
 		interpretations: [],
+		findings: [],
+		findingDecisions: [],
+		toolCalls: [],
 	};
 }
 

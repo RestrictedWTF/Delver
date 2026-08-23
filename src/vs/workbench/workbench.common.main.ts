@@ -497,5 +497,6 @@ import './contrib/delverListing/browser/delverListing.contribution.js';
 import './contrib/delverXrefs/browser/delverXrefs.contribution.js';
 import './contrib/delverAI/browser/delverAITools.contribution.js';
 import './contrib/delverAI/browser/delverAgentGateway.contribution.js';
+import './contrib/delverAI/browser/delverReview.contribution.js';
 
 //#endregion

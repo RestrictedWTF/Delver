@@ -114,7 +114,7 @@ suite('Delver Agent Command Gateway', () => {
 				description: 'Lists the analysis capabilities, output limits, and backend state available right now. Starts no analysis and opens no target. Call this first whenever you do not already know what is open. It is the only Delver tool that is useful with nothing open, and it deliberately starts no analysis, opens no target, and never starts a decompiler. Use `available` on each entry to decide what to call next, and `errorCodes` to interpret failures.',
 				inputSchema: { type: 'object', properties: {} },
 			},
-			toolCount: 16,
+			toolCount: 21,
 			jsonRoundTrip: {
 				name: DelverAgentCapabilityId.Capabilities,
 				title: 'Delver Capabilities',

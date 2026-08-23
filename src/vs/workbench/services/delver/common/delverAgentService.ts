@@ -24,6 +24,8 @@ import { Disposable } from '../../../../base/common/lifecycle.js';
 import { StopWatch } from '../../../../base/common/stopwatch.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { AnalysisSessionId, IDelverAnalysisService } from '../../../../platform/delver/common/delverAnalysisService.js';
+import { DELVER_FINDING_LIMITS, DelverFindingSeverity, IDelverFindingDraft, IDelverFindingEvidence } from '../../../../platform/delver/common/findings.js';
+import { EditOp, EditValue, IAuthor, IEdit } from '../../../../platform/delver/common/interpretation.js';
 import { functionDisplayName, placeholderFunctionName } from '../../../../platform/delver/common/naming.js';
 import {
 	IExportWire,
@@ -56,6 +58,7 @@ import {
 	encodeCursor,
 	filterFingerprint,
 	IDelverAgentCapability,
+	IDelverAgentCaller,
 	IDelverAgentProjectIdentity,
 	IDelverAgentProvenance,
 	IDelverAgentRequest,
@@ -105,6 +108,7 @@ export const enum DelverAgentCapabilityId {
 	ImageInfo = 'delver_image_info',
 	ListFunctions = 'delver_list_functions',
 	LookupFunction = 'delver_lookup_function',
+	ReadBytes = 'delver_read_bytes',
 	Disassemble = 'delver_disassemble',
 	Decompile = 'delver_decompile',
 	XrefsTo = 'delver_xrefs_to',
@@ -114,6 +118,10 @@ export const enum DelverAgentCapabilityId {
 	Imports = 'delver_imports',
 	Exports = 'delver_exports',
 	GetInterpretation = 'delver_get_interpretation',
+	ProposeRename = 'delver_propose_rename',
+	ProposeComment = 'delver_propose_comment',
+	ProposeTag = 'delver_propose_tag',
+	ReportFinding = 'delver_report_finding',
 }
 
 /**
@@ -160,6 +168,11 @@ export const DELVER_AGENT_CAPABILITIES: readonly IDelverAgentCapability[] = [
 		description: 'Resolves one function by name, or the function containing a given address.',
 	},
 	{
+		id: DelverAgentCapabilityId.ReadBytes, group: 'analysis', kind: 'read', requiresAttachedTarget: true,
+		title: 'Delver Read Bytes',
+		description: 'Reads bounded raw bytes from an image RVA or file offset, optionally decoding little-endian integers. Requires the sample to be attached.',
+	},
+	{
 		id: DelverAgentCapabilityId.Disassemble, group: 'analysis', kind: 'read', requiresAttachedTarget: true,
 		title: 'Delver Disassemble',
 		description: 'Returns exact decoded instructions starting at an address, with authored names and comments. Requires the sample to be attached.',
@@ -204,6 +217,26 @@ export const DELVER_AGENT_CAPABILITIES: readonly IDelverAgentCapability[] = [
 		title: 'Delver Get Interpretation',
 		description: 'Returns what a human or model has already authored at an address: name, comment, and tags.',
 	},
+	{
+		id: DelverAgentCapabilityId.ProposeRename, group: 'proposals', kind: 'write', requiresAttachedTarget: false,
+		title: 'Delver Propose Rename',
+		description: 'Proposes one or more names for review. Appends attributed provisional edits but does not change accepted interpretation.',
+	},
+	{
+		id: DelverAgentCapabilityId.ProposeComment, group: 'proposals', kind: 'write', requiresAttachedTarget: false,
+		title: 'Delver Propose Comment',
+		description: 'Proposes one or more comments for review. Appends attributed provisional edits but does not change accepted interpretation.',
+	},
+	{
+		id: DelverAgentCapabilityId.ProposeTag, group: 'proposals', kind: 'write', requiresAttachedTarget: false,
+		title: 'Delver Propose Tags',
+		description: 'Proposes replacement tag sets for review. Appends attributed provisional edits but does not change accepted interpretation.',
+	},
+	{
+		id: DelverAgentCapabilityId.ReportFinding, group: 'proposals', kind: 'write', requiresAttachedTarget: false,
+		title: 'Delver Report Finding',
+		description: 'Reports evidence-backed findings for human review, with severity, confidence, concrete image ranges, and dispatcher provenance.',
+	},
 ];
 
 export interface IDelverAgentService {
@@ -235,8 +268,26 @@ interface IHandlerOutput {
 /** Everything a handler is allowed to see. */
 interface IHandlerContext {
 	readonly args: Readonly<Record<string, unknown>>;
+	readonly callId: string;
+	readonly caller: IDelverAgentCaller | undefined;
 	readonly token: CancellationToken;
 }
+
+interface IParsedProposal {
+	readonly rva: bigint;
+	readonly value: EditValue;
+}
+
+interface IParsedFinding {
+	readonly title: string;
+	readonly description: string;
+	readonly severity: DelverFindingSeverity;
+	readonly confidence: number;
+	readonly evidence: readonly IDelverFindingEvidence[];
+}
+
+type ByteReadSpace = 'image' | 'file';
+type ByteReadFormat = 'hex' | 'u8' | 'u16le' | 'u32le' | 'u64le';
 
 /**
  * A function with its display name resolved.
@@ -288,6 +339,7 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 
 	async invoke(request: IDelverAgentRequest, token: CancellationToken): Promise<IDelverAgentResult> {
 		const callId = generateUuid();
+		const startedAt = Date.now();
 		const totalWatch = StopWatch.create();
 		let serviceDuration = 0;
 		let serializationDuration = 0;
@@ -305,11 +357,16 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 			let output: IHandlerOutput;
 			const serviceWatch = StopWatch.create();
 			try {
-				output = await handler({ args: request.args ?? {}, token });
+				output = await handler({ args: request.args ?? {}, callId, caller: request.caller, token });
 			} finally {
 				serviceDuration = serviceWatch.elapsed();
 			}
-			this.throwIfCancelled(token);
+			// Read/UI work may be discarded at any cancellation boundary. A write
+			// handler owns its commit boundary: once it returns a result, reporting
+			// CANCELLED here would hide successfully appended proposals.
+			if (this.capabilities.find(capability => capability.id === request.capability)?.kind !== 'write') {
+				this.throwIfCancelled(token);
+			}
 
 			const project = this.projectIdentity();
 			const result: IDelverAgentResult = {
@@ -335,6 +392,21 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 					DelverAgentErrorCode.ResultLimitExceeded,
 					`${request.capability} produced ${resultBytes} bytes, over the ${DELVER_AGENT_LIMITS.serializedBytes} byte result limit. Request fewer items.`,
 				);
+			}
+			if (result.project) {
+				await this.projectService.recordToolCall({
+					callId,
+					capability: request.capability,
+					contentHash: result.project.contentHash,
+					...(request.caller === undefined ? {} : { caller: request.caller }),
+					startedAt,
+					finishedAt: Date.now(),
+					requestJson: JSON.stringify(request),
+					resultJson: JSON.stringify(result),
+				});
+				if (this.projectService.projectPath(result.project.contentHash) === undefined) {
+					this.sessionService.markProjectDirty();
+				}
 			}
 			return result;
 		} catch (error) {
@@ -373,6 +445,7 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 		this.handlers.set(DelverAgentCapabilityId.ImageInfo, context => this.handleImageInfo(context));
 		this.handlers.set(DelverAgentCapabilityId.ListFunctions, context => this.handleListFunctions(context));
 		this.handlers.set(DelverAgentCapabilityId.LookupFunction, context => this.handleLookupFunction(context));
+		this.handlers.set(DelverAgentCapabilityId.ReadBytes, context => this.handleReadBytes(context));
 		this.handlers.set(DelverAgentCapabilityId.Disassemble, context => this.handleDisassemble(context));
 		this.handlers.set(DelverAgentCapabilityId.Decompile, context => this.handleDecompile(context));
 		this.handlers.set(DelverAgentCapabilityId.XrefsTo, context => this.handleXrefs(context, 'to'));
@@ -382,6 +455,10 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 		this.handlers.set(DelverAgentCapabilityId.Imports, context => this.handleImports(context));
 		this.handlers.set(DelverAgentCapabilityId.Exports, context => this.handleExports(context));
 		this.handlers.set(DelverAgentCapabilityId.GetInterpretation, context => this.handleGetInterpretation(context));
+		this.handlers.set(DelverAgentCapabilityId.ProposeRename, context => this.handleProposals(context, EditOp.Rename));
+		this.handlers.set(DelverAgentCapabilityId.ProposeComment, context => this.handleProposals(context, EditOp.Comment));
+		this.handlers.set(DelverAgentCapabilityId.ProposeTag, context => this.handleProposals(context, EditOp.Tags));
+		this.handlers.set(DelverAgentCapabilityId.ReportFinding, context => this.handleReportFindings(context));
 	}
 
 	private requireSession(): IDelverSession {
@@ -736,6 +813,61 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 		};
 	}
 
+	private async handleReadBytes(context: IHandlerContext): Promise<IHandlerOutput> {
+		const session = this.requireAttached();
+		const address = parseWireAddress(context.args.address);
+		const count = boundedCount(context.args.count, DELVER_AGENT_LIMITS.bytes);
+		const space = byteReadSpace(context.args.space);
+		const format = byteReadFormat(context.args.format);
+		const read = await this.analysisService.readMemory(session.sessionId, space, toWireAddress(address), count);
+		this.throwIfCancelled(context.token);
+
+		const byteCount = read.bytesHex.length / 2;
+		if (byteCount === 0) {
+			throw new DelverAgentError(
+				DelverAgentErrorCode.AddressNotMapped,
+				space === 'image'
+					? `${toWireAddress(address)} is not backed by readable image bytes.`
+					: `${toWireAddress(address)} is not inside the original file bytes.`,
+			);
+		}
+
+		const elementWidth = byteReadWidth(format);
+		const trailingByteCount = byteCount % elementWidth;
+		const missingByteCount = Math.max(0, count - byteCount);
+		const validRanges = read.valid.map(range => ({
+			start: toWireAddress(BigInt(range.start)),
+			end: toWireAddress(BigInt(range.end)),
+		}));
+
+		return {
+			data: {
+				space,
+				address: toWireAddress(address),
+				requestedByteCount: count,
+				byteCount,
+				bytesHex: read.bytesHex,
+				validRanges,
+				format,
+				elementWidth,
+				...(format === 'hex' ? {} : { values: decodeLittleEndianValues(read.bytesHex, elementWidth) }),
+				...(trailingByteCount === 0 ? {} : { trailingByteCount }),
+				servedMoment: read.servedMoment,
+			},
+			completeness: missingByteCount === 0 ? 'complete' : 'partial',
+			...(missingByteCount === 0 ? {} : {
+				omitted: { count: missingByteCount, reason: 'The requested range extends beyond provider-backed bytes.' },
+			}),
+			provenance: [{
+				source: 'analysis',
+				detail: space === 'image' ? 'Raw bytes read from the loaded image.' : 'Raw bytes read from the original file.',
+				contentHash: session.contentHash,
+				untrusted: true,
+				...(space === 'image' ? { ranges: validRanges } : {}),
+			}],
+		};
+	}
+
 	private describeListingRow(contentHash: string, row: IListingRowWire, names: Map<bigint, string>): Record<string, unknown> {
 		const rva = BigInt(row.rva);
 		const interpretation = this.interpretationService.at({ kind: 'image', contentHash, rva });
@@ -1037,6 +1169,99 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 		};
 	}
 
+	private async handleProposals(context: IHandlerContext, op: EditOp): Promise<IHandlerOutput> {
+		const session = this.requireSession();
+		const author = proposalAuthor(context.caller);
+		const proposals = parseProposals(context.args.proposals, op);
+		this.throwIfCancelled(context.token);
+
+		// Validate the complete batch above before appending anything. Once the
+		// first append starts, finish the bounded batch so cancellation cannot
+		// report failure after silently committing only a prefix.
+		const edits: IEdit[] = [];
+		for (const proposal of proposals) {
+			edits.push(await this.interpretationService.propose(
+				{ kind: 'image', contentHash: session.contentHash, rva: proposal.rva },
+				op,
+				proposal.value,
+				author,
+			));
+		}
+
+		const addresses = [...new Set(proposals.map(proposal => toWireAddress(proposal.rva)))];
+		return {
+			data: {
+				proposals: edits.map(edit => ({
+					seq: edit.seq,
+					address: toWireAddress(edit.anchor.rva),
+					op: edit.op,
+					value: edit.value,
+					status: edit.status,
+					author: edit.author,
+				})),
+				pendingCount: this.interpretationService.pendingProposals(session.contentHash).length,
+			},
+			provenance: [{
+				source: 'interpretation',
+				detail: 'Attributed proposals appended to the review queue; accepted interpretation is unchanged.',
+				contentHash: session.contentHash,
+				addresses,
+			}],
+		};
+	}
+
+	private async handleReportFindings(context: IHandlerContext): Promise<IHandlerOutput> {
+		const session = this.requireSession();
+		const author = proposalAuthor(context.caller);
+		const parsed = parseFindings(context.args.findings, session.contentHash);
+		for (const finding of parsed) {
+			for (const callId of finding.evidence.flatMap(entry => entry.sourceCallIds ?? [])) {
+				if (!this.projectService.toolCall(session.contentHash, callId)) {
+					throw proposalArgument(`Finding evidence cites unknown prior tool call "${callId}".`);
+				}
+			}
+		}
+		this.throwIfCancelled(context.token);
+		const drafts: readonly IDelverFindingDraft[] = parsed.map(finding => ({
+			...finding,
+			author,
+			status: 'proposed',
+			provenance: { capability: DelverAgentCapabilityId.ReportFinding, callId: context.callId },
+		}));
+		const findings = await this.projectService.reportFindings(session.contentHash, drafts);
+		if (this.projectService.projectPath(session.contentHash) === undefined) {
+			this.sessionService.markProjectDirty();
+		}
+
+		return {
+			data: {
+				findings: findings.map(finding => ({
+					id: finding.id,
+					title: finding.title,
+					description: finding.description,
+					severity: finding.severity,
+					confidence: finding.confidence,
+					status: finding.status,
+					author: finding.author,
+					evidence: finding.evidence.map(entry => ({
+						address: toWireAddress(entry.anchor.rva),
+						...(entry.endRva === undefined ? {} : { endAddress: toWireAddress(entry.endRva) }),
+						description: entry.description,
+						sourceCallIds: entry.sourceCallIds ?? [],
+					})),
+					provenance: finding.provenance,
+				})),
+				pendingCount: this.projectService.pendingFindings(session.contentHash).length,
+			},
+			provenance: [{
+				source: 'finding',
+				detail: 'Evidence-backed findings retained as attributed proposals for human review.',
+				contentHash: session.contentHash,
+				addresses: [...new Set(findings.flatMap(finding => finding.anchors.map(anchor => toWireAddress(anchor.rva))))],
+			}],
+		};
+	}
+
 	// #endregion
 
 	// #region function index
@@ -1089,6 +1314,230 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 export const DELVER_AGENT_FOCUS_ORIGIN = 'delver.agent';
 
 const SCAN_TRUNCATED_REASON = 'The image string scan hit its cap, so some strings were never extracted and no cursor will reach them.';
+
+function proposalAuthor(caller: IDelverAgentCaller | undefined): IAuthor {
+	if (caller?.kind !== 'model' || caller.id.trim().length === 0 || caller.id.length > 256) {
+		throw proposalArgument('Proposal capabilities require an attributed model caller with an id no longer than 256 characters.');
+	}
+	return { kind: 'model', id: caller.id.trim() };
+}
+
+/** Parses every item before the handler appends the first provisional edit. */
+function parseProposals(value: unknown, op: EditOp): readonly IParsedProposal[] {
+	if (!Array.isArray(value) || value.length === 0 || value.length > DELVER_AGENT_LIMITS.proposals.max) {
+		throw proposalArgument(`proposals must contain between 1 and ${DELVER_AGENT_LIMITS.proposals.max} items.`);
+	}
+
+	const parsed = value.map((item, index) => parseProposal(item, index, op));
+	const anchors = new Set<string>();
+	for (const proposal of parsed) {
+		const key = proposal.rva.toString(16);
+		if (anchors.has(key)) {
+			throw proposalArgument(`proposals contains the same address more than once: ${toWireAddress(proposal.rva)}.`);
+		}
+		anchors.add(key);
+	}
+	return parsed;
+}
+
+function parseProposal(value: unknown, index: number, op: EditOp): IParsedProposal {
+	if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+		throw proposalArgument(`proposals[${index}] must be an object.`);
+	}
+	const item = value as Readonly<Record<string, unknown>>;
+	const valueKey = op === EditOp.Rename ? 'name' : op === EditOp.Comment ? 'comment' : 'tags';
+	const unknownKeys = Object.keys(item).filter(key => key !== 'address' && key !== valueKey);
+	if (unknownKeys.length > 0) {
+		throw proposalArgument(`proposals[${index}] has unknown field "${unknownKeys[0]}".`);
+	}
+
+	const rva = parseWireAddress(item.address);
+	if (op === EditOp.Tags) {
+		return { rva, value: parseProposalTags(item.tags, index) };
+	}
+
+	const raw = item[valueKey];
+	if (typeof raw !== 'string') {
+		throw proposalArgument(`proposals[${index}].${valueKey} must be a string.`);
+	}
+	const normalized = raw.trim();
+	const max = op === EditOp.Rename
+		? DELVER_AGENT_LIMITS.proposals.renameCharacters
+		: DELVER_AGENT_LIMITS.proposals.commentCharacters;
+	if (normalized.length > max) {
+		throw proposalArgument(`proposals[${index}].${valueKey} must not exceed ${max} characters.`);
+	}
+	return { rva, value: normalized };
+}
+
+function parseProposalTags(value: unknown, index: number): readonly string[] {
+	if (!Array.isArray(value) || value.length > DELVER_AGENT_LIMITS.proposals.tagsPerAddress) {
+		throw proposalArgument(`proposals[${index}].tags must be an array of at most ${DELVER_AGENT_LIMITS.proposals.tagsPerAddress} strings.`);
+	}
+	const tags = value.map((tag, tagIndex) => {
+		if (typeof tag !== 'string') {
+			throw proposalArgument(`proposals[${index}].tags[${tagIndex}] must be a string.`);
+		}
+		const normalized = tag.trim();
+		if (normalized.length > DELVER_AGENT_LIMITS.proposals.tagCharacters) {
+			throw proposalArgument(`proposals[${index}].tags[${tagIndex}] must not exceed ${DELVER_AGENT_LIMITS.proposals.tagCharacters} characters.`);
+		}
+		return normalized;
+	}).filter(tag => tag.length > 0);
+	const canonical = [...new Set(tags)];
+	canonical.sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
+	return canonical;
+}
+
+function parseFindings(value: unknown, contentHash: string): readonly IParsedFinding[] {
+	if (!Array.isArray(value) || value.length === 0 || value.length > DELVER_FINDING_LIMITS.batch) {
+		throw proposalArgument(`findings must contain between 1 and ${DELVER_FINDING_LIMITS.batch} items.`);
+	}
+	return value.map((candidate, index) => {
+		if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) {
+			throw proposalArgument(`findings[${index}] must be an object.`);
+		}
+		const finding = candidate as Readonly<Record<string, unknown>>;
+		const allowed = new Set(['title', 'description', 'severity', 'confidence', 'evidence']);
+		const unknownKey = Object.keys(finding).find(key => !allowed.has(key));
+		if (unknownKey !== undefined) {
+			throw proposalArgument(`findings[${index}] has unknown field "${unknownKey}".`);
+		}
+		const severity = finding.severity;
+		if (severity !== 'info' && severity !== 'suspicious' && severity !== 'malicious') {
+			throw proposalArgument(`findings[${index}].severity must be "info", "suspicious", or "malicious".`);
+		}
+		if (typeof finding.confidence !== 'number' || !Number.isFinite(finding.confidence) || finding.confidence < 0 || finding.confidence > 1) {
+			throw proposalArgument(`findings[${index}].confidence must be a number between 0 and 1.`);
+		}
+		return {
+			title: findingText(finding.title, DELVER_FINDING_LIMITS.titleCharacters, `findings[${index}].title`),
+			description: findingText(finding.description, DELVER_FINDING_LIMITS.descriptionCharacters, `findings[${index}].description`),
+			severity,
+			confidence: finding.confidence,
+			evidence: parseFindingEvidence(finding.evidence, contentHash, index),
+		};
+	});
+}
+
+function parseFindingEvidence(value: unknown, contentHash: string, findingIndex: number): readonly IDelverFindingEvidence[] {
+	if (!Array.isArray(value) || value.length === 0 || value.length > DELVER_FINDING_LIMITS.evidencePerFinding) {
+		throw proposalArgument(`findings[${findingIndex}].evidence must contain between 1 and ${DELVER_FINDING_LIMITS.evidencePerFinding} ranges.`);
+	}
+	const seen = new Set<string>();
+	return value.map((candidate, evidenceIndex) => {
+		if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) {
+			throw proposalArgument(`findings[${findingIndex}].evidence[${evidenceIndex}] must be an object.`);
+		}
+		const evidence = candidate as Readonly<Record<string, unknown>>;
+		const unknownKey = Object.keys(evidence).find(key => key !== 'address' && key !== 'endAddress' && key !== 'description' && key !== 'sourceCallIds');
+		if (unknownKey !== undefined) {
+			throw proposalArgument(`findings[${findingIndex}].evidence[${evidenceIndex}] has unknown field "${unknownKey}".`);
+		}
+		const rva = parseWireAddress(evidence.address);
+		const endRva = parseOptionalWireAddress(evidence.endAddress);
+		if (endRva !== undefined && endRva <= rva) {
+			throw proposalArgument(`findings[${findingIndex}].evidence[${evidenceIndex}].endAddress must be greater than address.`);
+		}
+		const key = `${rva.toString(16)}:${endRva?.toString(16) ?? ''}`;
+		if (seen.has(key)) {
+			throw proposalArgument(`findings[${findingIndex}].evidence contains a duplicate range.`);
+		}
+		seen.add(key);
+		return {
+			kind: 'range' as const,
+			anchor: { kind: 'image' as const, contentHash, rva },
+			...(endRva === undefined ? {} : { endRva }),
+			description: findingText(
+				evidence.description,
+				DELVER_FINDING_LIMITS.evidenceDescriptionCharacters,
+				`findings[${findingIndex}].evidence[${evidenceIndex}].description`,
+			),
+			sourceCallIds: findingSourceCallIds(evidence.sourceCallIds, findingIndex, evidenceIndex),
+		};
+	});
+}
+
+function findingSourceCallIds(value: unknown, findingIndex: number, evidenceIndex: number): readonly string[] {
+	if (value === undefined) {
+		return [];
+	}
+	if (!Array.isArray(value) || value.length > DELVER_FINDING_LIMITS.sourceCallsPerEvidence) {
+		throw proposalArgument(`findings[${findingIndex}].evidence[${evidenceIndex}].sourceCallIds must contain at most ${DELVER_FINDING_LIMITS.sourceCallsPerEvidence} call ids.`);
+	}
+	const sourceCallIds = value.map((candidate, sourceIndex) => findingText(
+		candidate,
+		128,
+		`findings[${findingIndex}].evidence[${evidenceIndex}].sourceCallIds[${sourceIndex}]`,
+	));
+	if (new Set(sourceCallIds).size !== sourceCallIds.length) {
+		throw proposalArgument(`findings[${findingIndex}].evidence[${evidenceIndex}].sourceCallIds must not contain duplicates.`);
+	}
+	return sourceCallIds;
+}
+
+function findingText(value: unknown, maxLength: number, path: string): string {
+	if (typeof value !== 'string') {
+		throw proposalArgument(`${path} must be a string.`);
+	}
+	const normalized = value.trim();
+	if (normalized.length === 0 || normalized.length > maxLength) {
+		throw proposalArgument(`${path} must contain between 1 and ${maxLength} characters.`);
+	}
+	return normalized;
+}
+
+function proposalArgument(message: string): DelverAgentError {
+	return new DelverAgentError(DelverAgentErrorCode.InvalidArgument, message);
+}
+
+function byteReadSpace(value: unknown): ByteReadSpace {
+	if (value === undefined || value === 'image') {
+		return 'image';
+	}
+	if (value === 'file') {
+		return 'file';
+	}
+	throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, 'space must be "image" or "file".');
+}
+
+function byteReadFormat(value: unknown): ByteReadFormat {
+	if (value === undefined || value === 'hex') {
+		return 'hex';
+	}
+	if (value === 'u8' || value === 'u16le' || value === 'u32le' || value === 'u64le') {
+		return value;
+	}
+	throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, 'format must be "hex", "u8", "u16le", "u32le", or "u64le".');
+}
+
+function byteReadWidth(format: ByteReadFormat): number {
+	switch (format) {
+		case 'hex':
+		case 'u8':
+			return 1;
+		case 'u16le':
+			return 2;
+		case 'u32le':
+			return 4;
+		case 'u64le':
+			return 8;
+	}
+}
+
+/** Decodes complete little-endian elements without passing unsafe integers through JSON. */
+function decodeLittleEndianValues(bytesHex: string, width: number): readonly string[] {
+	const values: string[] = [];
+	for (let byteOffset = 0; byteOffset + width <= bytesHex.length / 2; byteOffset += width) {
+		let value = 0n;
+		for (let byteIndex = 0; byteIndex < width; byteIndex++) {
+			const hexOffset = (byteOffset + byteIndex) * 2;
+			value |= BigInt(Number.parseInt(bytesHex.slice(hexOffset, hexOffset + 2), 16)) << BigInt(byteIndex * 8);
+		}
+		values.push(toWireAddress(value));
+	}
+	return values;
+}
 
 /** Classifies anything a handler can throw into the stable code space. */
 function asAgentError(error: unknown): DelverAgentError {

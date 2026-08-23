@@ -107,6 +107,31 @@ describe('Production bridge activation gate', () => {
 		assert.deepStrictEqual({ disposals: runtimes[0].disposeCount, listenerCount: workspace.listenerCount }, { disposals: 1, listenerCount: 0 });
 	});
 
+	it('keeps a failed initial activation available for retry', async () => {
+		const workspace = new TestWorkspace();
+		const runtimes: TestRuntime[] = [];
+		const activation = new DelverAgentBridgeActivation({
+			workspace,
+			platform: 'linux',
+			createRuntime: () => {
+				const runtime = new TestRuntime(runtimes.length === 0 ? new Error('relay unavailable') : undefined);
+				runtimes.push(runtime);
+				return runtime;
+			},
+		});
+
+		await assert.rejects(activation.start(), /relay unavailable/);
+		await activation.retry();
+		await activation.dispose();
+		assert.deepStrictEqual({
+			runtimes: runtimes.map(runtime => ({ starts: runtime.startCount, disposals: runtime.disposeCount })),
+			listenerCount: workspace.listenerCount,
+		}, {
+			runtimes: [{ starts: 1, disposals: 1 }, { starts: 1, disposals: 1 }],
+			listenerCount: 0,
+		});
+	});
+
 	it('refuses remote, virtual, untitled, multi-root, untrusted, and unsupported platforms', () => {
 		const local = { roots: [{ scheme: 'file', fsPath: '/root' }], trusted: true } as const;
 		assert.deepStrictEqual([
@@ -170,8 +195,14 @@ class TestLifecycle implements IWorkspaceRendezvousLifecycle {
 class TestRuntime implements IAgentBridgeRuntime {
 	startCount = 0;
 	disposeCount = 0;
+	constructor(private readonly startError?: Error) { }
 
-	async start(): Promise<void> { this.startCount++; }
+	async start(): Promise<void> {
+		this.startCount++;
+		if (this.startError) {
+			throw this.startError;
+		}
+	}
 	async dispose(): Promise<void> { this.disposeCount++; }
 }
 

@@ -24,4 +24,85 @@ suite('Delver AI Tool Definitions', () => {
 			canBeReferenced: true,
 		})));
 	});
+
+	test('describes review-only proposal batches with bounded canonical schemas', () => {
+		const tools = new Map(getDelverAgentToolData().map(tool => [tool.id, tool]));
+		const rename = tools.get('delver_propose_rename');
+		const comment = tools.get('delver_propose_comment');
+		const tag = tools.get('delver_propose_tag');
+		const finding = tools.get('delver_report_finding');
+
+		assert.deepStrictEqual({
+			renameRequired: rename?.inputSchema?.required,
+			renameBatchMaximum: rename?.inputSchema?.properties?.proposals?.maxItems,
+			renameItem: rename?.inputSchema?.properties?.proposals?.items,
+			commentMaximum: (comment?.inputSchema?.properties?.proposals?.items as { properties?: { comment?: { maxLength?: number } } })?.properties?.comment?.maxLength,
+			tagValue: (tag?.inputSchema?.properties?.proposals?.items as { properties?: { tags?: unknown } })?.properties?.tags,
+			findingBatchMaximum: finding?.inputSchema?.properties?.findings?.maxItems,
+			findingRequired: (finding?.inputSchema?.properties?.findings?.items as { required?: readonly string[] })?.required,
+			findingEvidence: ((finding?.inputSchema?.properties?.findings?.items as { properties?: { evidence?: { minItems?: number; maxItems?: number } } })?.properties?.evidence),
+			reviewOnly: [rename, comment, tag, finding].every(tool => tool?.modelDescription.includes('provisional')),
+		}, {
+			renameRequired: ['proposals'],
+			renameBatchMaximum: 100,
+			renameItem: {
+				type: 'object',
+				additionalProperties: false,
+				properties: {
+					address: {
+						type: 'string',
+						description: 'Image-relative address as a "0x..." hexadecimal string. The interpretation anchor for this proposal.',
+					},
+					name: {
+						type: 'string',
+						maxLength: 256,
+						description: 'Proposed name. Leading and trailing whitespace is removed; an empty string proposes clearing the field.',
+					},
+				},
+				required: ['address', 'name'],
+			},
+			commentMaximum: 16384,
+			tagValue: {
+				type: 'array',
+				maxItems: 32,
+				items: { type: 'string', maxLength: 64 },
+				description: 'Complete proposed tag set. Empty and duplicate normalized tags are removed.',
+			},
+			findingBatchMaximum: 50,
+			findingRequired: ['title', 'description', 'severity', 'confidence', 'evidence'],
+			findingEvidence: {
+				type: 'array',
+				minItems: 1,
+				maxItems: 64,
+				description: 'Concrete image ranges supporting this finding.',
+				items: {
+					type: 'object',
+					additionalProperties: false,
+					properties: {
+						address: {
+							type: 'string',
+							description: 'Image-relative address as a "0x..." hexadecimal string. Start of the supporting evidence.',
+						},
+						endAddress: {
+							type: 'string',
+							description: 'Image-relative address as a "0x..." hexadecimal string. Optional exclusive end; it must be greater than address.',
+						},
+						description: {
+							type: 'string', minLength: 1, maxLength: 1024,
+							description: 'How this exact range supports the finding.',
+						},
+						sourceCallIds: {
+							type: 'array',
+							maxItems: 16,
+							uniqueItems: true,
+							items: { type: 'string', minLength: 1, maxLength: 128 },
+							description: 'Call ids from prior Delver tool results that produced or corroborated this evidence.',
+						},
+					},
+					required: ['address', 'description'],
+				},
+			},
+			reviewOnly: true,
+		});
+	});
 });

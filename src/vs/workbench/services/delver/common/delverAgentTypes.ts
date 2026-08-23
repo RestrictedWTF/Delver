@@ -19,6 +19,7 @@
  */
 
 import { decodeBase64, encodeBase64, VSBuffer } from '../../../../base/common/buffer.js';
+import { DELVER_FINDING_LIMITS } from '../../../../platform/delver/common/findings.js';
 
 /** Envelope version. Bump only for a breaking change to the envelope itself. */
 export const DELVER_AGENT_SCHEMA_VERSION = 1;
@@ -86,7 +87,7 @@ export interface IDelverAgentRangeWire {
  * exactly these records.
  */
 export interface IDelverAgentProvenance {
-	readonly source: 'session' | 'analysis' | 'project' | 'decompiler' | 'interpretation' | 'focus';
+	readonly source: 'session' | 'analysis' | 'project' | 'decompiler' | 'interpretation' | 'finding' | 'focus';
 	/** Human-readable statement of what was read. */
 	readonly detail: string;
 	readonly contentHash?: string;
@@ -164,6 +165,7 @@ export interface IDelverAgentCapability {
  * and says so rather than quietly returning less than was asked for.
  */
 export const DELVER_AGENT_LIMITS = {
+	bytes: { default: 256, max: 64 * 1024 },
 	listingRows: { default: 256, max: 2048 },
 	functions: { default: 100, max: 1000 },
 	xrefs: { default: 100, max: 2000 },
@@ -171,6 +173,14 @@ export const DELVER_AGENT_LIMITS = {
 	imports: { default: 100, max: 1000 },
 	exports: { default: 100, max: 1000 },
 	decompiledFunctions: { default: 1, max: 16 },
+	proposals: {
+		max: 100,
+		renameCharacters: 256,
+		commentCharacters: 16 * 1024,
+		tagsPerAddress: 32,
+		tagCharacters: 64,
+	},
+	findings: DELVER_FINDING_LIMITS,
 	/** Hard ceiling on one serialized result, in bytes. */
 	serializedBytes: 256 * 1024,
 } as const;

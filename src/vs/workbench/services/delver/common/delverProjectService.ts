@@ -3,15 +3,31 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { SequencerByKey } from '../../../../base/common/async.js';
+import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { basename, dirname, join } from '../../../../base/common/path.js';
 import { URI } from '../../../../base/common/uri.js';
+import { generateUuid } from '../../../../base/common/uuid.js';
 import { localize } from '../../../../nls.js';
 import { AnalysisSessionId, IDelverAnalysisService } from '../../../../platform/delver/common/delverAnalysisService.js';
+import {
+	createDelverFinding,
+	createDelverFindingDecision,
+	delverFindingDecisionFromWire,
+	delverFindingDecisionToWire,
+	delverFindingFromWire,
+	delverFindingToWire,
+	DelverFindingOutcome,
+	IDelverFinding,
+	IDelverFindingDecision,
+	IDelverFindingDraft,
+} from '../../../../platform/delver/common/findings.js';
 import { IFingerprintedFunction, IFunctionRevisionMatch, matchFunctionRevisions } from '../../../../platform/delver/common/functionRevisionMatcher.js';
+import { delverToolCallFromWire, delverToolCallToWire, IDelverToolCallRecord } from '../../../../platform/delver/common/delverToolCall.js';
 import { IDelverProjectDecompilation, IDelverProjectHandle, IDelverProjectSnapshot, IDelverProjectSnapshotUpdate, IDelverProjectStoreService } from '../../../../platform/delver/common/delverProjectStoreService.js';
 import { editToWire } from '../../../../platform/delver/common/delverInterpretationStoreService.js';
-import { EditOp } from '../../../../platform/delver/common/interpretation.js';
+import { EditOp, IAuthor } from '../../../../platform/delver/common/interpretation.js';
 import { IFunctionsResult } from '../../../../platform/delver/common/protocol.generated.js';
 import { IDialogService, IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
@@ -19,6 +35,7 @@ import { createDecorator } from '../../../../platform/instantiation/common/insta
 import { IDelverInterpretationService } from './delverInterpretationService.js';
 
 export const IDelverProjectService = createDecorator<IDelverProjectService>('delverProjectService');
+const LOCAL_REVIEWER: IAuthor = { kind: 'human', id: 'local' };
 
 /** The session information required to create or update a portable project. */
 export interface IDelverProjectSession {
@@ -36,9 +53,16 @@ export interface IDelverOpenedProject {
 	readonly snapshot: IDelverProjectSnapshot;
 }
 
+export interface IDelverFindingsChangeEvent {
+	readonly contentHash: string;
+	readonly findingIds: readonly string[];
+	readonly kind: 'reported' | 'decided';
+}
+
 /** Coordinates the active portable project and its incremental snapshots. */
 export interface IDelverProjectService {
 	readonly _serviceBrand: undefined;
+	readonly onDidChangeFindings: Event<IDelverFindingsChangeEvent>;
 
 	/** Saves an untitled session, returning false when path selection or persistence was canceled. */
 	save(session: IDelverProjectSession): Promise<boolean>;
@@ -58,6 +82,30 @@ export interface IDelverProjectService {
 	/** Retains generated pseudocode and autosaves it once the project has a name. */
 	recordDecompilation(contentHash: string, result: IDelverProjectDecompilation): Promise<void>;
 
+	/** Appends a validation-atomic batch of durable findings for one target revision. */
+	reportFindings(contentHash: string, drafts: readonly IDelverFindingDraft[]): Promise<readonly IDelverFinding[]>;
+
+	/** Findings retained for one target revision, oldest first. */
+	findingsFor(contentHash: string): readonly IDelverFinding[];
+
+	/** Proposed findings with no later human decision, oldest first. */
+	pendingFindings(contentHash: string): readonly IDelverFinding[];
+
+	/** Appends human decisions after validating the complete finding batch. */
+	resolveFindings(contentHash: string, findingIds: readonly string[], outcome: DelverFindingOutcome, reviewer?: IAuthor): Promise<readonly IDelverFindingDecision[]>;
+
+	/** Human decision for one finding, when it has been reviewed. */
+	findingDecisionFor(contentHash: string, findingId: string): IDelverFindingDecision | undefined;
+
+	/** Retains one successful model-visible dispatcher exchange. */
+	recordToolCall(record: IDelverToolCallRecord): Promise<void>;
+
+	/** Successful dispatcher calls retained for one target revision, oldest first. */
+	toolCallsFor(contentHash: string): readonly IDelverToolCallRecord[];
+
+	/** Exact retained dispatcher call, when it belongs to these bytes. */
+	toolCall(contentHash: string, callId: string): IDelverToolCallRecord | undefined;
+
 	/** Path of the named project for these bytes, when the session is no longer untitled. */
 	projectPath(contentHash: string): string | undefined;
 
@@ -68,9 +116,16 @@ export interface IDelverProjectService {
 /** Renderer coordinator for the shared-process SQLite project store. */
 export class DelverProjectService extends Disposable implements IDelverProjectService {
 	readonly _serviceBrand: undefined;
+	private readonly _onDidChangeFindings = this._register(new Emitter<IDelverFindingsChangeEvent>());
+	readonly onDidChangeFindings = this._onDidChangeFindings.event;
 
 	private active: { readonly contentHash: string; readonly revisionId: string; readonly handle: IDelverProjectHandle; snapshot?: IDelverProjectSnapshot } | undefined;
 	private readonly pendingDecompilations = new Map<string, Map<string, IDelverProjectDecompilation>>();
+	private readonly findings = new Map<string, IDelverFinding[]>();
+	private readonly findingDecisions = new Map<string, IDelverFindingDecision[]>();
+	private readonly toolCalls = new Map<string, IDelverToolCallRecord[]>();
+	private readonly findingReviews = new SequencerByKey<string>();
+	private readonly toolCallRecords = new SequencerByKey<string>();
 
 	constructor(
 		@IDelverProjectStoreService private readonly storeService: IDelverProjectStoreService,
@@ -122,6 +177,19 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 				active.handle.projectId,
 				this.interpretationService.logFor(session.contentHash).map(editToWire),
 			);
+			await this.storeService.appendToolCalls(
+				active.handle.projectId,
+				this.toolCallsFor(session.contentHash).map(delverToolCallToWire),
+			);
+			await this.storeService.appendFindings(
+				active.handle.projectId,
+				this.findingsFor(session.contentHash).map(delverFindingToWire),
+			);
+			await this.storeService.appendFindingDecisions(
+				active.handle.projectId,
+				(this.findingDecisions.get(session.contentHash) ?? []).map(delverFindingDecisionToWire),
+			);
+			active.snapshot = await this.storeService.loadSnapshot(active.handle.projectId, active.revisionId);
 			this.pendingDecompilations.delete(session.contentHash);
 			return true;
 		} catch (error) {
@@ -188,6 +256,18 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 				active.handle.projectId,
 				this.interpretationService.logFor(updated.contentHash).map(editToWire),
 			);
+			await this.storeService.appendToolCalls(
+				active.handle.projectId,
+				this.toolCallsFor(updated.contentHash).map(delverToolCallToWire),
+			);
+			await this.storeService.appendFindings(
+				active.handle.projectId,
+				this.findingsFor(updated.contentHash).map(delverFindingToWire),
+			);
+			await this.storeService.appendFindingDecisions(
+				active.handle.projectId,
+				(this.findingDecisions.get(updated.contentHash) ?? []).map(delverFindingDecisionToWire),
+			);
 		} catch (error) {
 			await this.dialogService.error(
 				localize('delverProjectMigrationFailed', "The updated binary was saved, but some interpretations could not be migrated."),
@@ -225,6 +305,18 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 				handle.projectId,
 				this.interpretationService.logFor(session.contentHash).map(editToWire),
 			);
+			await this.storeService.appendToolCalls(
+				handle.projectId,
+				this.toolCallsFor(session.contentHash).map(delverToolCallToWire),
+			);
+			await this.storeService.appendFindings(
+				handle.projectId,
+				this.findingsFor(session.contentHash).map(delverFindingToWire),
+			);
+			await this.storeService.appendFindingDecisions(
+				handle.projectId,
+				(this.findingDecisions.get(session.contentHash) ?? []).map(delverFindingDecisionToWire),
+			);
 
 			const previous = this.active;
 			this.active = { contentHash: session.contentHash, revisionId: handle.metadata.currentRevisionId, handle };
@@ -252,6 +344,9 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 			const snapshot = await this.storeService.loadSnapshot(handle.projectId, handle.metadata.currentRevisionId);
 			const previous = this.active;
 			this.interpretationService.loadFromProject(snapshot.metadata.contentHash, snapshot.interpretations);
+			this.findings.set(snapshot.metadata.contentHash, snapshot.findings.map(delverFindingFromWire));
+			this.findingDecisions.set(snapshot.metadata.contentHash, snapshot.findingDecisions.map(delverFindingDecisionFromWire));
+			this.toolCalls.set(snapshot.metadata.contentHash, snapshot.toolCalls.map(delverToolCallFromWire));
 			this.active = {
 				contentHash: snapshot.metadata.contentHash,
 				revisionId: snapshot.metadata.currentRevisionId,
@@ -278,6 +373,9 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 
 	async close(session: IDelverProjectSession): Promise<void> {
 		this.pendingDecompilations.delete(session.contentHash);
+		this.findings.delete(session.contentHash);
+		this.findingDecisions.delete(session.contentHash);
+		this.toolCalls.delete(session.contentHash);
 		if (this.active?.contentHash !== session.contentHash) {
 			return;
 		}
@@ -320,6 +418,126 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 				);
 			}
 		}
+	}
+
+	async reportFindings(contentHash: string, drafts: readonly IDelverFindingDraft[]): Promise<readonly IDelverFinding[]> {
+		const now = Date.now();
+		const findings = drafts.map(draft => createDelverFinding(generateUuid(), now, draft));
+		for (const finding of findings) {
+			if (finding.anchors.some(anchor => anchor.contentHash !== contentHash)) {
+				throw new Error('Finding belongs to different target bytes');
+			}
+			for (const evidence of finding.evidence) {
+				for (const callId of evidence.sourceCallIds ?? []) {
+					if (!this.toolCall(contentHash, callId)) {
+						throw new Error(`Finding cites unknown tool call ${callId}`);
+					}
+				}
+			}
+		}
+
+		const active = this.active?.contentHash === contentHash ? this.active : undefined;
+		if (active) {
+			await this.storeService.appendFindings(active.handle.projectId, findings.map(delverFindingToWire));
+		}
+		const retained = this.findings.get(contentHash) ?? [];
+		retained.push(...findings);
+		this.findings.set(contentHash, retained);
+		if (active?.snapshot) {
+			active.snapshot = { ...active.snapshot, findings: [...active.snapshot.findings, ...findings.map(delverFindingToWire)] };
+		}
+		if (findings.length > 0) {
+			this._onDidChangeFindings.fire({ contentHash, findingIds: findings.map(finding => finding.id), kind: 'reported' });
+		}
+		return findings;
+	}
+
+	findingsFor(contentHash: string): readonly IDelverFinding[] {
+		return this.findings.get(contentHash) ?? [];
+	}
+
+	pendingFindings(contentHash: string): readonly IDelverFinding[] {
+		const decided = new Set((this.findingDecisions.get(contentHash) ?? []).map(decision => decision.findingId));
+		return this.findingsFor(contentHash).filter(finding => finding.status === 'proposed' && !decided.has(finding.id));
+	}
+
+	resolveFindings(
+		contentHash: string,
+		findingIds: readonly string[],
+		outcome: DelverFindingOutcome,
+		reviewer: IAuthor = LOCAL_REVIEWER,
+	): Promise<readonly IDelverFindingDecision[]> {
+		return this.findingReviews.queue(contentHash, async () => {
+			if (new Set(findingIds).size !== findingIds.length) {
+				throw new Error('A review batch cannot decide the same finding twice');
+			}
+			const findings = new Map(this.findingsFor(contentHash).map(finding => [finding.id, finding]));
+			const existing = new Set((this.findingDecisions.get(contentHash) ?? []).map(decision => decision.findingId));
+			const selected = findingIds.map(id => {
+				const finding = findings.get(id);
+				if (!finding || finding.status !== 'proposed') {
+					throw new Error(`No pending finding ${id}`);
+				}
+				if (existing.has(id)) {
+					throw new Error(`Finding ${id} has already been decided`);
+				}
+				return finding;
+			});
+			const now = Date.now();
+			const decisions = selected.map(finding => createDelverFindingDecision(generateUuid(), finding, outcome, reviewer, now));
+			const active = this.active?.contentHash === contentHash ? this.active : undefined;
+			if (active) {
+				await this.storeService.appendFindingDecisions(active.handle.projectId, decisions.map(delverFindingDecisionToWire));
+			}
+			const retained = this.findingDecisions.get(contentHash) ?? [];
+			retained.push(...decisions);
+			this.findingDecisions.set(contentHash, retained);
+			if (active?.snapshot) {
+				active.snapshot = {
+					...active.snapshot,
+					findingDecisions: [...active.snapshot.findingDecisions, ...decisions.map(delverFindingDecisionToWire)],
+				};
+			}
+			if (decisions.length > 0) {
+				this._onDidChangeFindings.fire({ contentHash, findingIds: [...findingIds], kind: 'decided' });
+			}
+			return decisions;
+		});
+	}
+
+	findingDecisionFor(contentHash: string, findingId: string): IDelverFindingDecision | undefined {
+		return (this.findingDecisions.get(contentHash) ?? []).find(decision => decision.findingId === findingId);
+	}
+
+	recordToolCall(record: IDelverToolCallRecord): Promise<void> {
+		const validated = delverToolCallFromWire(delverToolCallToWire(record));
+		return this.toolCallRecords.queue(validated.contentHash, async () => {
+			const retained = this.toolCalls.get(validated.contentHash) ?? [];
+			const existing = retained.find(call => call.callId === validated.callId);
+			if (existing) {
+				if (JSON.stringify(delverToolCallToWire(existing)) !== JSON.stringify(delverToolCallToWire(validated))) {
+					throw new Error(`Tool call ${validated.callId} conflicts with an existing record`);
+				}
+				return;
+			}
+			const active = this.active?.contentHash === validated.contentHash ? this.active : undefined;
+			if (active) {
+				await this.storeService.appendToolCalls(active.handle.projectId, [delverToolCallToWire(validated)]);
+			}
+			retained.push(validated);
+			this.toolCalls.set(validated.contentHash, retained);
+			if (active?.snapshot) {
+				active.snapshot = { ...active.snapshot, toolCalls: [...active.snapshot.toolCalls, delverToolCallToWire(validated)] };
+			}
+		});
+	}
+
+	toolCallsFor(contentHash: string): readonly IDelverToolCallRecord[] {
+		return this.toolCalls.get(contentHash) ?? [];
+	}
+
+	toolCall(contentHash: string, callId: string): IDelverToolCallRecord | undefined {
+		return this.toolCallsFor(contentHash).find(call => call.callId === callId);
 	}
 
 	projectPath(contentHash: string): string | undefined {

@@ -9,6 +9,9 @@ import { Disposable } from '../../../base/common/lifecycle.js';
 import { resolveBinary } from './delverBinaries.js';
 import { DelverRpcClient } from './rpc.js';
 import {
+	IDelverReadMemoryWire,
+} from '../common/delverAnalysisService.js';
+import {
 	IAddressForRowResult,
 	IFunctionsResult,
 	IGetExportsResult,
@@ -16,6 +19,7 @@ import {
 	IGetImportsResult,
 	IListingWindowResult,
 	IOpenImageResult,
+	IReadMemoryResult,
 	IRowForAddressResult,
 	IStringsResult,
 	IXrefsResult,
@@ -140,6 +144,28 @@ export class DelverAnalysisSession extends Disposable {
 		});
 		const rva = (json.result as IAddressForRowResult).rva;
 		return rva === undefined ? undefined : BigInt(rva);
+	}
+
+	/** Reads one binary frame from the provider and verifies its JSON reference. */
+	async readMemory(space: 'Image' | 'File', address: bigint, count: number): Promise<IDelverReadMemoryWire> {
+		const { json, frames } = await this.providerRpc.call('readMemory', {
+			space,
+			address: `0x${address.toString(16).toUpperCase()}`,
+			len: count,
+		}, 1);
+		const result = json.result as IReadMemoryResult;
+		const frame = frames?.[0];
+		if (!frame) {
+			throw new Error('Provider readMemory response did not include its binary frame');
+		}
+		if (frame.frameId !== result.data.$frame || frame.data.byteLength !== result.data.len) {
+			throw new Error('Provider readMemory binary frame did not match its response metadata');
+		}
+		return {
+			bytesHex: frame.data.toString('hex'),
+			valid: result.valid,
+			servedMoment: result.served_moment,
+		};
 	}
 
 	/**

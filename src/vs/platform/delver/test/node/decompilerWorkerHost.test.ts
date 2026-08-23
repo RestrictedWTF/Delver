@@ -140,6 +140,34 @@ suite('DecompilerWorkerHost', () => {
 		});
 		host.dispose();
 	});
+
+	test('waits for graceful worker exit before completing shutdown', async () => {
+		const process = createFakeProcess(request => ({
+			protocolVersion: 1,
+			id: request.id,
+			result: {
+				protocolVersion: 1,
+				backend: { id: 'fake', label: 'Fake', version: '1' },
+				capabilities: { decompileFunction: true, cancel: true, persistentTargets: true, addressMappings: true, variables: true, intermediateRepresentations: [] },
+			},
+		}));
+		let kills = 0;
+		process.child.kill = () => {
+			kills++;
+			return true;
+		};
+		const host = new DecompilerWorkerHost({ command: 'python', args: [], options: {} }, () => process.child);
+		await host.start();
+		let completed = false;
+		const shutdown = host.shutdown().then(() => completed = true);
+		await new Promise<void>(resolve => setImmediate(resolve));
+
+		assert.deepStrictEqual({ inputEnded: process.child.stdin.writableEnded, completed, kills }, { inputEnded: true, completed: false, kills: 0 });
+		process.child.emit('exit', 0);
+		await shutdown;
+		assert.deepStrictEqual({ completed, kills }, { completed: true, kills: 0 });
+		host.dispose();
+	});
 });
 
 interface IFakeRequest {

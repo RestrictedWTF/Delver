@@ -72,6 +72,7 @@ export interface IDecompilerWorkerHello {
 
 type WorkerSpawn = (command: string, args: readonly string[], options: SpawnOptions) => ChildProcessWithoutNullStreams;
 const DEFAULT_STARTUP_TIMEOUT_MS = 30_000;
+const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
 
 /** Owns one persistent JSON-lines decompiler process and multiplexes requests by id. */
 export class DecompilerWorkerHost extends Disposable {
@@ -84,16 +85,22 @@ export class DecompilerWorkerHost extends Disposable {
 	private processGeneration = 0;
 	private spawnMs = 0;
 	private handshakeMs = 0;
+	private stopping = false;
+	private shutdownPromise: Promise<void> | undefined;
 
 	constructor(
 		private readonly invocation: IDecompilerWorkerInvocation,
 		private readonly spawnWorker: WorkerSpawn = (command, args, options) => spawn(command, [...args], options) as ChildProcessWithoutNullStreams,
 		private readonly startupTimeoutMs = DEFAULT_STARTUP_TIMEOUT_MS,
+		private readonly shutdownTimeoutMs = DEFAULT_SHUTDOWN_TIMEOUT_MS,
 	) {
 		super();
 	}
 
 	start(): Promise<IDecompilerWorkerHello> {
+		if (this.stopping) {
+			return Promise.reject(new Error('Decompiler worker is shutting down.'));
+		}
 		if (!this.starting) {
 			this.starting = this.startProcess();
 		}
@@ -114,6 +121,9 @@ export class DecompilerWorkerHost extends Disposable {
 	}
 
 	async request(method: string, params: object, token: CancellationToken): Promise<object> {
+		if (this.stopping) {
+			throw new Error('Decompiler worker is shutting down.');
+		}
 		if (token.isCancellationRequested) {
 			throw new CancellationError();
 		}
@@ -121,7 +131,17 @@ export class DecompilerWorkerHost extends Disposable {
 		return this.sendRequest(method, params, token);
 	}
 
+	/** Closes the worker input and waits for the backend to release persistent project locks. */
+	shutdown(): Promise<void> {
+		if (!this.shutdownPromise) {
+			this.stopping = true;
+			this.shutdownPromise = this.shutdownProcess();
+		}
+		return this.shutdownPromise;
+	}
+
 	override dispose(): void {
+		this.stopping = true;
 		this.fail(new Error('Decompiler worker was disposed.'));
 		super.dispose();
 	}
@@ -140,7 +160,7 @@ export class DecompilerWorkerHost extends Disposable {
 		child.stdout.on('data', chunk => this.acceptStandardOutput(String(chunk)));
 		child.stderr.on('data', chunk => this.standardError = `${this.standardError}${String(chunk)}`.slice(-32_768));
 		child.once('error', error => this.fail(error, child));
-		child.once('exit', code => this.fail(new Error(`Decompiler worker exited with code ${code}: ${this.standardError.trim() || 'no diagnostic output'}`), child));
+		child.once('exit', code => this.fail(new Error(`Decompiler worker exited with code ${code}: ${this.standardError.trim() || 'no diagnostic output'}`), child, false));
 
 		let startupTimer: ReturnType<typeof setTimeout> | undefined;
 		const startupTimeout = new Promise<object>((_resolve, reject) => {
@@ -215,6 +235,28 @@ export class DecompilerWorkerHost extends Disposable {
 		this.child?.stdin.write(`${JSON.stringify(request)}${lineEnding}`);
 	}
 
+	private async shutdownProcess(): Promise<void> {
+		const child = this.child;
+		if (!child) {
+			this.fail(new Error('Decompiler worker was shut down.'));
+			return;
+		}
+		const exited = new Promise<void>(resolve => {
+			child.once('exit', () => resolve());
+			child.once('error', () => resolve());
+		});
+		const shutdownError = new Error('Decompiler worker was shut down.');
+		this.rejectPending(shutdownError);
+		child.stdin.end();
+		if (!await completesWithin(exited, this.shutdownTimeoutMs)) {
+			if (this.child === child && !child.killed) {
+				child.kill();
+			}
+			await completesWithin(exited, this.shutdownTimeoutMs);
+		}
+		this.fail(shutdownError, child);
+	}
+
 	private acceptStandardOutput(chunk: string): void {
 		this.standardOutputBuffer += chunk;
 		for (;;) {
@@ -256,19 +298,37 @@ export class DecompilerWorkerHost extends Disposable {
 		}
 	}
 
-	private fail(error: Error, expectedChild?: ChildProcessWithoutNullStreams): void {
+	private rejectPending(error: Error): void {
+		for (const pending of this.pending.values()) {
+			pending.reject(error);
+		}
+		this.pending.clear();
+	}
+
+	private fail(error: Error, expectedChild?: ChildProcessWithoutNullStreams, terminate = true): void {
 		if (expectedChild && this.child !== expectedChild) {
 			return;
 		}
 		const child = this.child;
 		this.child = undefined;
 		this.starting = undefined;
-		for (const pending of this.pending.values()) {
-			pending.reject(error);
-		}
-		this.pending.clear();
-		if (child && !child.killed) {
+		this.rejectPending(error);
+		if (terminate && child && !child.killed) {
 			child.kill();
+		}
+	}
+}
+
+async function completesWithin(operation: Promise<void>, timeoutMs: number): Promise<boolean> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			operation.then(() => true),
+			new Promise<boolean>(resolve => timer = setTimeout(() => resolve(false), timeoutMs)),
+		]);
+	} finally {
+		if (timer) {
+			clearTimeout(timer);
 		}
 	}
 }

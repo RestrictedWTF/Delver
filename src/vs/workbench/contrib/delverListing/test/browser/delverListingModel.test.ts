@@ -9,6 +9,7 @@ import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/tes
 import {
 	FlowKindWire,
 	IListingRowWire,
+	StringEncodingWire,
 } from '../../../../../platform/delver/common/protocol.generated.js';
 import {
 	BUFFER_ROWS,
@@ -83,6 +84,27 @@ suite('DelverListingModel', () => {
 		assert.strictEqual(model.rows[5].data?.mnemonic, 'nop');
 	});
 
+	test('metadata and strings are real rows around the instruction listing', async () => {
+		const source = new RecordingSource();
+		const metadata = { kind: 'metadata' as const, address: '.text:0x1000', lines: ['; first', '; second'] };
+		const stringRow = {
+			kind: 'string' as const,
+			value: { rva: '0x2000', encoding: StringEncodingWire.Ascii, text: 'hello' },
+		};
+		const model = store.add(new DelverListingModel(source, 3, [metadata], [stringRow]));
+
+		assert.strictEqual(model.totalRows, 5);
+		assert.deepStrictEqual(model.rows[0].static, metadata);
+		assert.strictEqual(model.instructionRow(0), 1);
+		assert.deepStrictEqual(model.rows[4].static, stringRow);
+
+		model.setVisibleRange(0, 4);
+		await settle();
+
+		assert.deepStrictEqual(source.requests, [{ startRow: 0, count: 3 }]);
+		assert.strictEqual(model.rows[1].data?.row, 0);
+	});
+
 	test('a page is fetched once however often it is asked for', async () => {
 		const source = new RecordingSource();
 		const model = store.add(new DelverListingModel(source, 100_000));
@@ -107,6 +129,29 @@ suite('DelverListingModel', () => {
 		source.flush();
 		await settle();
 		assert.ok(model.rows[0].data, 'resolved');
+	});
+
+	test('a page that resolves outside the buffer is fetched again when navigation returns', async () => {
+		const source = new RecordingSource(true);
+		const model = store.add(new DelverListingModel(source, BUFFER_ROWS * 4));
+
+		model.setVisibleRange(0, 10);
+		await settle();
+		model.anchorAt(BUFFER_ROWS * 3);
+		source.flush();
+		await settle();
+
+		model.anchorAt(0);
+		model.setVisibleRange(0, 10);
+		await settle();
+
+		assert.deepStrictEqual(source.requests, [
+			{ startRow: 0, count: PAGE_ROWS },
+			{ startRow: 0, count: PAGE_ROWS },
+		]);
+		source.flush();
+		await settle();
+		assert.ok(model.rows[0].data, 'the returned-to page loaded instead of staying blank');
 	});
 
 	test('the buffer is bounded and recentres when the viewport nears its end', async () => {
@@ -154,6 +199,7 @@ suite('DelverListingModel', () => {
 		model.anchorAt(total - 1);
 
 		assert.ok(model.indexOf(total - 1) !== -1, 'the destination is buffered');
+		assert.strictEqual(model.bufferStart, total - 1, 'the destination is installed as the first visible row');
 		assert.strictEqual(model.bufferEnd, total, 'the buffer stops at the last row');
 	});
 

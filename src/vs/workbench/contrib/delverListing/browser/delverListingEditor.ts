@@ -5,7 +5,6 @@
 
 import * as dom from '../../../../base/browser/dom.js';
 import { Dimension } from '../../../../base/browser/dom.js';
-import { onUnexpectedError } from '../../../../base/common/errors.js';
 import { ITableRenderer, ITableVirtualDelegate } from '../../../../base/browser/ui/table/table.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { DisposableStore, MutableDisposable } from '../../../../base/common/lifecycle.js';
@@ -13,7 +12,7 @@ import { localize } from '../../../../nls.js';
 import { IContextKey, IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { IDelverAnalysisService } from '../../../../platform/delver/common/delverAnalysisService.js';
 import { IRange } from '../../../../platform/delver/common/address.js';
-import { FlowKindWire, IFunctionWire } from '../../../../platform/delver/common/protocol.generated.js';
+import { FlowKindWire, IFunctionWire, ISectionWire, IStringWire, StringEncodingWire } from '../../../../platform/delver/common/protocol.generated.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { WorkbenchTable } from '../../../../platform/list/browser/listService.js';
 import { IStorageService } from '../../../../platform/storage/common/storage.js';
@@ -39,9 +38,10 @@ import {
 } from './delverListingContext.js';
 import { DELVER_LISTING_EDITOR_ID, DelverListingInput } from './delverListingInput.js';
 import { IListingInterpretationPresentation, listingInterpretationPresentation } from './delverListingInterpretation.js';
-import { DelverListingModel, IListingRow } from './delverListingModel.js';
+import { DelverListingModel, IListingRow, IListingStaticRow } from './delverListingModel.js';
 import { mouseHistoryDirection } from './delverListingMouseNavigation.js';
 import { isInstructionHighlighted } from './delverListingHighlights.js';
+import { listingAddressLabel, listingMetadataRow } from './delverListingMetadata.js';
 
 /** Identifies this view on the focus bus, so it can ignore its own echo. */
 const FOCUS_ORIGIN = 'delver.editor.listing';
@@ -64,6 +64,10 @@ export class DelverListingEditor extends EditorPane {
 
 	/** Set while applying a focus change, so it is not echoed straight back. */
 	private applyingFocus = false;
+	/** Identifies the newest asynchronous focus request. */
+	private focusApplication = 0;
+	/** Set while an explicit navigation is replacing the virtual buffer. */
+	private anchoringBuffer = false;
 
 	private _pinned = false;
 	private readonly pinnedContext: IContextKey<boolean>;
@@ -77,27 +81,14 @@ export class DelverListingEditor extends EditorPane {
 	private functionStarts = new Set<string>();
 	private functions: readonly IFunctionWire[] = [];
 	private highlightedRanges: readonly IRange[] = [];
+	private sections: readonly ISectionWire[] = [];
+	private stringRowsByRva = new Map<bigint, number>();
 
 	/** Absolute ordinal of the row at the top of the viewport. */
 	private topRow = 0;
 
 	/** Last size the workbench gave this pane. */
 	private dimension: Dimension | undefined;
-
-	/** Re-splices the whole buffer, which is what forces heights to be recomputed. */
-	private respliceBuffer(): void {
-		const table = this.table;
-		const model = this.model;
-		if (!table || !model) {
-			return;
-		}
-		const top = this.topRow;
-		table.splice(0, table.length, model.rows);
-		const index = model.indexOf(top);
-		if (index !== -1) {
-			table.reveal(index, 0);
-		}
-	}
 
 	constructor(
 		group: IEditorGroup,
@@ -178,28 +169,45 @@ export class DelverListingEditor extends EditorPane {
 
 		this.session = handle;
 		this.publishedSession = handle;
-		this.message.style.display = 'none';
-		this.createTable(handle);
 
-		// Loaded after the table so the listing is usable immediately; a large
-		// module has ~178k entries and the rows only gain their separators once
-		// this lands.
+		// Metadata and decoded data belong to the listing itself. Load them before
+		// constructing the virtual model so their rows have stable ordinals.
 		try {
-			const { functions } = await this.sessionService.functions();
+			const [info, { functions }, strings] = await Promise.all([
+				this.sessionService.imageInfo(),
+				this.sessionService.functions(),
+				this.sessionService.strings(),
+			]);
 			if (this.session !== handle) {
 				return;
 			}
+			this.sections = info.sections;
 			this.functions = functions;
 			this.functionStarts = new Set(functions.map(f => f.rva));
-			// A splice, not a rerender: row heights change once starts are known,
-			// and heights are only recomputed when elements are spliced in.
-			this.respliceBuffer();
+
+			const metadata = listingMetadataRow(handle.targetPath, info);
+			const prefixRows: readonly IListingStaticRow[] = [{ kind: 'metadata', ...metadata }];
+			const stringValues = [...strings.strings].sort(compareStringRvas);
+			const suffixRows: readonly IListingStaticRow[] = stringValues.map(value => ({ kind: 'string', value }));
+			const firstStringRow = prefixRows.length + handle.image.instruction_count;
+			this.stringRowsByRva = new Map(stringValues.map((value, index) => [BigInt(value.rva), firstStringRow + index] as const));
+
+			this.message.style.display = 'none';
+			this.createTable(handle, prefixRows, suffixRows);
 		} catch (error) {
-			onUnexpectedError(error);
+			this.message.textContent = localize(
+				'delverListingDetailsFailed',
+				"Could not build the listing: {0}",
+				toMessage(error),
+			);
+			return;
+		}
+		if (this.session === handle) {
+			await this.applyFocus();
 		}
 	}
 
-	private createTable(handle: IDelverSession): void {
+	private createTable(handle: IDelverSession, prefixRows: readonly IListingStaticRow[], suffixRows: readonly IListingStaticRow[]): void {
 		const store = new DisposableStore();
 		this.sessionDisposables.value = store;
 
@@ -214,6 +222,8 @@ export class DelverListingEditor extends EditorPane {
 					(await this.analysisService.listingWindow(handle.sessionId!, startRow, count)).rows,
 			},
 			handle.image!.instruction_count,
+			prefixRows,
+			suffixRows,
 		);
 		store.add(model);
 		this.model = model;
@@ -222,9 +232,11 @@ export class DelverListingEditor extends EditorPane {
 		// Authored labels share their instruction's element. This preserves the
 		// listing's exact row-to-address identity while giving the optional label
 		// a fixed height. Comments remain on the instruction line.
-		const heightFor = (row: IListingRow) => row.data === undefined
-			? ROW_HEIGHT
-			: ROW_HEIGHT * this.presentationFor(row.data.rva).heightInLines;
+		const heightFor = (row: IListingRow) => row.static?.kind === 'metadata'
+			? ROW_HEIGHT * row.static.lines.length
+			: row.data === undefined
+				? ROW_HEIGHT
+				: ROW_HEIGHT * this.presentationFor(row.data.rva).heightInLines;
 		const delegate = new class implements ITableVirtualDelegate<IListingRow> {
 			readonly headerRowHeight = 0;
 			getHeight(row: IListingRow): number {
@@ -242,8 +254,8 @@ export class DelverListingEditor extends EditorPane {
 					label: localize('delverListingAddressColumn', "Address"),
 					tooltip: '',
 					weight: 0,
-					minimumWidth: 140,
-					maximumWidth: 140,
+					minimumWidth: 180,
+					maximumWidth: 180,
 					templateId: AddressRenderer.TEMPLATE_ID,
 					project(row: IListingRow): IListingRow { return row; },
 				},
@@ -256,7 +268,10 @@ export class DelverListingEditor extends EditorPane {
 				},
 			],
 			[
-				new AddressRenderer(row => row.data === undefined ? 0 : this.presentationFor(row.data.rva).linesBeforeInstruction),
+				new AddressRenderer(
+					row => row.data === undefined ? 0 : this.presentationFor(row.data.rva).linesBeforeInstruction,
+					rva => listingAddressLabel(rva, this.sections),
+				),
 				new InstructionRenderer(
 					target => this.followTarget(target),
 					rva => this.presentationFor(rva),
@@ -299,7 +314,7 @@ export class DelverListingEditor extends EditorPane {
 
 		table.splice(0, table.length, model.rows);
 		if (this.dimension) {
-			table.layout(this.dimension.height, this.dimension.width);
+			this.layoutTable();
 		}
 
 		store.add(model.onDidChangeRows(range => {
@@ -308,7 +323,17 @@ export class DelverListingEditor extends EditorPane {
 			// would just redraw the stale placeholders. Replacing the range with
 			// the same number of rows leaves total height — and so the scroll
 			// position — untouched.
-			table.splice(range.start, range.count, model.rows.slice(range.start, range.start + range.count));
+			const selection = table.getSelection();
+			const focus = table.getFocus();
+			const wasApplyingFocus = this.applyingFocus;
+			this.applyingFocus = true;
+			try {
+				table.splice(range.start, range.count, model.rows.slice(range.start, range.start + range.count));
+				table.setFocus(focus);
+				table.setSelection(selection);
+			} finally {
+				this.applyingFocus = wasApplyingFocus;
+			}
 		}));
 
 		store.add(model.onDidMoveBuffer(() => {
@@ -316,13 +341,14 @@ export class DelverListingEditor extends EditorPane {
 			// it was. Revealing the row that was on top is exact and does not
 			// assume a uniform row height — which stopped being true the moment
 			// function headers became two lines tall.
-			const top = this.topRow;
 			table.splice(0, table.length, model.rows);
-			const index = model.indexOf(top);
-			if (index !== -1) {
-				table.reveal(index, 0);
+			if (!this.anchoringBuffer) {
+				const index = model.indexOf(this.topRow);
+				if (index !== -1) {
+					table.reveal(index, 0);
+				}
+				this.updateVisibleRange();
 			}
-			this.updateVisibleRange();
 		}));
 
 		// `ListView.rerender()` is a no-op when dynamic-height support is off,
@@ -475,11 +501,16 @@ export class DelverListingEditor extends EditorPane {
 
 	/** Broadcasts the selected row's address to the rest of the workbench. */
 	private publishFocus(row: IListingRow | undefined): void {
-		if (this.applyingFocus || !row?.data) {
+		const address = row?.data
+			? BigInt(row.data.rva)
+			: row?.static?.kind === 'string'
+				? BigInt(row.static.value.rva)
+				: undefined;
+		if (this.applyingFocus || address === undefined) {
 			return;
 		}
 		this.focusService.setFocus(
-			{ location: { space: 'Image', address: BigInt(row.data.rva) } },
+			{ location: { space: 'Image', address } },
 			FOCUS_ORIGIN,
 			FocusReason.User,
 		);
@@ -495,32 +526,60 @@ export class DelverListingEditor extends EditorPane {
 			return;
 		}
 
-		const rva = `0x${location.address.toString(16).toUpperCase()}`;
 		if (!session.sessionId) {
 			return;
 		}
-		const row = await this.analysisService.rowForAddress(session.sessionId, rva, true);
-		if (row === undefined || this.model !== model) {
+		const application = ++this.focusApplication;
+		const address = location.address;
+		let listingRow = this.stringRowsByRva.get(address);
+		if (listingRow === undefined) {
+			const rva = `0x${address.toString(16).toUpperCase()}`;
+			const instructionRow = await this.analysisService.rowForAddress(session.sessionId, rva, true);
+			if (instructionRow === undefined) {
+				return;
+			}
+			listingRow = model.instructionRow(instructionRow);
+		}
+
+		// An older address lookup must not move a replacement table or override a
+		// newer focus. This also catches a project being closed while RPC was in
+		// flight.
+		if (
+			application !== this.focusApplication
+			|| this.session !== session
+			|| this.model !== model
+			|| this.table !== table
+			|| this.focusService.focus.location?.address !== address
+		) {
 			return;
 		}
 
-		if (model.indexOf(row) === -1) {
-			model.anchorAt(row);
-		}
-		const index = model.indexOf(row);
-		if (index === -1) {
-			return;
-		}
-
+		// Replacing the buffer splices the table synchronously. Keep the focus-echo
+		// guard active for that splice too: otherwise its selection event republishes
+		// the old .rdata row and immediately cancels a jump back to .text.
+		const wasApplyingFocus = this.applyingFocus;
 		this.applyingFocus = true;
 		try {
+			if (model.indexOf(listingRow) === -1) {
+				this.anchoringBuffer = true;
+				try {
+					model.anchorAt(listingRow);
+				} finally {
+					this.anchoringBuffer = false;
+				}
+			}
+			const index = model.indexOf(listingRow);
+			if (index === -1) {
+				return;
+			}
+
 			table.reveal(index, 0.5);
 			table.setFocus([index]);
 			table.setSelection([index]);
+			this.updateVisibleRange();
 		} finally {
-			this.applyingFocus = false;
+			this.applyingFocus = wasApplyingFocus;
 		}
-		this.updateVisibleRange();
 	}
 
 	/**
@@ -532,8 +591,16 @@ export class DelverListingEditor extends EditorPane {
 	 */
 	override layout(dimension: Dimension): void {
 		this.dimension = dimension;
-		this.table?.layout(dimension.height, dimension.width);
+		this.layoutTable();
 		this.updateVisibleRange();
+	}
+
+	private layoutTable(): void {
+		if (!this.table || !this.dimension) {
+			return;
+		}
+		const messageHeight = this.message.style.display === 'none' ? 0 : this.message.offsetHeight;
+		this.table.layout(Math.max(0, this.dimension.height - messageHeight), this.dimension.width);
 	}
 
 	/**
@@ -547,7 +614,7 @@ export class DelverListingEditor extends EditorPane {
 	protected override setEditorVisible(visible: boolean): void {
 		super.setEditorVisible(visible);
 		if (visible && this.table && this.dimension) {
-			this.table.layout(this.dimension.height, this.dimension.width);
+			this.layoutTable();
 			this.table.rerender();
 		}
 	}
@@ -570,6 +637,7 @@ export class DelverListingEditor extends EditorPane {
 	 * of the workbench from knowing what is open.
 	 */
 	private releaseSession(): void {
+		this.focusApplication++;
 		this.sessionDisposables.clear();
 		this.table = undefined;
 		this.model = undefined;
@@ -578,6 +646,8 @@ export class DelverListingEditor extends EditorPane {
 		this.functionStarts = new Set();
 		this.functions = [];
 		this.highlightedRanges = [];
+		this.sections = [];
+		this.stringRowsByRva.clear();
 	}
 }
 
@@ -614,14 +684,26 @@ class AddressRenderer implements ITableRenderer<IListingRow, ICellTemplate> {
 		return { element: dom.append(container, dom.$('.delver-listing-address')) };
 	}
 
-	constructor(private readonly linesBeforeInstruction: (row: IListingRow) => number) { }
+	constructor(
+		private readonly linesBeforeInstruction: (row: IListingRow) => number,
+		private readonly addressLabel: (rva: string) => string,
+	) { }
 
 	renderElement(row: IListingRow, _index: number, template: ICellTemplate): void {
 		// Addresses arrive as "0x..." strings (ADR 0001) and are displayed as
 		// they arrived; reformatting through a number would truncate above 2^53.
-		template.element.textContent = row.data ? row.data.rva : '';
+		const staticRow = row.static;
+		template.element.textContent = row.data
+			? this.addressLabel(row.data.rva)
+			: staticRow?.kind === 'metadata'
+				? staticRow.lines.map(() => staticRow.address).join('\n')
+				: staticRow?.kind === 'string'
+					? this.addressLabel(staticRow.value.rva)
+					: '';
 		// The address belongs beside the instruction, not beside an authored label.
 		template.element.classList.toggle('delver-listing-second-line', this.linesBeforeInstruction(row) > 0);
+		template.element.classList.toggle('delver-listing-metadata-row', row.static?.kind === 'metadata');
+		template.element.classList.toggle('delver-listing-data-row', row.static?.kind === 'string');
 	}
 
 	disposeTemplate(): void { }
@@ -680,6 +762,31 @@ class InstructionRenderer implements ITableRenderer<IListingRow, IInstructionTem
 	}
 
 	renderElement(row: IListingRow, _index: number, template: IInstructionTemplate): void {
+		template.row.classList.toggle('delver-listing-metadata-row', row.static?.kind === 'metadata');
+		template.row.classList.toggle('delver-listing-data-row', row.static?.kind === 'string');
+
+		if (row.static) {
+			template.target = undefined;
+			template.label.textContent = '';
+			template.tags.textContent = '';
+			template.mnemonic.classList.remove('delver-listing-pending', 'delver-listing-flow');
+			template.operands.classList.remove('delver-listing-link');
+			template.row.classList.remove('delver-listing-function-start', 'delver-listing-pseudocode-highlight');
+			if (row.static.kind === 'metadata') {
+				template.mnemonic.textContent = '';
+				template.operands.textContent = row.static.lines.join('\n');
+				template.comment.textContent = '';
+			} else {
+				const utf16 = row.static.value.encoding === StringEncodingWire.Utf16Le;
+				template.mnemonic.textContent = utf16 ? 'dw' : 'db';
+				template.operands.textContent = JSON.stringify(row.static.value.text);
+				template.comment.textContent = utf16
+					? localize('delverListingUtf16String', "UTF-16 string")
+					: localize('delverListingAsciiString', "ASCII string");
+			}
+			return;
+		}
+
 		if (!row.data) {
 			// A row whose page is still in flight renders as a placeholder rather
 			// than blocking the scroll on a fetch.
@@ -690,6 +797,7 @@ class InstructionRenderer implements ITableRenderer<IListingRow, IInstructionTem
 			template.comment.textContent = '';
 			template.tags.textContent = '';
 			template.mnemonic.classList.add('delver-listing-pending');
+			template.mnemonic.classList.remove('delver-listing-flow');
 			template.operands.classList.remove('delver-listing-link');
 			template.row.classList.remove('delver-listing-function-start');
 			template.row.classList.remove('delver-listing-pseudocode-highlight');
@@ -727,6 +835,12 @@ function isBranch(flow: FlowKindWire): boolean {
 	return flow === FlowKindWire.Call
 		|| flow === FlowKindWire.Jump
 		|| flow === FlowKindWire.ConditionalJump;
+}
+
+function compareStringRvas(left: IStringWire, right: IStringWire): number {
+	const leftRva = BigInt(left.rva);
+	const rightRva = BigInt(right.rva);
+	return leftRva < rightRva ? -1 : leftRva > rightRva ? 1 : 0;
 }
 
 function sameRanges(left: readonly IRange[], right: readonly IRange[]): boolean {

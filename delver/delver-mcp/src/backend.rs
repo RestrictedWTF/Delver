@@ -610,6 +610,9 @@ fn gateway_tool_result(value: Value) -> Result<ToolCallResult, BackendError> {
 fn tool_annotations(kind: &str) -> Value {
 	match kind {
 		"read" => json!({ "readOnlyHint": true, "destructiveHint": false }),
+		"write" => {
+			json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false })
+		}
 		"ui" => json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }),
 		_ => json!({ "readOnlyHint": false }),
 	}
@@ -706,17 +709,19 @@ mod tests {
 			"ok": true,
 			"result": { "data": { "capabilities": [
 				{ "id": "delver_image_info", "kind": "read" },
+				{ "id": "delver_propose_rename", "kind": "write" },
 				{ "id": "delver_focus", "kind": "ui" }
 			] } },
 			"tools": [
 				{ "name": "delver_image_info", "title": "Image Info", "description": "Read image facts.", "inputSchema": { "type": "object", "properties": {} } },
+				{ "name": "delver_propose_rename", "title": "Propose Rename", "description": "Append a review-only proposal.", "inputSchema": { "type": "object", "properties": { "proposals": { "type": "array" } } } },
 				{ "name": "delver_focus", "title": "Focus", "description": "Move focus.", "inputSchema": { "type": "object", "properties": { "address": { "type": "string" } } } }
 			]
 		});
 
 		let tools = parse_capability_tools(&response).expect("parse tools");
 
-		assert_eq!(tools.len(), 2);
+		assert_eq!(tools.len(), 3);
 		assert_eq!(tools[0].name, "delver_image_info");
 		assert_eq!(
 			tools[0].annotations,
@@ -724,6 +729,12 @@ mod tests {
 		);
 		assert_eq!(
 			tools[1].annotations,
+			Some(
+				json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false })
+			)
+		);
+		assert_eq!(
+			tools[2].annotations,
 			Some(
 				json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true })
 			)

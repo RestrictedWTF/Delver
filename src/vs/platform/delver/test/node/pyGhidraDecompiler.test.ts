@@ -4,6 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as assert from 'assert';
+import { promises as fs } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import { DecompilerWorkerHost, IDecompilerWorkerHello } from '../../node/decompilerWorkerHost.js';
@@ -107,5 +110,105 @@ suite('PyGhidraDecompiler', () => {
 			serialized: { schemaVersion: 1, functionRva: '0x1000', text: 'return 0;', lineMappings: [], variables: [] },
 		});
 		decompiler.dispose();
+	});
+
+	test('shares one cached Ghidra project between sessions for identical content', async () => {
+		const requests: { readonly method: string; readonly targetId: string | undefined }[] = [];
+		let releaseOpen!: () => void;
+		const openGate = new Promise<void>(resolve => { releaseOpen = resolve; });
+		class FakeWorker extends DecompilerWorkerHost {
+			constructor() { super({ command: 'python', args: [], options: {} }); }
+			override get generation(): number { return 1; }
+			override start(): Promise<IDecompilerWorkerHello> {
+				return Promise.resolve({
+					protocolVersion: 1,
+					backend: { id: 'ghidra-pyghidra', label: 'PyGhidra', version: '12.1' },
+					capabilities: { decompileFunction: true, cancel: true, persistentTargets: true, addressMappings: true, variables: true, intermediateRepresentations: [] },
+				});
+			}
+			override async request(method: string, params: object): Promise<object> {
+				requests.push({ method, targetId: (params as { targetId?: string }).targetId });
+				if (method === 'openTarget') {
+					await openGate;
+				}
+				return method === 'decompileFunction'
+					? {
+						schemaVersion: 1, functionRva: '0x1000', text: 'return 0;', lineMappings: [], variables: [],
+						timings: { functionRecoveryMs: 1, decompilationMs: 2, serializationMs: 3 },
+					}
+					: { targetId: (params as { targetId?: string }).targetId };
+			}
+		}
+
+		const worker = new FakeWorker();
+		const decompiler = new PyGhidraDecompiler(
+			{ ghidraHome: 'C:\\ghidra', pythonPath: 'python', workerScriptPath: 'worker.py' },
+			'C:\\cache',
+			worker,
+		);
+		const contentHash = 'a'.repeat(64);
+		const first = decompiler.prepareTarget('session-1', 'sample.exe', contentHash);
+		const second = decompiler.prepareTarget('session-2', 'copy.exe', contentHash);
+		await Promise.resolve();
+		await Promise.resolve();
+		assert.deepStrictEqual(requests, [{ method: 'openTarget', targetId: 'session-1' }]);
+		releaseOpen();
+		await Promise.all([first, second]);
+		await decompiler.decompileFunction('session-2', 'copy.exe', contentHash, '0x1000', CancellationToken.None);
+		await decompiler.closeTarget('session-1');
+		await decompiler.closeTarget('session-2');
+
+		assert.deepStrictEqual(requests, [
+			{ method: 'openTarget', targetId: 'session-1' },
+			{ method: 'decompileFunction', targetId: 'session-1' },
+			{ method: 'closeTarget', targetId: 'session-1' },
+		]);
+		decompiler.dispose();
+	});
+
+	test('repairs an unreadable cached Ghidra project and retries once', async () => {
+		const cacheRoot = await fs.mkdtemp(join(tmpdir(), 'delver-pyghidra-test-'));
+		const contentHash = 'b'.repeat(64);
+		const projectDirectory = pyGhidraProjectDirectory(cacheRoot, '12.1', contentHash);
+		const marker = join(projectDirectory, 'damaged-project');
+		await fs.mkdir(projectDirectory, { recursive: true });
+		await fs.writeFile(marker, 'damaged');
+		let openAttempts = 0;
+		class FakeWorker extends DecompilerWorkerHost {
+			constructor() { super({ command: 'python', args: [], options: {} }); }
+			override get generation(): number { return 1; }
+			override start(): Promise<IDecompilerWorkerHello> {
+				return Promise.resolve({
+					protocolVersion: 1,
+					backend: { id: 'ghidra-pyghidra', label: 'PyGhidra', version: '12.1' },
+					capabilities: { decompileFunction: true, cancel: true, persistentTargets: true, addressMappings: true, variables: true, intermediateRepresentations: [] },
+				});
+			}
+			override async request(method: string): Promise<object> {
+				if (method === 'openTarget' && openAttempts++ === 0) {
+					throw new Error('backend_error: Could not open target with PyGhidra: java.io.IOException: Unrecognized file format');
+				}
+				return {};
+			}
+		}
+		const decompiler = new PyGhidraDecompiler(
+			{ ghidraHome: 'C:\\ghidra', pythonPath: 'python', workerScriptPath: 'worker.py' },
+			cacheRoot,
+			new FakeWorker(),
+		);
+
+		try {
+			await decompiler.prepareTarget('session-1', 'sample.exe', contentHash);
+			let damagedProjectExists = true;
+			try {
+				await fs.access(marker);
+			} catch {
+				damagedProjectExists = false;
+			}
+			assert.deepStrictEqual({ openAttempts, damagedProjectExists }, { openAttempts: 2, damagedProjectExists: false });
+		} finally {
+			decompiler.dispose();
+			await fs.rm(cacheRoot, { recursive: true, force: true });
+		}
 	});
 });

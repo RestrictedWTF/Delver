@@ -6,7 +6,7 @@
 import { onUnexpectedError } from '../../../../base/common/errors.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
-import { IListingRowWire } from '../../../../platform/delver/common/protocol.generated.js';
+import { IListingRowWire, IStringWire } from '../../../../platform/delver/common/protocol.generated.js';
 
 /**
  * How many rows the table holds at once.
@@ -36,7 +36,13 @@ const EDGE_TRIGGER_ROWS = 2_000;
 export interface IListingRow {
 	readonly row: number;
 	readonly data?: IListingRowWire;
+	readonly static?: IListingStaticRow;
 }
+
+/** Non-instruction content that participates in the same virtual listing. */
+export type IListingStaticRow =
+	| { readonly kind: 'metadata'; readonly address: string; readonly lines: readonly string[] }
+	| { readonly kind: 'string'; readonly value: IStringWire };
 
 /** A run of buffer-relative row indices. */
 export interface IRowRange {
@@ -81,19 +87,31 @@ export class DelverListingModel extends Disposable {
 
 	private _rows: IListingRow[] = [];
 	private _bufferStart = 0;
+	private readonly prefixCount: number;
+	private readonly instructionRows: number;
+	private readonly staticRows: readonly IListingStaticRow[];
 	private readonly loaded = new Set<number>();
 	private readonly inFlight = new Map<number, Promise<void>>();
 	private disposed = false;
+	private preserveAnchoredStart = false;
 
 	constructor(
 		private readonly source: IListingSource,
-		readonly totalRows: number,
+		instructionRows: number,
+		prefixRows: readonly IListingStaticRow[] = [],
+		suffixRows: readonly IListingStaticRow[] = [],
 	) {
 		super();
 		this._register({ dispose: () => { this.disposed = true; } });
+		this.prefixCount = prefixRows.length;
+		this.instructionRows = instructionRows;
+		this.staticRows = [...prefixRows, ...suffixRows];
+		this.totalRows = instructionRows + this.staticRows.length;
 		this._bufferStart = 0;
-		this._rows = placeholders(0, Math.min(BUFFER_ROWS, totalRows));
+		this._rows = this.rowsForRange(0, Math.min(BUFFER_ROWS, this.totalRows));
 	}
+
+	readonly totalRows: number;
 
 	/** Rows currently held, starting at {@link bufferStart}. */
 	get rows(): readonly IListingRow[] {
@@ -123,18 +141,21 @@ export class DelverListingModel extends Disposable {
 	}
 
 	/**
-	 * Moves the buffer so `row` is inside it, discarding what was there.
+	 * Moves the buffer so `row` is its first row, discarding what was there.
 	 *
 	 * Used by navigation, where the destination can be anywhere in the image.
+	 * Keeping the destination at index zero also makes the jump visible in the
+	 * same synchronous splice that installs a far-away buffer.
 	 */
 	anchorAt(row: number): void {
 		if (this.disposed || this.totalRows === 0) {
 			return;
 		}
-		const start = this.clampStart(row - Math.floor(BUFFER_ROWS / 2));
+		const start = Math.min(Math.max(0, row), this.totalRows - 1);
 		if (start === this._bufferStart) {
 			return;
 		}
+		this.preserveAnchoredStart = true;
 		this.moveBufferTo(start);
 	}
 
@@ -144,8 +165,15 @@ export class DelverListingModel extends Disposable {
 		return index >= 0 && index < this._rows.length ? index : -1;
 	}
 
+	/** Converts a provider instruction ordinal into this composite listing. */
+	instructionRow(row: number): number {
+		return this.prefixCount + row;
+	}
+
 	private recenterIfNeeded(firstRow: number, lastRow: number): void {
-		const nearTop = firstRow - this._bufferStart < EDGE_TRIGGER_ROWS && this._bufferStart > 0;
+		const nearTop = !this.preserveAnchoredStart
+			&& firstRow - this._bufferStart < EDGE_TRIGGER_ROWS
+			&& this._bufferStart > 0;
 		const nearBottom =
 			this.bufferEnd - lastRow < EDGE_TRIGGER_ROWS && this.bufferEnd < this.totalRows;
 		if (!nearTop && !nearBottom) {
@@ -155,6 +183,7 @@ export class DelverListingModel extends Disposable {
 		const center = Math.floor((firstRow + lastRow) / 2);
 		const start = this.clampStart(center - Math.floor(BUFFER_ROWS / 2));
 		if (start !== this._bufferStart) {
+			this.preserveAnchoredStart = false;
 			this.moveBufferTo(start);
 		}
 	}
@@ -169,7 +198,7 @@ export class DelverListingModel extends Disposable {
 		for (let i = 0; i < length; i++) {
 			const row = start + i;
 			const existing = this.indexOf(row);
-			next[i] = existing === -1 ? { row } : this._rows[existing];
+			next[i] = existing === -1 ? this.rowAt(row) : this._rows[existing];
 		}
 
 		this._bufferStart = start;
@@ -184,8 +213,13 @@ export class DelverListingModel extends Disposable {
 	}
 
 	private fetchPagesFor(firstRow: number, lastRow: number): void {
-		const firstPage = Math.floor(firstRow / PAGE_ROWS);
-		const lastPage = Math.floor(lastRow / PAGE_ROWS);
+		const firstInstruction = Math.max(0, firstRow - this.prefixCount);
+		const lastInstruction = Math.min(this.instructionRows - 1, lastRow - this.prefixCount);
+		if (firstInstruction > lastInstruction) {
+			return;
+		}
+		const firstPage = Math.floor(firstInstruction / PAGE_ROWS);
+		const lastPage = Math.floor(lastInstruction / PAGE_ROWS);
 		for (let page = firstPage; page <= lastPage; page++) {
 			this.fetchPage(page);
 		}
@@ -196,10 +230,10 @@ export class DelverListingModel extends Disposable {
 			return;
 		}
 		const startRow = page * PAGE_ROWS;
-		if (startRow >= this.totalRows) {
+		if (startRow >= this.instructionRows) {
 			return;
 		}
-		const count = Math.min(PAGE_ROWS, this.totalRows - startRow);
+		const count = Math.min(PAGE_ROWS, this.instructionRows - startRow);
 
 		const request = this.source
 			.listingWindow(startRow, count)
@@ -208,10 +242,15 @@ export class DelverListingModel extends Disposable {
 				if (this.disposed) {
 					return;
 				}
-				this.loaded.add(page);
 				const changed = this.applyRows(rows);
 				if (changed) {
+					this.loaded.add(page);
 					this._onDidChangeRows.fire(changed);
+				} else {
+					// The buffer can move while a request is in flight. A response
+					// that no longer intersects it did not load this page into the
+					// model and must not suppress a fetch when navigation returns.
+					this.loaded.delete(page);
 				}
 			}, (error: unknown) => {
 				// A failed page stays unloaded so it can be retried when it
@@ -236,11 +275,12 @@ export class DelverListingModel extends Disposable {
 		let first = -1;
 		let last = -1;
 		for (const data of rows) {
-			const index = this.indexOf(data.row);
+			const listingRow = this.instructionRow(data.row);
+			const index = this.indexOf(listingRow);
 			if (index === -1) {
 				continue;
 			}
-			this._rows[index] = { row: data.row, data };
+			this._rows[index] = { row: listingRow, data };
 			if (first === -1) {
 				first = index;
 			}
@@ -257,20 +297,37 @@ export class DelverListingModel extends Disposable {
 	 * while its rows had been replaced by placeholders.
 	 */
 	private forgetPagesOutsideBuffer(): void {
-		const firstPage = Math.floor(this._bufferStart / PAGE_ROWS);
-		const lastPage = Math.floor(Math.max(0, this.bufferEnd - 1) / PAGE_ROWS);
+		const firstInstruction = Math.max(0, this._bufferStart - this.prefixCount);
+		const lastInstruction = Math.min(this.instructionRows - 1, this.bufferEnd - 1 - this.prefixCount);
+		if (firstInstruction > lastInstruction) {
+			this.loaded.clear();
+			return;
+		}
+		const firstPage = Math.floor(firstInstruction / PAGE_ROWS);
+		const lastPage = Math.floor(lastInstruction / PAGE_ROWS);
 		for (const page of [...this.loaded]) {
 			if (page < firstPage || page > lastPage) {
 				this.loaded.delete(page);
 			}
 		}
 	}
-}
 
-function placeholders(start: number, count: number): IListingRow[] {
-	const rows: IListingRow[] = new Array(Math.max(0, count));
-	for (let i = 0; i < rows.length; i++) {
-		rows[i] = { row: start + i };
+	private rowsForRange(start: number, count: number): IListingRow[] {
+		const rows = new Array<IListingRow>(Math.max(0, count));
+		for (let index = 0; index < rows.length; index++) {
+			rows[index] = this.rowAt(start + index);
+		}
+		return rows;
 	}
-	return rows;
+
+	private rowAt(row: number): IListingRow {
+		if (row < this.prefixCount) {
+			return { row, static: this.staticRows[row] };
+		}
+		const suffixIndex = row - this.prefixCount - this.instructionRows;
+		if (suffixIndex >= 0) {
+			return { row, static: this.staticRows[this.prefixCount + suffixIndex] };
+		}
+		return { row };
+	}
 }

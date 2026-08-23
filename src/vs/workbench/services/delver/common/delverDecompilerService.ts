@@ -133,7 +133,7 @@ export class SharedProcessDecompilerBackend implements IDelverDecompilerBackend 
 			return { state: 'disabled', available: false, reason: localize('delverDecompilerDisabled', "The decompiler is disabled in Delver settings.") };
 		}
 		return (this.currentStatusBackend === this.backendSelection ? this.currentStatus : undefined) ?? (this.ghidraHome
-			? { state: 'starting', available: false, reason: localize('delverDecompilerStarting', "Starting {0}â€¦", this.backendSelection === 'headless' ? 'Ghidra Headless' : 'PyGhidra') }
+			? { state: 'starting', available: false, reason: localize('delverDecompilerStarting', "Starting {0}…", this.backendSelection === 'headless' ? 'Ghidra Headless' : 'PyGhidra') }
 			: { state: 'unconfigured', available: false, reason: localize('delverDecompilerUnavailable', "Configure a Ghidra {0} installation directory in the Delver settings.", GHIDRA_PINNED_VERSION) });
 	}
 
@@ -141,7 +141,7 @@ export class SharedProcessDecompilerBackend implements IDelverDecompilerBackend 
 		if (this.backendSelection === 'disabled' || !this.ghidraHome) {
 			return this.status;
 		}
-		this.setStatus({ state: 'starting', available: false, reason: localize('delverDecompilerStarting', "Starting {0}â€¦", this.backendSelection === 'headless' ? 'Ghidra Headless' : 'PyGhidra') });
+		this.setStatus({ state: 'starting', available: false, reason: localize('delverDecompilerStarting', "Starting {0}…", this.backendSelection === 'headless' ? 'Ghidra Headless' : 'PyGhidra') });
 		let status: DelverDecompilerStatusWire;
 		try {
 			status = await this.analysisService.decompilerStatus(this.ghidraHome, this.pythonPath, this.backendSelection);
@@ -167,7 +167,7 @@ export class SharedProcessDecompilerBackend implements IDelverDecompilerBackend 
 		if (this.backendSelection === 'disabled' || !this.ghidraHome) {
 			return this.status;
 		}
-		this.setStatus({ state: 'starting', available: false, reason: localize('delverDecompilerRestarting', "Restarting {0}â€¦", this.backendSelection === 'headless' ? 'Ghidra Headless' : 'PyGhidra') });
+		this.setStatus({ state: 'starting', available: false, reason: localize('delverDecompilerRestarting', "Restarting {0}…", this.backendSelection === 'headless' ? 'Ghidra Headless' : 'PyGhidra') });
 		try {
 			const status = await this.analysisService.restartDecompiler(this.ghidraHome, this.pythonPath, this.backendSelection === 'headless' ? 'headless' : 'pyghidra');
 			const resolved: DelverDecompilerStatus = status.state === 'ready'

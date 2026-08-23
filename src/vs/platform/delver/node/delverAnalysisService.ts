@@ -16,6 +16,7 @@ import {
 	IDelverDecompilerTargetPreparationWire,
 	IDelverDecompilationWire,
 	IDelverAnalysisService,
+	IDelverReadMemoryWire,
 } from '../common/delverAnalysisService.js';
 import {
 	IFunctionsResult,
@@ -106,6 +107,10 @@ export class DelverAnalysisService extends Disposable implements IDelverAnalysis
 		return this.session(sessionId).xrefsFrom(BigInt(rva));
 	}
 
+	async readMemory(sessionId: AnalysisSessionId, space: 'image' | 'file', address: string, count: number): Promise<IDelverReadMemoryWire> {
+		return this.session(sessionId).readMemory(space === 'image' ? 'Image' : 'File', BigInt(address), count);
+	}
+
 	async decompilerStatus(ghidraHome: string | undefined, pythonPath: string | undefined, backend: 'pyghidra' | 'headless' = 'pyghidra'): Promise<DelverDecompilerStatusWire> {
 		if (backend === 'headless') {
 			const discovery = discoverGhidraHeadless(ghidraHome);
@@ -121,7 +126,7 @@ export class DelverAnalysisService extends Disposable implements IDelverAnalysis
 			const status = await this.getPyGhidra(workerDiscovery.configuration).status();
 			return { state: 'ready', ...status };
 		} catch (error) {
-			this.resetPyGhidra();
+			await this.resetPyGhidra();
 			const diagnostic = `${errorMessage(error)}\nPython executable: ${workerDiscovery.configuration.pythonPath}`;
 			return { state: 'failed', reason: 'PyGhidra failed to start.', diagnostic };
 		}
@@ -132,7 +137,7 @@ export class DelverAnalysisService extends Disposable implements IDelverAnalysis
 			for (const operation of this.decompilations.values()) {
 				operation.source.cancel();
 			}
-			this.resetPyGhidra();
+			await this.resetPyGhidra();
 		}
 		return this.decompilerStatus(ghidraHome, pythonPath, backend);
 	}
@@ -146,7 +151,7 @@ export class DelverAnalysisService extends Disposable implements IDelverAnalysis
 		for (const operation of this.decompilations.values()) {
 			operation.source.cancel();
 		}
-		this.resetPyGhidra();
+		await this.resetPyGhidra();
 		assertSafeDecompilerCacheRoot(this.pyGhidraCacheRoot);
 		await fs.rm(this.pyGhidraCacheRoot, { recursive: true, force: true });
 		return previous;
@@ -239,7 +244,7 @@ export class DelverAnalysisService extends Disposable implements IDelverAnalysis
 		try {
 			await this.pyGhidra.value?.closeTarget(sessionId);
 		} catch {
-			this.resetPyGhidra();
+			await this.resetPyGhidra();
 		}
 		const session = this.sessions.get(sessionId);
 		if (session) {
@@ -265,9 +270,15 @@ export class DelverAnalysisService extends Disposable implements IDelverAnalysis
 		return this.pyGhidra.value;
 	}
 
-	private resetPyGhidra(): void {
-		this.pyGhidra.clear();
-		this.pyGhidraKey = undefined;
+	private async resetPyGhidra(): Promise<void> {
+		const decompiler = this.pyGhidra.value;
+		if (decompiler) {
+			await decompiler.shutdown();
+		}
+		if (this.pyGhidra.value === decompiler) {
+			this.pyGhidra.clear();
+			this.pyGhidraKey = undefined;
+		}
 	}
 
 	private closeAll(): void {

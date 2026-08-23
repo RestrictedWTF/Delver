@@ -10,8 +10,10 @@ import { tmpdir } from 'os';
 import { join } from '../../../../base/common/path.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import { IDelverProjectTargetIdentity } from '../../common/delverProjectStoreService.js';
+import { IDelverFindingDecisionWire, IDelverFindingWire } from '../../common/findings.js';
 import { IInterpretationEditWire } from '../../common/delverInterpretationStoreService.js';
 import { EditOp, EditStatus } from '../../common/interpretation.js';
+import { IDelverToolCallRecordWire } from '../../common/delverToolCall.js';
 import { DelverProjectStoreService } from '../../node/delverProjectStoreService.js';
 
 const HASH_A = 'a'.repeat(64);
@@ -30,6 +32,52 @@ function edit(contentHash = HASH_A): IInterpretationEditWire {
 		op: EditOp.Rename,
 		value: 'entry',
 		status: EditStatus.Accepted,
+	};
+}
+
+function finding(contentHash = HASH_A, id = 'finding-1'): IDelverFindingWire {
+	return {
+		id,
+		at: 1_700_000_000_100,
+		author: { kind: 'model', id: 'test-model' },
+		title: 'Embedded command-and-control endpoint',
+		description: 'The function constructs a fixed network endpoint before connecting.',
+		severity: 'suspicious',
+		confidence: 0.87,
+		status: 'proposed',
+		anchors: [{ kind: 'image', contentHash, rva: '0x1000' }],
+		evidence: [{
+			kind: 'range',
+			anchor: { kind: 'image', contentHash, rva: '0x1000' },
+			endRva: '0x1010',
+			description: 'Instructions load the endpoint string and call the connect wrapper.',
+			sourceCallIds: [],
+		}],
+		provenance: { capability: 'delver_report_finding', callId: 'call-1' },
+	};
+}
+
+function toolCall(contentHash = HASH_A, callId = 'call-decompile-1'): IDelverToolCallRecordWire {
+	return {
+		callId,
+		capability: 'delver_decompile',
+		contentHash,
+		caller: { kind: 'model', id: 'test-model' },
+		startedAt: 1_700_000_000_000,
+		finishedAt: 1_700_000_000_025,
+		requestJson: '{"address":"0x1000"}',
+		resultJson: '{"ok":true}',
+	};
+}
+
+function findingDecision(contentHash = HASH_A, findingId = 'finding-1', id = 'decision-1'): IDelverFindingDecisionWire {
+	return {
+		id,
+		findingId,
+		contentHash,
+		at: 1_700_000_000_200,
+		author: { kind: 'human', id: 'analyst' },
+		outcome: 'accepted',
 	};
 }
 
@@ -65,6 +113,9 @@ suite('DelverProjectStoreService', () => {
 			}],
 		});
 		await service.appendInterpretations(created.projectId, [edit()]);
+		await service.appendToolCalls(created.projectId, [toolCall()]);
+		await service.appendFindings(created.projectId, [finding()]);
+		await service.appendFindingDecisions(created.projectId, [findingDecision()]);
 		await service.close(created.projectId);
 
 		const reopened = await service.open(path, HASH_A);
@@ -81,9 +132,12 @@ suite('DelverProjectStoreService', () => {
 			strings: snapshot.strings,
 			decompiledFunctions: snapshot.decompiledFunctions,
 			interpretations: snapshot.interpretations,
+			findings: snapshot.findings,
+			findingDecisions: snapshot.findingDecisions,
+			toolCalls: snapshot.toolCalls,
 			containsPeHeader: databaseBytes.includes(Buffer.from('MZThis must not be persisted')),
 		}, {
-			metadata: { ...target(), schemaVersion: 2, currentRevisionId: HASH_A, createdAt: 0, updatedAt: 0 },
+			metadata: { ...target(), schemaVersion: 5, currentRevisionId: HASH_A, createdAt: 0, updatedAt: 0 },
 			imageInfo: JSON.stringify({ architecture: 'x86_64' }),
 			functions: JSON.stringify({ functions: [{ rva: '0x1000' }, { rva: '0x2000' }] }),
 			imports: JSON.stringify({ modules: [] }),
@@ -97,6 +151,9 @@ suite('DelverProjectStoreService', () => {
 				serialized: JSON.stringify({ schemaVersion: 1, functionRva: '0x2000', text: 'return 1;' }),
 			}],
 			interpretations: [edit()],
+			findings: [finding()],
+			findingDecisions: [findingDecision()],
+			toolCalls: [toolCall()],
 			containsPeHeader: false,
 		});
 	});
@@ -133,11 +190,28 @@ suite('DelverProjectStoreService', () => {
 		const second = await service.create(join(testRoot, 'second.delverdb'), target());
 		const different = await service.create(join(testRoot, 'different.delverdb'), target(HASH_B));
 		await service.appendInterpretations(first.projectId, [edit()]);
+		await service.appendFindings(first.projectId, [finding()]);
 
 		assert.strictEqual(await service.copyInterpretations(first.projectId, second.projectId), 1);
 		assert.deepStrictEqual((await service.loadSnapshot(second.projectId)).interpretations, [edit()]);
 		await assert.rejects(() => service.copyInterpretations(first.projectId, different.projectId), /different target bytes/);
 		await assert.rejects(() => service.appendInterpretations(different.projectId, [edit()]), /different target bytes/);
+		await assert.rejects(() => service.appendFindings(different.projectId, [finding()]), /different target bytes/);
+		await assert.rejects(() => service.appendToolCalls(different.projectId, [toolCall()]), /different target bytes/);
+		await service.appendToolCalls(first.projectId, [toolCall()]);
+		await service.appendToolCalls(first.projectId, [toolCall()]);
+		await assert.rejects(() => service.appendToolCalls(first.projectId, [{ ...toolCall(), resultJson: '{"ok":false}' }]), /conflicts with an existing record/);
+		await assert.rejects(() => service.appendFindings(first.projectId, [finding(), finding()]), /duplicate ids/);
+		await assert.rejects(() => service.appendFindingDecisions(first.projectId, [findingDecision(), findingDecision()]), /duplicate ids/);
+		await service.appendFindingDecisions(first.projectId, [findingDecision()]);
+		await service.appendFindingDecisions(first.projectId, [findingDecision()]);
+		await assert.rejects(() => service.appendFindingDecisions(first.projectId, [{
+			...findingDecision(), id: 'conflicting-decision', outcome: 'rejected',
+		}]), /already been decided/);
+		assert.deepStrictEqual({
+			findings: (await service.loadSnapshot(first.projectId)).findings,
+			decisions: (await service.loadSnapshot(first.projectId)).findingDecisions,
+		}, { findings: [finding()], decisions: [findingDecision()] });
 
 		await service.close(first.projectId);
 		await service.close(second.projectId);
@@ -161,10 +235,13 @@ suite('DelverProjectStoreService', () => {
 		const project = await service.create(join(testRoot, 'revisions.delverdb'), target());
 		await service.saveSnapshot(project.projectId, { functions: '{"build":"old"}' });
 		await service.appendInterpretations(project.projectId, [edit(HASH_A)]);
+		await service.appendFindings(project.projectId, [finding(HASH_A, 'old-finding')]);
+		await service.appendFindingDecisions(project.projectId, [findingDecision(HASH_A, 'old-finding', 'old-decision')]);
 		const next = await service.addRevision(project.projectId, {
 			...target(HASH_B), displayName: 'sample-2.exe', sourcePath: 'C:\\samples\\sample-2.exe', byteLength: 8192,
 		}, { functions: '{"build":"new"}' });
 		await service.appendInterpretations(project.projectId, [edit(HASH_B)]);
+		await service.appendFindings(project.projectId, [finding(HASH_B, 'new-finding')]);
 
 		const revisions = await service.listRevisions(project.projectId);
 		const oldSnapshot = await service.loadSnapshot(project.projectId, HASH_A);
@@ -176,6 +253,8 @@ suite('DelverProjectStoreService', () => {
 			old: { hash: oldSnapshot.metadata.contentHash, functions: oldSnapshot.functions },
 			current: { hash: newSnapshot.metadata.contentHash, functions: newSnapshot.functions },
 			interpretationHashes: [oldSnapshot.interpretations[0]?.anchor.contentHash, newSnapshot.interpretations[0]?.anchor.contentHash],
+			findingHashes: [oldSnapshot.findings[0]?.anchors[0]?.contentHash, newSnapshot.findings[0]?.anchors[0]?.contentHash],
+			decisionHashes: [oldSnapshot.findingDecisions[0]?.contentHash, newSnapshot.findingDecisions[0]?.contentHash],
 		}, {
 			revisions: [
 				{ ...target(), revisionId: HASH_A, createdAt: 0 },
@@ -184,6 +263,8 @@ suite('DelverProjectStoreService', () => {
 			old: { hash: HASH_A, functions: '{"build":"old"}' },
 			current: { hash: HASH_B, functions: '{"build":"new"}' },
 			interpretationHashes: [HASH_A, HASH_B],
+			findingHashes: [HASH_A, HASH_B],
+			decisionHashes: [HASH_A, undefined],
 		});
 	});
 
@@ -240,13 +321,19 @@ suite('DelverProjectStoreService', () => {
 			functions: snapshot.functions,
 			decompiledFunctions: snapshot.decompiledFunctions,
 			interpretations: snapshot.interpretations,
+			findings: snapshot.findings,
+			findingDecisions: snapshot.findingDecisions,
+			toolCalls: snapshot.toolCalls,
 			revisions: revisions.map(revision => ({ ...revision, createdAt: 0 })),
 		}, {
-			schemaVersion: 2,
+			schemaVersion: 5,
 			currentRevisionId: HASH_A,
 			functions: '{"legacy":true}',
 			decompiledFunctions: [{ backendId: 'ghidra', backendVersion: '12.1', functionRva: '0x1000', serialized: '{"text":"legacy"}' }],
 			interpretations: [edit()],
+			findings: [],
+			findingDecisions: [],
+			toolCalls: [],
 			revisions: [{ ...target(), revisionId: HASH_A, createdAt: 0 }],
 		});
 	});
@@ -273,8 +360,13 @@ async function createSchemaV1Project(path: string): Promise<void> {
 		INSERT INTO project_metadata VALUES (1, '${HASH_A}', 'sample.exe', 'C:\\samples\\sample.exe', 4096, 100, 200);
 		INSERT INTO analysis_snapshots VALUES ('functions', '{"legacy":true}', 200);
 		INSERT INTO decompiled_functions VALUES ('ghidra', '12.1', '0x1000', '{"text":"legacy"}', 200);
-		INSERT INTO interpretations (seq, payload, created_at) VALUES (1, '${JSON.stringify(edit()).replaceAll("'", "''")}', 200);
+		INSERT INTO interpretations (seq, payload, created_at) VALUES (1, '${escapeSql(JSON.stringify(edit()))}', 200);
 		PRAGMA user_version = 1;
 	`, error => error ? reject(error) : resolvePromise()));
 	await new Promise<void>((resolvePromise, reject) => db.close(error => error ? reject(error) : resolvePromise()));
+}
+
+function escapeSql(value: string): string {
+	const quote = String.fromCharCode(39);
+	return value.replaceAll(quote, quote.repeat(2));
 }

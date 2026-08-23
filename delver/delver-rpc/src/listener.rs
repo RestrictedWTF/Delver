@@ -306,6 +306,76 @@ mod tests {
 
 	#[cfg(windows)]
 	#[test]
+	fn named_pipe_client_can_write_while_its_reader_waits() {
+		use std::sync::mpsc;
+		use std::time::Duration;
+
+		let endpoint = format!("pipe://delver-duplex-test-{}", std::process::id());
+		let listener = Listener::bind(&endpoint).expect("bind listener");
+		let (shutdown_sender, shutdown_receiver) = mpsc::sync_channel(1);
+		let server = thread::spawn(move || {
+			let (mut reader, mut writer, shutdown) =
+				listener.accept_shutdownable().expect("accept");
+			shutdown_sender.send(shutdown).expect("publish shutdown");
+			for (request, response) in [(b"first", b"reply"), (b"again", b"final")] {
+				let mut received = [0_u8; 5];
+				reader.read_exact(&mut received).expect("server read");
+				assert_eq!(&received, request);
+				writer.write_all(response).expect("server write");
+				writer.flush().expect("server flush");
+			}
+		});
+
+		let (mut reader, mut writer) = connect(&endpoint).expect("connect");
+		let shutdown = shutdown_receiver
+			.recv_timeout(Duration::from_secs(2))
+			.expect("receive shutdown");
+		writer.write_all(b"first").expect("first client write");
+		writer.flush().expect("first client flush");
+
+		let (waiting_sender, waiting_receiver) = mpsc::sync_channel(1);
+		let (responses_sender, responses_receiver) = mpsc::sync_channel(1);
+		let reader_thread = thread::spawn(move || {
+			let mut first = [0_u8; 5];
+			reader.read_exact(&mut first).expect("first client read");
+			waiting_sender.send(()).expect("signal second read");
+			let mut second = [0_u8; 5];
+			reader.read_exact(&mut second).expect("second client read");
+			responses_sender
+				.send((first, second))
+				.expect("publish responses");
+		});
+		waiting_receiver
+			.recv_timeout(Duration::from_secs(2))
+			.expect("client reader did not reach the second read");
+		thread::sleep(Duration::from_millis(25));
+
+		let (write_sender, write_receiver) = mpsc::sync_channel(1);
+		let writer_thread = thread::spawn(move || {
+			let result = writer.write_all(b"again").and_then(|()| writer.flush());
+			let _ = write_sender.send(result);
+		});
+		let write_result = write_receiver.recv_timeout(Duration::from_secs(2));
+		if write_result.is_err() {
+			shutdown();
+			let _ = writer_thread.join();
+			let _ = reader_thread.join();
+			let _ = server.join();
+			panic!("a pending client read blocked the next client write");
+		}
+		write_result.unwrap().expect("second client write");
+		let (first, second) = responses_receiver
+			.recv_timeout(Duration::from_secs(2))
+			.expect("receive client responses");
+
+		assert_eq!((&first, &second), (b"reply", b"final"));
+		writer_thread.join().expect("writer thread");
+		reader_thread.join().expect("reader thread");
+		server.join().expect("server thread");
+	}
+
+	#[cfg(windows)]
+	#[test]
 	fn bind_reserves_first_named_pipe_instance() {
 		let endpoint = format!("pipe://delver-reservation-test-{}", std::process::id());
 		let _listener = Listener::bind(&endpoint).expect("bind first listener");

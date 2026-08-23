@@ -7,6 +7,7 @@ import * as dom from '../../../../base/browser/dom.js';
 import { Dimension } from '../../../../base/browser/dom.js';
 import { ITableRenderer, ITableVirtualDelegate } from '../../../../base/browser/ui/table/table.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
+import { onUnexpectedError } from '../../../../base/common/errors.js';
 import { DisposableStore, MutableDisposable } from '../../../../base/common/lifecycle.js';
 import { localize } from '../../../../nls.js';
 import { IStringWire, StringEncodingWire } from '../../../../platform/delver/common/protocol.generated.js';
@@ -17,13 +18,16 @@ import { ITelemetryService } from '../../../../platform/telemetry/common/telemet
 import { editorBackground } from '../../../../platform/theme/common/colorRegistry.js';
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
-import { IEditorOpenContext } from '../../../common/editor.js';
+import { EditorsOrder, IEditorOpenContext } from '../../../common/editor.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
+import { IEditorService } from '../../../services/editor/common/editorService.js';
 import {
 	FocusReason,
 	IDelverFocusService,
 } from '../../../services/delver/common/delverFocusService.js';
 import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
+import { DELVER_NAVIGATION_ORIGIN } from '../../delverListing/browser/delverListingContext.js';
+import { DelverListingInput } from '../../delverListing/browser/delverListingInput.js';
 import { DELVER_STRINGS_EDITOR_ID, DelverStringsInput } from './delverStringsInput.js';
 
 /** Identifies this view on the focus bus, so it can ignore its own echo. */
@@ -58,6 +62,7 @@ export class DelverStringsEditor extends EditorPane {
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 		@IDelverSessionService private readonly sessionService: IDelverSessionService,
 		@IDelverFocusService private readonly focusService: IDelverFocusService,
+		@IEditorService private readonly editorService: IEditorService,
 	) {
 		super(DelverStringsEditor.ID, group, telemetryService, themeService, storageService);
 	}
@@ -196,10 +201,33 @@ export class DelverStringsEditor extends EditorPane {
 			}
 		}));
 
+		store.add(table.onDidOpen(e => {
+			if (!e.element || e.browserEvent?.type !== 'dblclick') {
+				return;
+			}
+			void this.openListingAt(e.element).catch(onUnexpectedError);
+		}));
+
 		store.add(dom.addDisposableListener(this.filterInput, dom.EventType.INPUT, () => this.applyFilter()));
 		if (this.dimension) {
 			this.layout(this.dimension);
 		}
+	}
+
+	private async openListingAt(row: IStringWire): Promise<void> {
+		const session = this.sessionService.activeSession;
+		if (!session) {
+			return;
+		}
+		const existing = this.editorService.getEditors(EditorsOrder.SEQUENTIAL)
+			.map(identifier => identifier.editor)
+			.find((editor): editor is DelverListingInput => editor instanceof DelverListingInput && editor.targetPath === session.targetPath);
+		await this.editorService.openEditor(existing ?? new DelverListingInput(session.targetPath), { pinned: true });
+		this.focusService.setFocus(
+			{ location: { space: 'Image', address: BigInt(row.rva) } },
+			DELVER_NAVIGATION_ORIGIN,
+			FocusReason.User,
+		);
 	}
 
 	/**

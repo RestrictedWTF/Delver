@@ -7,8 +7,9 @@ import './media/delverListing.css';
 // Registers the listing's semantic colors; the CSS above reads them as variables.
 import './delverListingColors.js';
 
+import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { Codicon } from '../../../../base/common/codicons.js';
-import { isCancellationError } from '../../../../base/common/errors.js';
+import { isCancellationError, onUnexpectedError } from '../../../../base/common/errors.js';
 import { localize2 } from '../../../../nls.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
@@ -18,10 +19,13 @@ import { IDialogService, IFileDialogService } from '../../../../platform/dialogs
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
+import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../browser/editor.js';
+import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { EditorExtensions, EditorsOrder } from '../../../common/editor.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
+import { ISearchService, QueryType } from '../../../services/search/common/search.js';
 import {
 	DELVER_VIEW_CONTAINER,
 	DELVER_VIEW_CONTAINER_ID,
@@ -89,9 +93,11 @@ class OpenTargetAction extends Action2 {
 
 	async run(accessor: ServicesAccessor): Promise<void> {
 		const fileDialogService = accessor.get(IFileDialogService);
+		const dialogService = accessor.get(IDialogService);
 		const editorService = accessor.get(IEditorService);
 		const viewsService = accessor.get(IViewsService);
 		const sessionService = accessor.get(IDelverSessionService);
+		const projectOpenServices = { dialogService, editorService, viewsService, sessionService };
 
 		const result = await fileDialogService.showOpenDialog({
 			canSelectFiles: true,
@@ -112,7 +118,7 @@ class OpenTargetAction extends Action2 {
 
 		const targetPath = result[0].fsPath;
 		if (targetPath.toLowerCase().endsWith('.delverdb')) {
-			await openDelverProject(accessor, targetPath);
+			await openDelverProject(projectOpenServices, targetPath);
 			return;
 		}
 		let forceReload = false;
@@ -154,7 +160,14 @@ class OpenProjectAction extends Action2 {
 	}
 
 	async run(accessor: ServicesAccessor): Promise<void> {
-		const result = await accessor.get(IFileDialogService).showOpenDialog({
+		const fileDialogService = accessor.get(IFileDialogService);
+		const services: IDelverProjectOpenServices = {
+			dialogService: accessor.get(IDialogService),
+			editorService: accessor.get(IEditorService),
+			viewsService: accessor.get(IViewsService),
+			sessionService: accessor.get(IDelverSessionService),
+		};
+		const result = await fileDialogService.showOpenDialog({
 			title: localize2('delverOpenProjectDialog', 'Open Delver Project').value,
 			openLabel: localize2('delverOpenProjectLabel', 'Open Project').value,
 			canSelectFiles: true,
@@ -164,23 +177,57 @@ class OpenProjectAction extends Action2 {
 			availableFileSystems: ['file'],
 		});
 		if (result?.[0]) {
-			await openDelverProject(accessor, result[0].fsPath);
+			await openDelverProject(services, result[0].fsPath);
 		}
 	}
 }
 
-async function openDelverProject(accessor: ServicesAccessor, projectPath: string): Promise<void> {
+interface IDelverProjectOpenServices {
+	readonly dialogService: IDialogService;
+	readonly editorService: IEditorService;
+	readonly viewsService: IViewsService;
+	readonly sessionService: IDelverSessionService;
+}
+
+async function openDelverProject(services: IDelverProjectOpenServices, projectPath: string): Promise<void> {
 	try {
-		await accessor.get(IDelverSessionService).openProject(projectPath);
-		await closeDelverEditors(accessor.get(IEditorService), () => true);
-		await accessor.get(IViewsService).openViewContainer(DELVER_VIEW_CONTAINER_ID, false);
+		await services.sessionService.openProject(projectPath);
+		await closeDelverEditors(services.editorService, () => true);
+		await services.viewsService.openViewContainer(DELVER_VIEW_CONTAINER_ID, false);
 	} catch (error) {
 		if (!isCancellationError(error)) {
-			await accessor.get(IDialogService).error(
+			await services.dialogService.error(
 				localize2('delverOpenProjectFailed', 'Could Not Open Delver Project').value,
 				error instanceof Error ? error.message : String(error),
 			);
 		}
+	}
+}
+
+/** Saves the active analysis to its current project or asks for a project name. */
+class SaveProjectAction extends Action2 {
+	constructor() {
+		super({
+			id: 'delver.project.save',
+			title: localize2('delverSaveProject', 'Save Project'),
+			category: localize2('delverCategory', 'Delver'),
+			f1: true,
+			icon: Codicon.save,
+			precondition: DELVER_TARGET_OPEN,
+			menu: [{
+				id: MenuId.ViewContainerTitle,
+				when: ContextKeyExpr.and(
+					ContextKeyExpr.equals('viewContainer', DELVER_VIEW_CONTAINER_ID),
+					DELVER_TARGET_OPEN,
+				),
+				group: 'navigation',
+				order: 3,
+			}],
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		await accessor.get(IDelverSessionService).saveProject();
 	}
 }
 
@@ -202,13 +249,16 @@ class LocateTargetAction extends Action2 {
 					DELVER_TARGET_ATTACHED.toNegated(),
 				),
 				group: 'navigation',
-				order: 3,
+				order: 4,
 			}],
 		});
 	}
 
 	async run(accessor: ServicesAccessor): Promise<void> {
-		const result = await accessor.get(IFileDialogService).showOpenDialog({
+		const fileDialogService = accessor.get(IFileDialogService);
+		const sessionService = accessor.get(IDelverSessionService);
+		const dialogService = accessor.get(IDialogService);
+		const result = await fileDialogService.showOpenDialog({
 			title: localize2('delverLocateTargetDialog', 'Locate Matching Target').value,
 			openLabel: localize2('delverAttachTargetLabel', 'Attach Target').value,
 			canSelectFiles: true,
@@ -219,9 +269,9 @@ class LocateTargetAction extends Action2 {
 			return;
 		}
 		try {
-			await accessor.get(IDelverSessionService).attachTarget(result[0].fsPath);
+			await sessionService.attachTarget(result[0].fsPath);
 		} catch (error) {
-			await accessor.get(IDialogService).error(
+			await dialogService.error(
 				localize2('delverAttachTargetFailed', 'Could Not Attach Target').value,
 				error instanceof Error ? error.message : String(error),
 			);
@@ -246,17 +296,18 @@ class CloseProjectAction extends Action2 {
 					DELVER_TARGET_OPEN,
 				),
 				group: 'navigation',
-				order: 4,
+				order: 5,
 			}],
 		});
 	}
 
 	async run(accessor: ServicesAccessor): Promise<void> {
 		const sessionService = accessor.get(IDelverSessionService);
+		const editorService = accessor.get(IEditorService);
 		if (!await sessionService.closeTarget()) {
 			return;
 		}
-		await closeDelverEditors(accessor.get(IEditorService), () => true);
+		await closeDelverEditors(editorService, () => true);
 	}
 }
 
@@ -294,7 +345,7 @@ class ResetViewsAction extends Action2 {
 				id: MenuId.ViewContainerTitle,
 				when: ContextKeyExpr.equals('viewContainer', DELVER_VIEW_CONTAINER_ID),
 				group: 'navigation',
-				order: 5,
+				order: 6,
 			}],
 		});
 	}
@@ -325,6 +376,50 @@ class ResetViewsAction extends Action2 {
 	}
 }
 
+/** Opens the sole portable project found anywhere in the local workspace. */
+class DelverProjectAutoOpenContribution {
+	constructor(
+		@IWorkspaceContextService workspaceContextService: IWorkspaceContextService,
+		@ISearchService searchService: ISearchService,
+		@IDialogService dialogService: IDialogService,
+		@IEditorService editorService: IEditorService,
+		@IViewsService viewsService: IViewsService,
+		@IDelverSessionService sessionService: IDelverSessionService,
+	) {
+		void this.autoOpen(workspaceContextService, searchService, {
+			dialogService,
+			editorService,
+			viewsService,
+			sessionService,
+		}).catch(onUnexpectedError);
+	}
+
+	private async autoOpen(
+		workspaceContextService: IWorkspaceContextService,
+		searchService: ISearchService,
+		services: IDelverProjectOpenServices,
+	): Promise<void> {
+		if (services.sessionService.activeSession) {
+			return;
+		}
+		const folders = workspaceContextService.getWorkspace().folders.filter(folder => folder.uri.scheme === 'file');
+		if (folders.length === 0) {
+			return;
+		}
+		const result = await searchService.fileSearch({
+			type: QueryType.File,
+			folderQueries: folders.map(folder => ({ folder: folder.uri })),
+			filePattern: '**/*.delverdb',
+			shouldGlobMatchFilePattern: true,
+			maxResults: 2,
+		}, CancellationToken.None);
+		if (result.results.length !== 1 || services.sessionService.activeSession) {
+			return;
+		}
+		await openDelverProject(services, result.results[0].resource.fsPath);
+	}
+}
+
 /**
  * Opens the listing for the target already open, without a file dialog.
  *
@@ -340,6 +435,7 @@ CommandsRegistry.registerCommand('delver.listing.openCurrent', async (accessor: 
 
 registerAction2(OpenTargetAction);
 registerAction2(OpenProjectAction);
+registerAction2(SaveProjectAction);
 registerAction2(LocateTargetAction);
 registerAction2(CloseProjectAction);
 registerAction2(ResetViewsAction);
@@ -358,3 +454,9 @@ registerAction2(UndoInterpretationAction);
 registerAction2(RevertAuthorAction);
 registerAction2(ExportInterpretationAction);
 registerAction2(ImportInterpretationAction);
+
+registerWorkbenchContribution2(
+	'delver.projectAutoOpen',
+	DelverProjectAutoOpenContribution,
+	WorkbenchPhase.AfterRestored,
+);

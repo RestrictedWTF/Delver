@@ -10,7 +10,9 @@ import {
 	IGetImageInfoResult,
 	IGetImportsResult,
 	IListingWindowResult,
+	IMomentWire,
 	IOpenImageResult,
+	IRangeWire,
 	IStringsResult,
 	IXrefsResult,
 } from './protocol.generated.js';
@@ -73,6 +75,16 @@ export interface IDelverDecompilerTargetPreparationWire {
 	readonly targetOpenMs: number;
 }
 
+/** JSON-safe bytes returned from one provider memory read. */
+export interface IDelverReadMemoryWire {
+	/** Lowercase hexadecimal bytes, with two characters per byte. */
+	readonly bytesHex: string;
+	/** Provider-confirmed readable ranges in the requested address space. */
+	readonly valid: readonly IRangeWire[];
+	/** Target moment at which the provider served the bytes. */
+	readonly servedMoment: IMomentWire;
+}
+
 /**
  * Analysis, as the renderer sees it.
  *
@@ -109,6 +121,9 @@ export interface IDelverAnalysisService {
 	 * Address of a row, as a `"0x..."` string.
 	 */
 	addressForRow(sessionId: AnalysisSessionId, row: number): Promise<string | undefined>;
+
+	/** Reads bounded raw bytes from the loaded image or original file space. */
+	readMemory(sessionId: AnalysisSessionId, space: 'image' | 'file', address: string, count: number): Promise<IDelverReadMemoryWire>;
 
 	/**
 	 * Detected functions, sorted by address.

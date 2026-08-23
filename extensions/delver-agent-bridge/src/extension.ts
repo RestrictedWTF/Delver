@@ -90,12 +90,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	context.subscriptions.push({ dispose: () => void bridge.dispose() });
 	try {
 		await bridge.start();
-	} catch {
-		if (activeBridge === bridge) {
-			activeBridge = undefined;
-		}
-		await bridge.dispose();
-		throw new Error('The Delver agent bridge could not be started safely.');
+	} catch (error) {
+		logBridgeStartupError(error);
+		const retry = setTimeout(() => void bridge.retry().catch(logBridgeStartupError), 1_000);
+		context.subscriptions.push({ dispose: () => clearTimeout(retry) });
 	}
 }
 
@@ -103,6 +101,11 @@ export async function deactivate(): Promise<void> {
 	const bridge = activeBridge;
 	activeBridge = undefined;
 	await bridge?.dispose();
+}
+
+function logBridgeStartupError(error: unknown): void {
+	const detail = error instanceof Error ? error.stack ?? error.message : String(error);
+	console.error(`Delver agent bridge startup failed. The extension remains active and will retry: ${detail}`);
 }
 
 /** Copies this window's pasteable stdio MCP recipe, or explains the one reason it has none. */
@@ -163,8 +166,8 @@ function describeUnavailableConfiguration(availability: Exclude<McpConfiguration
 			});
 		case 'no-root':
 			return vscode.l10n.t({
-				message: 'Open exactly one local folder before copying an external agent configuration.',
-				comment: 'Shown when the window has no workspace folder open.',
+				message: 'Open a folder in this window (File > Open Folder), then copy the Delver MCP configuration again.',
+				comment: 'Shown when the window has no workspace folder open. The menu path tells the user how to fix it.',
 			});
 		case 'multiple-roots':
 			return vscode.l10n.t({

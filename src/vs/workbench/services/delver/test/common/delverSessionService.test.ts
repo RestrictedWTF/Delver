@@ -5,13 +5,18 @@
 
 import * as assert from 'assert';
 import { CancellationError } from '../../../../../base/common/errors.js';
+import { Event } from '../../../../../base/common/event.js';
+import { URI } from '../../../../../base/common/uri.js';
 import { IPrompt, IPromptResult, IPromptResultWithCancel, IPromptWithCustomCancel, IPromptWithDefaultCancel } from '../../../../../platform/dialogs/common/dialogs.js';
 import { TestDialogService } from '../../../../../platform/dialogs/test/common/testDialogService.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { getSingletonServiceDescriptors } from '../../../../../platform/instantiation/common/extensions.js';
 import { IDelverAnalysisService } from '../../../../../platform/delver/common/delverAnalysisService.js';
+import { DelverFindingOutcome, IDelverFinding, IDelverFindingDecision, IDelverFindingDraft } from '../../../../../platform/delver/common/findings.js';
 import { IDelverProjectSnapshot } from '../../../../../platform/delver/common/delverProjectStoreService.js';
+import { IDelverToolCallRecord } from '../../../../../platform/delver/common/delverToolCall.js';
 import { MockContextKeyService } from '../../../../../platform/keybinding/test/common/mockKeybindingService.js';
+import { testWorkspace } from '../../../../../platform/workspace/test/common/testWorkspace.js';
 import { IDelverInterpretationService } from '../../common/delverInterpretationService.js';
 import {
 	DelverSessionService,
@@ -19,7 +24,7 @@ import {
 	IDelverSessionService,
 } from '../../common/delverSessionService.js';
 import { IDelverOpenedProject, IDelverProjectService } from '../../common/delverProjectService.js';
-import { TestLifecycleService } from '../../../../test/common/workbenchTestServices.js';
+import { TestContextService, TestLifecycleService } from '../../../../test/common/workbenchTestServices.js';
 import { ShutdownReason } from '../../../lifecycle/common/lifecycle.js';
 
 /** Records opens and closes so lifetime can be asserted. */
@@ -27,10 +32,14 @@ class FakeAnalysisService implements Partial<IDelverAnalysisService> {
 	readonly opened: string[] = [];
 	readonly closed: string[] = [];
 	contentHash: string | undefined = 'a'.repeat(64);
+	readonly openErrors = new Set<string>();
 	private next = 1;
 
 	async openImage(config: { kind: 'file'; path: string }) {
 		this.opened.push(config.path);
+		if (this.openErrors.has(config.path)) {
+			throw new Error('target unavailable');
+		}
 		return {
 			sessionId: `session-${this.next++}`,
 			image: {
@@ -67,6 +76,7 @@ class FakeInterpretationService implements Partial<IDelverInterpretationService>
 
 class FakeProjectLifecycleDelegate implements IDelverProjectService {
 	declare readonly _serviceBrand: undefined;
+	readonly onDidChangeFindings = Event.None;
 	readonly saved: string[] = [];
 	saveResult = true;
 	addRevisionResult = true;
@@ -77,6 +87,9 @@ class FakeProjectLifecycleDelegate implements IDelverProjectService {
 
 	async save(session: IDelverSession): Promise<boolean> {
 		this.saved.push(session.targetPath);
+		if (this.saveResult && !this.projectPaths.has(session.contentHash)) {
+			this.projectPaths.set(session.contentHash, 'C:\\projects\\saved.delverdb');
+		}
 		return this.saveResult;
 	}
 
@@ -109,6 +122,16 @@ class FakeProjectLifecycleDelegate implements IDelverProjectService {
 	}
 
 	async recordDecompilation(): Promise<void> { }
+	async recordToolCall(): Promise<void> { }
+	toolCallsFor(): readonly IDelverToolCallRecord[] { return []; }
+	toolCall(): IDelverToolCallRecord | undefined { return undefined; }
+
+	async reportFindings(_contentHash: string, _drafts: readonly IDelverFindingDraft[]): Promise<readonly IDelverFinding[]> { return []; }
+
+	findingsFor(): readonly IDelverFinding[] { return []; }
+	pendingFindings(): readonly IDelverFinding[] { return []; }
+	async resolveFindings(_contentHash: string, _findingIds: readonly string[], _outcome: DelverFindingOutcome): Promise<readonly IDelverFindingDecision[]> { return []; }
+	findingDecisionFor(): IDelverFindingDecision | undefined { return undefined; }
 
 	projectPath(contentHash: string): string | undefined { return this.projectPaths.get(contentHash); }
 
@@ -143,8 +166,34 @@ function createService(store: Pick<ReturnType<typeof ensureNoDisposablesAreLeake
 		dialog,
 		lifecycle,
 		new MockContextKeyService(),
+		new TestContextService(testWorkspace(URI.file('C:\\workspace'))),
 	));
 	return { service, analysis, interpretation, projectLifecycle, dialog, lifecycle };
+}
+
+function openedProject(contentHash: string, sourcePath: string): IDelverOpenedProject {
+	const snapshot: IDelverProjectSnapshot = {
+		metadata: {
+			schemaVersion: 5,
+			currentRevisionId: contentHash,
+			contentHash,
+			displayName: 'sample.exe',
+			sourcePath,
+			createdAt: 1,
+			updatedAt: 1,
+		},
+		interpretations: [],
+		findings: [],
+		findingDecisions: [],
+		toolCalls: [],
+	};
+	return {
+		path: 'C:\\workspace\\sample.delverdb',
+		contentHash,
+		displayName: 'sample.exe',
+		sourcePath,
+		snapshot,
+	};
 }
 
 suite('DelverSessionService', () => {
@@ -171,12 +220,24 @@ suite('DelverSessionService', () => {
 		);
 	});
 
+	test('saving the active project persists it and clears the dirty state', async () => {
+		const { service, projectLifecycle } = createService(store);
+		await service.openTarget('C:\\samples\\a.exe');
+
+		const saved = await service.saveProject();
+
+		assert.deepStrictEqual(
+			{ saved, calls: projectLifecycle.saved, path: service.projectPath, dirty: service.isProjectDirty },
+			{ saved: true, calls: ['C:\\samples\\a.exe'], path: 'C:\\projects\\saved.delverdb', dirty: false },
+		);
+	});
+
 	test('opening a project publishes saved categories without opening an analysis provider', async () => {
 		const { service, analysis, projectLifecycle } = createService(store);
 		const hash = 'b'.repeat(64);
 		const snapshot = {
 			metadata: {
-				schemaVersion: 1,
+				schemaVersion: 5,
 				currentRevisionId: 'revision-1',
 				contentHash: hash,
 				displayName: 'offline.exe',
@@ -185,6 +246,9 @@ suite('DelverSessionService', () => {
 				updatedAt: 1,
 			},
 			interpretations: [],
+			findings: [],
+			findingDecisions: [],
+			toolCalls: [],
 			functions: JSON.stringify({ functions: [{ rva: '0x1080' }] }),
 			strings: JSON.stringify({ strings: [], truncated: false }),
 		} as IDelverProjectSnapshot;
@@ -212,12 +276,64 @@ suite('DelverSessionService', () => {
 		});
 	});
 
+	test('opening a project automatically attaches its matching target from the workspace', async () => {
+		const { service, analysis, projectLifecycle } = createService(store);
+		const hash = 'b'.repeat(64);
+		const targetPath = 'C:\\workspace\\bin\\sample.exe';
+		analysis.contentHash = hash;
+		projectLifecycle.openedProject = openedProject(hash, targetPath);
+
+		const session = await service.openProject('C:\\workspace\\sample.delverdb');
+
+		assert.deepStrictEqual({
+			opened: analysis.opened,
+			closed: analysis.closed,
+			session: { id: session.sessionId, path: session.targetPath, projectPath: session.projectPath, hash: session.contentHash },
+			dirty: service.isProjectDirty,
+		}, {
+			opened: [targetPath],
+			closed: [],
+			session: { id: 'session-1', path: targetPath, projectPath: 'C:\\workspace\\sample.delverdb', hash },
+			dirty: false,
+		});
+	});
+
+	test('hash mismatch, unavailable target, or workspace escape leaves the project offline', async () => {
+		const mismatch = createService(store);
+		const projectHash = 'b'.repeat(64);
+		const mismatchPath = 'C:\\workspace\\bin\\changed.exe';
+		mismatch.analysis.contentHash = 'c'.repeat(64);
+		mismatch.projectLifecycle.openedProject = openedProject(projectHash, mismatchPath);
+		const mismatchedSession = await mismatch.service.openProject('C:\\workspace\\sample.delverdb');
+
+		const unavailable = createService(store);
+		const missingPath = 'C:\\workspace\\bin\\missing.exe';
+		unavailable.analysis.openErrors.add(missingPath);
+		unavailable.projectLifecycle.openedProject = openedProject(projectHash, missingPath);
+		const unavailableSession = await unavailable.service.openProject('C:\\workspace\\sample.delverdb');
+
+		const escaped = createService(store);
+		const escapedPath = 'C:\\workspace\\..\\outside.exe';
+		escaped.projectLifecycle.openedProject = openedProject(projectHash, escapedPath);
+		const escapedSession = await escaped.service.openProject('C:\\workspace\\sample.delverdb');
+
+		assert.deepStrictEqual({
+			mismatch: { id: mismatchedSession.sessionId, opened: mismatch.analysis.opened, closed: mismatch.analysis.closed },
+			unavailable: { id: unavailableSession.sessionId, opened: unavailable.analysis.opened, closed: unavailable.analysis.closed },
+			escaped: { id: escapedSession.sessionId, opened: escaped.analysis.opened },
+		}, {
+			mismatch: { id: undefined, opened: [mismatchPath], closed: ['session-1'] },
+			unavailable: { id: undefined, opened: [missingPath], closed: [] },
+			escaped: { id: undefined, opened: [] },
+		});
+	});
+
 	test('attaching mismatched bytes preserves the offline project session', async () => {
 		const { service, analysis, projectLifecycle } = createService(store);
 		const projectHash = 'b'.repeat(64);
 		const snapshot = {
 			metadata: {
-				schemaVersion: 1,
+				schemaVersion: 5,
 				currentRevisionId: 'revision-1',
 				contentHash: projectHash,
 				displayName: 'offline.exe',
@@ -225,6 +341,9 @@ suite('DelverSessionService', () => {
 				updatedAt: 1,
 			},
 			interpretations: [],
+			findings: [],
+			findingDecisions: [],
+			toolCalls: [],
 		} as IDelverProjectSnapshot;
 		projectLifecycle.openedProject = {
 			path: 'C:\\projects\\offline.delverdb',

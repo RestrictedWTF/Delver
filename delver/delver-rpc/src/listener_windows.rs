@@ -100,7 +100,7 @@ impl WindowsListenerImpl {
 
 		let read_file = unsafe { File::from_raw_handle(read_handle) };
 		let write_file = unsafe { File::from_raw_handle(write_handle) };
-		Ok((Box::new(read_file), Box::new(write_file)))
+		Ok((Box::new(PollingPipeReader(read_file)), Box::new(write_file)))
 	}
 
 	pub(crate) fn bind(endpoint: &Endpoint) -> Result<Self, ListenerError> {
@@ -178,8 +178,8 @@ impl WindowsListenerImpl {
 	}
 }
 
-/// Avoids holding a synchronous duplex pipe read while the relay's other
-/// thread needs to write through a duplicated handle for the same pipe object.
+/// Avoids holding a synchronous duplex pipe read while another thread needs to
+/// write through a duplicated handle for the same pipe object.
 struct PollingPipeReader(File);
 
 impl Read for PollingPipeReader {

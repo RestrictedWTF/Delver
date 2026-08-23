@@ -7,15 +7,18 @@ import * as assert from 'assert';
 import { CancellationToken, CancellationTokenSource } from '../../../../../base/common/cancellation.js';
 import { Emitter } from '../../../../../base/common/event.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { AnalysisSessionId, IDelverAnalysisService } from '../../../../../platform/delver/common/delverAnalysisService.js';
+import { AnalysisSessionId, IDelverAnalysisService, IDelverReadMemoryWire } from '../../../../../platform/delver/common/delverAnalysisService.js';
+import { createDelverFinding, IDelverFinding, IDelverFindingDraft } from '../../../../../platform/delver/common/findings.js';
 import { IDelverProjectSnapshot } from '../../../../../platform/delver/common/delverProjectStoreService.js';
-import { Anchor, IInterpretationAt } from '../../../../../platform/delver/common/interpretation.js';
+import { IDelverToolCallRecord } from '../../../../../platform/delver/common/delverToolCall.js';
+import { Anchor, EditOp, EditStatus, EditValue, IAuthor, IEdit, IInterpretationAt } from '../../../../../platform/delver/common/interpretation.js';
 import { STATIC_MOMENT } from '../../../../../platform/delver/common/moment.js';
 import {
 	FunctionSourceWire,
 	IFunctionsResult,
 	IFunctionWire,
 	IListingWindowResult,
+	MomentKindWire,
 	IStringsResult,
 	IXrefsResult,
 	StringEncodingWire,
@@ -78,7 +81,7 @@ const FUNCTIONS: readonly IFunctionWire[] = [
 function snapshotFor(contentHash = CONTENT_HASH, revisionId = REVISION_ID): IDelverProjectSnapshot {
 	return {
 		metadata: {
-			schemaVersion: 2,
+			schemaVersion: 5,
 			contentHash,
 			currentRevisionId: revisionId,
 			displayName: 'sample.exe',
@@ -86,6 +89,9 @@ function snapshotFor(contentHash = CONTENT_HASH, revisionId = REVISION_ID): IDel
 			updatedAt: 2,
 		},
 		interpretations: [],
+		findings: [],
+		findingDecisions: [],
+		toolCalls: [],
 	};
 }
 
@@ -131,6 +137,10 @@ class FakeSessionService implements Partial<IDelverSessionService> {
 		return this.stringsResult;
 	}
 
+	markProjectDirty(): void {
+		this.isProjectDirty = true;
+	}
+
 	dispose(): void {
 		this.emitter.dispose();
 	}
@@ -138,6 +148,11 @@ class FakeSessionService implements Partial<IDelverSessionService> {
 
 class FakeAnalysisService implements Partial<IDelverAnalysisService> {
 	readonly calls: string[] = [];
+	memoryResult: IDelverReadMemoryWire = {
+		bytesHex: '78563412ffeeddccaa',
+		valid: [{ start: '0x1000', end: '0x1009' }],
+		servedMoment: { kind: MomentKindWire.Static, epoch: 0 },
+	};
 
 	async rowForAddress(_sessionId: AnalysisSessionId, rva: string): Promise<number | undefined> {
 		this.calls.push(`rowForAddress:${rva}`);
@@ -147,6 +162,11 @@ class FakeAnalysisService implements Partial<IDelverAnalysisService> {
 	async listingWindow(_sessionId: AnalysisSessionId, startRow: number, count: number): Promise<IListingWindowResult> {
 		this.calls.push(`listingWindow:${startRow}:${count}`);
 		return { rows: [], total_rows: 0 };
+	}
+
+	async readMemory(_sessionId: AnalysisSessionId, space: 'image' | 'file', address: string, count: number): Promise<IDelverReadMemoryWire> {
+		this.calls.push(`readMemory:${space}:${address}:${count}`);
+		return this.memoryResult;
 	}
 
 	async xrefsTo(_sessionId: AnalysisSessionId, rva: string): Promise<IXrefsResult> {
@@ -201,6 +221,8 @@ class FakeDecompilerService implements Partial<IDelverDecompilerService> {
 
 class FakeInterpretationService implements Partial<IDelverInterpretationService> {
 	private readonly entries = new Map<string, IInterpretationAt>();
+	readonly proposals: IEdit[] = [];
+	beforePropose: (() => void) | undefined;
 
 	author(contentHash: string, rva: bigint, value: IInterpretationAt): void {
 		this.entries.set(`${contentHash}:${rva.toString(16)}`, value);
@@ -220,13 +242,65 @@ class FakeInterpretationService implements Partial<IDelverInterpretationService>
 		}
 		return names;
 	}
+
+	async propose(anchor: Anchor, op: EditOp, value: EditValue, author: IAuthor): Promise<IEdit> {
+		this.beforePropose?.();
+		const edit: IEdit = {
+			seq: this.proposals.length + 1,
+			at: 1000 + this.proposals.length,
+			author,
+			anchor,
+			op,
+			value,
+			status: EditStatus.Proposed,
+		};
+		this.proposals.push(edit);
+		return edit;
+	}
+
+	pendingProposals(contentHash: string): readonly IEdit[] {
+		return this.proposals.filter(edit => edit.anchor.contentHash === contentHash);
+	}
 }
 
 class FakeProjectService implements Partial<IDelverProjectService> {
 	snapshot: IDelverProjectSnapshot | undefined = snapshotFor();
+	namedPath: string | undefined;
+	readonly findings: IDelverFinding[] = [];
+	readonly toolCalls: IDelverToolCallRecord[] = [];
 
 	projectSnapshot(contentHash: string): IDelverProjectSnapshot | undefined {
 		return this.snapshot?.metadata.contentHash === contentHash ? this.snapshot : undefined;
+	}
+
+	projectPath(): string | undefined {
+		return this.namedPath;
+	}
+
+	async recordToolCall(record: IDelverToolCallRecord): Promise<void> {
+		this.toolCalls.push(record);
+	}
+
+	toolCallsFor(contentHash: string): readonly IDelverToolCallRecord[] {
+		return this.toolCalls.filter(call => call.contentHash === contentHash);
+	}
+
+	toolCall(contentHash: string, callId: string): IDelverToolCallRecord | undefined {
+		return this.toolCalls.find(call => call.contentHash === contentHash && call.callId === callId);
+	}
+
+	async reportFindings(_contentHash: string, drafts: readonly IDelverFindingDraft[]): Promise<readonly IDelverFinding[]> {
+		const reported = drafts.map((draft, index) => createDelverFinding(`finding-${this.findings.length + index + 1}`, 1000, draft));
+		this.findings.push(...reported);
+		return reported;
+	}
+
+	findingsFor(contentHash: string): readonly IDelverFinding[] {
+		return this.findings.filter(finding => finding.anchors.every(anchor => anchor.contentHash === contentHash));
+	}
+
+	pendingFindings(contentHash: string): readonly IDelverFinding[] {
+		return this.findingsFor(contentHash);
 	}
 }
 
@@ -299,6 +373,19 @@ interface IFunctionsPayload {
 	readonly total: number;
 	readonly totalUnfiltered: number;
 	readonly functions: readonly { readonly rva: string; readonly endRva?: string; readonly name: string; readonly authored: boolean }[];
+}
+
+interface IReadBytesPayload {
+	readonly space: string;
+	readonly address: string;
+	readonly requestedByteCount: number;
+	readonly byteCount: number;
+	readonly bytesHex: string;
+	readonly validRanges: readonly { readonly start: string; readonly end: string }[];
+	readonly format: string;
+	readonly elementWidth: number;
+	readonly values?: readonly string[];
+	readonly trailingByteCount?: number;
 }
 
 interface ILookupPayload {
@@ -659,6 +746,99 @@ suite('DelverAgentService', () => {
 		});
 	});
 
+	test('reads exact image bytes and decodes bounded little-endian integers', async () => {
+		const { service, session, analysis } = createService(store);
+		session.activeSession = LIVE_SESSION;
+
+		const result = await service.invoke({
+			capability: 'delver_read_bytes',
+			args: { address: '0x1000', count: 9, format: 'u32le' },
+		}, CancellationToken.None);
+		const payload = payloadOf<IReadBytesPayload>(result);
+		const invalidSpace = await errorCode(service, { capability: 'delver_read_bytes', args: { address: '0x1000', space: 'virtual' } });
+		const invalidFormat = await errorCode(service, { capability: 'delver_read_bytes', args: { address: '0x1000', format: 'u128le' } });
+		analysis.memoryResult = {
+			bytesHex: '4d5a',
+			valid: [{ start: '0x1ff', end: '0x201' }],
+			servedMoment: { kind: MomentKindWire.Static, epoch: 0 },
+		};
+		const partial = await service.invoke({
+			capability: 'delver_read_bytes',
+			args: { address: '0x1ff', count: 4, space: 'file' },
+		}, CancellationToken.None);
+		analysis.memoryResult = {
+			bytesHex: '',
+			valid: [],
+			servedMoment: { kind: MomentKindWire.Static, epoch: 0 },
+		};
+		const unmapped = await errorCode(service, { capability: 'delver_read_bytes', args: { address: '0x900000', count: 1 } });
+
+		assert.deepStrictEqual({
+			payload,
+			completeness: result.completeness,
+			omitted: result.omitted,
+			provenance: result.provenance,
+			partial: {
+				payload: payloadOf<IReadBytesPayload>(partial),
+				completeness: partial.completeness,
+				omitted: partial.omitted,
+				provenance: partial.provenance,
+			},
+			calls: analysis.calls,
+			invalidSpace,
+			invalidFormat,
+			unmapped,
+		}, {
+			payload: {
+				space: 'image',
+				address: '0x1000',
+				requestedByteCount: 9,
+				byteCount: 9,
+				bytesHex: '78563412ffeeddccaa',
+				validRanges: [{ start: '0x1000', end: '0x1009' }],
+				format: 'u32le',
+				elementWidth: 4,
+				values: ['0x12345678', '0xccddeeff'],
+				trailingByteCount: 1,
+				servedMoment: { kind: 'static', epoch: 0 },
+			},
+			completeness: 'complete',
+			omitted: undefined,
+			provenance: [{
+				source: 'analysis',
+				detail: 'Raw bytes read from the loaded image.',
+				contentHash: CONTENT_HASH,
+				untrusted: true,
+				ranges: [{ start: '0x1000', end: '0x1009' }],
+			}],
+			partial: {
+				payload: {
+					space: 'file',
+					address: '0x1ff',
+					requestedByteCount: 4,
+					byteCount: 2,
+					bytesHex: '4d5a',
+					validRanges: [{ start: '0x1ff', end: '0x201' }],
+					format: 'hex',
+					elementWidth: 1,
+					servedMoment: { kind: 'static', epoch: 0 },
+				},
+				completeness: 'partial',
+				omitted: { count: 2, reason: 'The requested range extends beyond provider-backed bytes.' },
+				provenance: [{
+					source: 'analysis',
+					detail: 'Raw bytes read from the original file.',
+					contentHash: CONTENT_HASH,
+					untrusted: true,
+				}],
+			},
+			calls: ['readMemory:image:0x1000:9', 'readMemory:file:0x1ff:4', 'readMemory:image:0x900000:1'],
+			invalidSpace: 'INVALID_ARGUMENT',
+			invalidFormat: 'INVALID_ARGUMENT',
+			unmapped: 'ADDRESS_NOT_MAPPED',
+		});
+	});
+
 	test('marks strings untrusted and reports a truncated scan', async () => {
 		const { service, session } = createService(store);
 		session.activeSession = LIVE_SESSION;
@@ -718,6 +898,327 @@ suite('DelverAgentService', () => {
 			named: { name: 'decrypt_config', displayName: 'decrypt_config', authored: true },
 			unnamed: { name: undefined, displayName: 'SUB_2000', authored: false },
 		});
+	});
+
+	test('appends attributed rename, comment, and canonical tag proposals without materializing them', async () => {
+		const { service, session, interpretation } = createService(store);
+		session.activeSession = OFFLINE_SESSION;
+		interpretation.author(CONTENT_HASH, 0x1000n, { name: 'accepted_name' });
+		const caller = { kind: 'model' as const, id: '  mcp:analyst  ' };
+
+		const renamed = await service.invoke({
+			capability: 'delver_propose_rename',
+			caller,
+			args: { proposals: [{ address: '0x1000', name: ' decrypt_config ' }, { address: '0x2000', name: '' }] },
+		}, CancellationToken.None);
+		await service.invoke({
+			capability: 'delver_propose_comment',
+			caller,
+			args: { proposals: [{ address: '0x1000', comment: ' parses and decrypts config ' }] },
+		}, CancellationToken.None);
+		const tagged = await service.invoke({
+			capability: 'delver_propose_tag',
+			caller,
+			args: { proposals: [{ address: '0x1000', tags: [' reviewed ', 'crypto', '', 'crypto'] }] },
+		}, CancellationToken.None);
+
+		assert.deepStrictEqual({
+			rename: renamed.data,
+			tag: tagged.data,
+			acceptedInterpretation: interpretation.at({ kind: 'image', contentHash: CONTENT_HASH, rva: 0x1000n }),
+			stored: interpretation.proposals.map(edit => ({
+				address: toWireAddress(edit.anchor.rva),
+				op: edit.op,
+				value: edit.value,
+				status: edit.status,
+				author: edit.author,
+			})),
+			offline: session.activeSession?.sessionId,
+		}, {
+			rename: {
+				proposals: [{
+					seq: 1,
+					address: '0x1000',
+					op: 'rename',
+					value: 'decrypt_config',
+					status: 'proposed',
+					author: { kind: 'model', id: 'mcp:analyst' },
+				}, {
+					seq: 2,
+					address: '0x2000',
+					op: 'rename',
+					value: '',
+					status: 'proposed',
+					author: { kind: 'model', id: 'mcp:analyst' },
+				}],
+				pendingCount: 2,
+			},
+			tag: {
+				proposals: [{
+					seq: 4,
+					address: '0x1000',
+					op: 'tags',
+					value: ['crypto', 'reviewed'],
+					status: 'proposed',
+					author: { kind: 'model', id: 'mcp:analyst' },
+				}],
+				pendingCount: 4,
+			},
+			acceptedInterpretation: { name: 'accepted_name' },
+			stored: [
+				{ address: '0x1000', op: 'rename', value: 'decrypt_config', status: 'proposed', author: { kind: 'model', id: 'mcp:analyst' } },
+				{ address: '0x2000', op: 'rename', value: '', status: 'proposed', author: { kind: 'model', id: 'mcp:analyst' } },
+				{ address: '0x1000', op: 'comment', value: 'parses and decrypts config', status: 'proposed', author: { kind: 'model', id: 'mcp:analyst' } },
+				{ address: '0x1000', op: 'tags', value: ['crypto', 'reviewed'], status: 'proposed', author: { kind: 'model', id: 'mcp:analyst' } },
+			],
+			offline: undefined,
+		});
+	});
+
+	test('validates a complete proposal batch before appending any edit', async () => {
+		const { service, session, interpretation } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		const caller = { kind: 'model' as const, id: 'test-model' };
+
+		assert.deepStrictEqual({
+			missingCaller: await errorCode(service, {
+				capability: 'delver_propose_rename',
+				args: { proposals: [{ address: '0x1000', name: 'valid' }] },
+			}),
+			invalidSecondItem: await errorCode(service, {
+				capability: 'delver_propose_rename',
+				caller,
+				args: { proposals: [{ address: '0x1000', name: 'valid' }, { address: '0x2000', name: 42 }] },
+			}),
+			duplicateAddress: await errorCode(service, {
+				capability: 'delver_propose_tag',
+				caller,
+				args: { proposals: [{ address: '0x1000', tags: ['first'] }, { address: '4096', tags: ['second'] }] },
+			}),
+			appended: interpretation.proposals.length,
+		}, {
+			missingCaller: 'INVALID_ARGUMENT',
+			invalidSecondItem: 'INVALID_ARGUMENT',
+			duplicateAddress: 'INVALID_ARGUMENT',
+			appended: 0,
+		});
+	});
+
+	test('finishes a proposal batch when cancellation arrives after its commit boundary', async () => {
+		const { service, session, interpretation } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		const cancellation = new CancellationTokenSource();
+		interpretation.beforePropose = () => cancellation.cancel();
+
+		const result = await service.invoke({
+			capability: 'delver_propose_comment',
+			caller: { kind: 'model', id: 'test-model' },
+			args: { proposals: [
+				{ address: '0x1000', comment: 'first' },
+				{ address: '0x2000', comment: 'second' },
+			] },
+		}, cancellation.token);
+		const cancelled = cancellation.token.isCancellationRequested;
+		cancellation.dispose();
+
+		assert.deepStrictEqual({
+			cancelled,
+			appended: interpretation.proposals.length,
+			result: result.data,
+		}, {
+			cancelled: true,
+			appended: 2,
+			result: {
+				proposals: [{
+					seq: 1,
+					address: '0x1000',
+					op: 'comment',
+					value: 'first',
+					status: 'proposed',
+					author: { kind: 'model', id: 'test-model' },
+				}, {
+					seq: 2,
+					address: '0x2000',
+					op: 'comment',
+					value: 'second',
+					status: 'proposed',
+					author: { kind: 'model', id: 'test-model' },
+				}],
+				pendingCount: 2,
+			},
+		});
+	});
+
+	test('retains an evidence-backed finding with dispatcher and model provenance', async () => {
+		const { service, session, project } = createService(store);
+		session.activeSession = OFFLINE_SESSION;
+		project.namedPath = OFFLINE_SESSION.projectPath;
+
+		const result = await service.invoke({
+			capability: 'delver_report_finding',
+			caller: { kind: 'model', id: 'mcp:analyst' },
+			args: { findings: [{
+				title: ' Embedded configuration decryptor ',
+				description: ' The function decrypts a blob before parsing configuration entries. ',
+				severity: 'suspicious',
+				confidence: 0.92,
+				evidence: [{
+					address: '0x1000',
+					endAddress: '0x1040',
+					description: ' XOR loop transforms the embedded blob. ',
+				}, {
+					address: '0x1080',
+					description: ' The transformed buffer is passed to the configuration parser. ',
+				}],
+			}] },
+		}, CancellationToken.None);
+		const data = result.data as {
+			readonly findings: readonly { readonly id: string; readonly provenance: { readonly callId: string }; readonly evidence: readonly unknown[] }[];
+			readonly pendingCount: number;
+		};
+
+		assert.deepStrictEqual({
+			result: {
+				...data,
+				findings: data.findings.map(finding => ({ ...finding, idIsPresent: finding.id.length > 0, id: undefined })),
+			},
+			callIdMatches: data.findings[0].provenance.callId === result.callId,
+			stored: project.findings.map(finding => ({
+				title: finding.title,
+				description: finding.description,
+				severity: finding.severity,
+				confidence: finding.confidence,
+				status: finding.status,
+				author: finding.author,
+				anchors: finding.anchors.map(anchor => toWireAddress(anchor.rva)),
+					evidence: finding.evidence.map(entry => ({
+					address: toWireAddress(entry.anchor.rva),
+					endAddress: entry.endRva === undefined ? undefined : toWireAddress(entry.endRva),
+					description: entry.description,
+					sourceCallIds: entry.sourceCallIds,
+				})),
+				provenance: { ...finding.provenance, callIdMatches: finding.provenance.callId === result.callId, callId: undefined },
+			})),
+			dirty: session.isProjectDirty,
+		}, {
+			result: {
+				findings: [{
+					id: undefined,
+					title: 'Embedded configuration decryptor',
+					description: 'The function decrypts a blob before parsing configuration entries.',
+					severity: 'suspicious',
+					confidence: 0.92,
+					status: 'proposed',
+					author: { kind: 'model', id: 'mcp:analyst' },
+					evidence: [{ address: '0x1000', endAddress: '0x1040', description: 'XOR loop transforms the embedded blob.', sourceCallIds: [] }, {
+						address: '0x1080', description: 'The transformed buffer is passed to the configuration parser.', sourceCallIds: []
+					}],
+					provenance: { capability: 'delver_report_finding', callId: result.callId },
+					idIsPresent: true,
+				}],
+				pendingCount: 1,
+			},
+			callIdMatches: true,
+			stored: [{
+				title: 'Embedded configuration decryptor',
+				description: 'The function decrypts a blob before parsing configuration entries.',
+				severity: 'suspicious',
+				confidence: 0.92,
+				status: 'proposed',
+				author: { kind: 'model', id: 'mcp:analyst' },
+				anchors: ['0x1000', '0x1080'],
+				evidence: [{ address: '0x1000', endAddress: '0x1040', description: 'XOR loop transforms the embedded blob.', sourceCallIds: [] }, {
+					address: '0x1080', endAddress: undefined, description: 'The transformed buffer is passed to the configuration parser.', sourceCallIds: []
+				}],
+				provenance: { capability: 'delver_report_finding', callId: undefined, callIdMatches: true },
+			}],
+			dirty: false,
+		});
+	});
+
+	test('records project-bound calls and allows findings to cite prior results', async () => {
+		const { service, session, project } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		const source = await service.invoke({
+			capability: 'delver_get_interpretation',
+			caller: { kind: 'model', id: 'test-model' },
+			args: { address: '0x1000' },
+		}, CancellationToken.None);
+		await service.invoke({
+			capability: 'delver_report_finding',
+			caller: { kind: 'model', id: 'test-model' },
+			args: { findings: [{
+				title: 'Parser entry point', description: 'The function parses the header.', severity: 'info', confidence: 0.8,
+				evidence: [{ address: '0x1000', description: 'The interpretation supports the role.', sourceCallIds: [source.callId] }],
+			}] },
+		}, CancellationToken.None);
+
+		assert.deepStrictEqual({
+			capabilities: project.toolCalls.map(call => call.capability),
+			request: JSON.parse(project.toolCalls[0].requestJson),
+			cited: project.findings[0].evidence[0].sourceCallIds,
+		}, {
+			capabilities: ['delver_get_interpretation', 'delver_report_finding'],
+			request: { capability: 'delver_get_interpretation', caller: { kind: 'model', id: 'test-model' }, args: { address: '0x1000' } },
+			cited: [source.callId],
+		});
+	});
+
+	test('rejects an invalid finding batch before retaining any finding', async () => {
+		const { service, session, project } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		const caller = { kind: 'model' as const, id: 'test-model' };
+
+		assert.deepStrictEqual({
+			invalidSecondFinding: await errorCode(service, {
+				capability: 'delver_report_finding', caller, args: { findings: [{
+					title: 'Valid', description: 'Supported claim.', severity: 'info', confidence: 0.5,
+					evidence: [{ address: '0x1000', description: 'Supporting instruction.' }],
+				}, {
+					title: 'Invalid', description: 'Missing evidence.', severity: 'suspicious', confidence: 0.8, evidence: [],
+				}] },
+			}),
+			backwardsRange: await errorCode(service, {
+				capability: 'delver_report_finding', caller, args: { findings: [{
+					title: 'Invalid range', description: 'The range runs backwards.', severity: 'info', confidence: 0.1,
+					evidence: [{ address: '0x1010', endAddress: '0x1000', description: 'Impossible range.' }],
+				}] },
+			}),
+			unknownSourceCall: await errorCode(service, {
+				capability: 'delver_report_finding', caller, args: { findings: [{
+					title: 'Dangling evidence', description: 'The cited result does not exist.', severity: 'info', confidence: 0.1,
+					evidence: [{ address: '0x1000', description: 'Missing source.', sourceCallIds: ['missing-call'] }],
+				}] },
+			}),
+			retained: project.findings.length,
+			dirty: session.isProjectDirty,
+		}, {
+			invalidSecondFinding: 'INVALID_ARGUMENT',
+			backwardsRange: 'INVALID_ARGUMENT',
+			unknownSourceCall: 'INVALID_ARGUMENT',
+			retained: 0,
+			dirty: false,
+		});
+	});
+
+	test('marks an untitled project dirty after retaining a finding', async () => {
+		const { service, session, project } = createService(store);
+		session.activeSession = LIVE_SESSION;
+
+		await service.invoke({
+			capability: 'delver_report_finding',
+			caller: { kind: 'model', id: 'test-model' },
+			args: { findings: [{
+				title: 'Parser entry point',
+				description: 'This function begins parsing the input header.',
+				severity: 'info',
+				confidence: 0.75,
+				evidence: [{ address: '0x1000', description: 'The first header field is loaded here.' }],
+			}] },
+		}, CancellationToken.None);
+
+		assert.strictEqual(project.findings.length, 1);
+		assert.strictEqual(session.isProjectDirty, true);
 	});
 
 	test('cancellation before and during a handler reports CANCELLED', async () => {

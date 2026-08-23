@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { existsSync, readdirSync } from 'fs';
+import { existsSync, promises as fs, readdirSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { CancellationToken } from '../../../base/common/cancellation.js';
 import { Disposable } from '../../../base/common/lifecycle.js';
@@ -117,8 +117,10 @@ export function pyGhidraProjectDirectory(cacheRoot: string, backendVersion: stri
 /** Maintains analyzed targets in one persistent PyGhidra process. */
 export class PyGhidraDecompiler extends Disposable {
 	private readonly worker: DecompilerWorkerHost;
-	private readonly openedTargets = new Map<string, string>();
+	private readonly openedTargets = new Map<string, { readonly contentHash: string; readonly workerTargetId: string }>();
+	private readonly openedContentTargets = new Map<string, { readonly workerTargetId: string; readonly targetIds: Set<string> }>();
 	private readonly openingTargets = new Map<string, { readonly contentHash: string; readonly operation: Promise<number> }>();
+	private readonly openingContentTargets = new Map<string, { readonly workerTargetId: string; readonly targetIds: Set<string>; readonly operation: Promise<number> }>();
 	private openedTargetsGeneration = 0;
 
 	constructor(configuration: IPyGhidraWorkerConfiguration, private readonly cacheRoot: string, worker?: DecompilerWorkerHost) {
@@ -131,9 +133,17 @@ export class PyGhidraDecompiler extends Disposable {
 		return { backendId: details.hello.backend.id, backendVersion: details.hello.backend.version, adapterVersion: details.hello.backend.adapterVersion ?? 'unknown', label: details.hello.backend.label, processGeneration: details.generation, spawnMs: details.spawnMs, handshakeMs: details.handshakeMs };
 	}
 
+	async shutdown(): Promise<void> {
+		await this.worker.shutdown();
+	}
+
 	async decompileFunction(targetId: string, targetPath: string, contentHash: string, functionRva: string, token: CancellationToken): Promise<{ readonly serialized: string; readonly targetOpenMs: number; readonly functionRecoveryMs: number; readonly decompilationMs: number; readonly serializationMs: number }> {
 		const targetOpenMs = await this.prepareTarget(targetId, targetPath, contentHash, token);
-		const result = await this.worker.request('decompileFunction', { targetId, functionRva }, token);
+		const workerTargetId = this.openedTargets.get(targetId)?.workerTargetId;
+		if (!workerTargetId) {
+			throw new Error(`Target '${targetId}' was not retained after preparation.`);
+		}
+		const result = await this.worker.request('decompileFunction', { targetId: workerTargetId, functionRva }, token);
 		const timings = readWorkerTimings(result);
 		// Timings describe the worker transport and are not part of the versioned
 		// decompiler payload consumed by the strict workbench decoder or project DB.
@@ -145,27 +155,67 @@ export class PyGhidraDecompiler extends Disposable {
 		const hello = await this.worker.start();
 		if (this.openedTargetsGeneration !== this.worker.generation) {
 			this.openedTargets.clear();
+			this.openedContentTargets.clear();
 			this.openingTargets.clear();
+			this.openingContentTargets.clear();
 			this.openedTargetsGeneration = this.worker.generation;
 		}
-		if (this.openedTargets.get(targetId) === contentHash) {
+		const openedTarget = this.openedTargets.get(targetId);
+		if (openedTarget?.contentHash === contentHash) {
 			return 0;
+		}
+		if (openedTarget) {
+			throw new Error(`Target '${targetId}' is already prepared for different content.`);
 		}
 		const existing = this.openingTargets.get(targetId);
 		if (existing) {
 			if (existing.contentHash !== contentHash) {
 				throw new Error(`Target '${targetId}' is already being prepared for different content.`);
 			}
-			return existing.operation;
+			const elapsed = await existing.operation;
+			if (!this.openedTargets.has(targetId)) {
+				throw new Error(`Target '${targetId}' was not retained after preparation.`);
+			}
+			return elapsed;
+		}
+		const openedContentTarget = this.openedContentTargets.get(contentHash);
+		if (openedContentTarget) {
+			this.retainTarget(targetId, contentHash, openedContentTarget);
+			return 0;
 		}
 		const projectDirectory = pyGhidraProjectDirectory(this.cacheRoot, hello.backend.version, contentHash);
-		const operation = this.openTarget(targetId, targetPath, contentHash, projectDirectory, token);
+		const openingContentTarget = this.openingContentTargets.get(contentHash);
+		const workerTargetId = openingContentTarget?.workerTargetId ?? targetId;
+		let operation: Promise<number>;
+		if (openingContentTarget) {
+			openingContentTarget.targetIds.add(targetId);
+			operation = openingContentTarget.operation;
+		} else {
+			const targetIds = new Set([targetId]);
+			operation = this.openTarget(workerTargetId, targetPath, contentHash, projectDirectory, token).then(elapsed => {
+				const contentTarget = { workerTargetId, targetIds: new Set(targetIds) };
+				this.openedContentTargets.set(contentHash, contentTarget);
+				for (const retainedTargetId of targetIds) {
+					this.openedTargets.set(retainedTargetId, { contentHash, workerTargetId });
+				}
+				return elapsed;
+			});
+			this.openingContentTargets.set(contentHash, { workerTargetId, targetIds, operation });
+		}
 		this.openingTargets.set(targetId, { contentHash, operation });
 		try {
-			return await operation;
+			const elapsed = await operation;
+			const openedTarget = this.openedTargets.get(targetId);
+			if (!openedTarget || openedTarget.workerTargetId !== workerTargetId) {
+				throw new Error(`Target '${targetId}' was not retained after preparation.`);
+			}
+			return openingContentTarget ? 0 : elapsed;
 		} finally {
 			if (this.openingTargets.get(targetId)?.operation === operation) {
 				this.openingTargets.delete(targetId);
+			}
+			if (this.openingContentTargets.get(contentHash)?.operation === operation) {
+				this.openingContentTargets.delete(contentHash);
 			}
 		}
 	}
@@ -176,18 +226,45 @@ export class PyGhidraDecompiler extends Disposable {
 		} catch {
 			// A failed preparation has no target to close.
 		}
-		if (!this.openedTargets.delete(targetId)) {
+		const openedTarget = this.openedTargets.get(targetId);
+		if (!openedTarget) {
 			return;
 		}
-		await this.worker.request('closeTarget', { targetId }, CancellationToken.None);
+		this.openedTargets.delete(targetId);
+		const contentTarget = this.openedContentTargets.get(openedTarget.contentHash);
+		if (!contentTarget) {
+			return;
+		}
+		contentTarget.targetIds.delete(targetId);
+		if (contentTarget.targetIds.size > 0) {
+			return;
+		}
+		this.openedContentTargets.delete(openedTarget.contentHash);
+		await this.worker.request('closeTarget', { targetId: contentTarget.workerTargetId }, CancellationToken.None);
+	}
+
+	private retainTarget(targetId: string, contentHash: string, contentTarget: { readonly workerTargetId: string; readonly targetIds: Set<string> }): void {
+		contentTarget.targetIds.add(targetId);
+		this.openedTargets.set(targetId, { contentHash, workerTargetId: contentTarget.workerTargetId });
 	}
 
 	private async openTarget(targetId: string, targetPath: string, contentHash: string, projectDirectory: string, token: CancellationToken): Promise<number> {
 		const openStarted = Date.now();
-		await this.worker.request('openTarget', { targetId, targetPath, contentHash, projectDirectory }, token);
-		this.openedTargets.set(targetId, contentHash);
+		try {
+			await this.worker.request('openTarget', { targetId, targetPath, contentHash, projectDirectory }, token);
+		} catch (error) {
+			if (!isUnrecognizedCachedProject(error)) {
+				throw error;
+			}
+			await fs.rm(projectDirectory, { recursive: true, force: true });
+			await this.worker.request('openTarget', { targetId, targetPath, contentHash, projectDirectory }, token);
+		}
 		return Date.now() - openStarted;
 	}
+}
+
+function isUnrecognizedCachedProject(error: unknown): boolean {
+	return error instanceof Error && /Unrecognized file format/i.test(error.message);
 }
 
 function readWorkerTimings(result: object): { readonly functionRecoveryMs: number; readonly decompilationMs: number; readonly serializationMs: number } {

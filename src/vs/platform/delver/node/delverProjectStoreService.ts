@@ -20,9 +20,18 @@ import {
 	IDelverProjectStoreService,
 	IDelverProjectTargetIdentity,
 } from '../common/delverProjectStoreService.js';
+import {
+	delverFindingDecisionFromWire,
+	delverFindingDecisionToWire,
+	delverFindingFromWire,
+	delverFindingToWire,
+	IDelverFindingDecisionWire,
+	IDelverFindingWire,
+} from '../common/findings.js';
 import { IInterpretationEditWire, isContentHash } from '../common/delverInterpretationStoreService.js';
+import { delverToolCallFromWire, delverToolCallToWire, IDelverToolCallRecordWire } from '../common/delverToolCall.js';
 
-const PROJECT_SCHEMA_VERSION = 2;
+const PROJECT_SCHEMA_VERSION = 5;
 const WIRE_RVA = /^0x[0-9a-fA-F]+$/;
 const SNAPSHOT_KINDS = ['imageInfo', 'functions', 'imports', 'exports', 'strings'] as const;
 type SnapshotKind = typeof SNAPSHOT_KINDS[number];
@@ -70,6 +79,29 @@ const PROJECT_SCHEMA = `
 		created_at  INTEGER NOT NULL,
 		UNIQUE (revision_id, seq)
 	);
+	CREATE TABLE findings (
+		id          TEXT NOT NULL,
+		revision_id TEXT NOT NULL REFERENCES revisions(revision_id),
+		payload     TEXT NOT NULL,
+		created_at  INTEGER NOT NULL,
+		PRIMARY KEY (revision_id, id)
+	);
+	CREATE TABLE finding_decisions (
+		id          TEXT PRIMARY KEY NOT NULL,
+		finding_id  TEXT NOT NULL,
+		revision_id TEXT NOT NULL,
+		payload     TEXT NOT NULL,
+		created_at  INTEGER NOT NULL,
+		UNIQUE (revision_id, finding_id),
+		FOREIGN KEY (revision_id, finding_id) REFERENCES findings(revision_id, id)
+	);
+	CREATE TABLE tool_calls (
+		call_id     TEXT NOT NULL,
+		revision_id TEXT NOT NULL REFERENCES revisions(revision_id),
+		payload     TEXT NOT NULL,
+		created_at  INTEGER NOT NULL,
+		PRIMARY KEY (revision_id, call_id)
+	);
 	CREATE TABLE function_migrations (
 		source_revision_id TEXT NOT NULL REFERENCES revisions(revision_id),
 		source_function_rva TEXT NOT NULL,
@@ -83,6 +115,41 @@ const PROJECT_SCHEMA = `
 		PRIMARY KEY (source_revision_id, source_function_rva, target_revision_id, target_function_rva)
 	);
 	PRAGMA user_version = ${PROJECT_SCHEMA_VERSION};
+`;
+
+const MIGRATE_V2_TO_V3 = `
+	CREATE TABLE findings (
+		id TEXT NOT NULL,
+		revision_id TEXT NOT NULL REFERENCES revisions(revision_id),
+		payload TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
+		PRIMARY KEY (revision_id, id)
+	);
+	PRAGMA user_version = 3;
+`;
+
+const MIGRATE_V3_TO_V4 = `
+	CREATE TABLE finding_decisions (
+		id TEXT PRIMARY KEY NOT NULL,
+		finding_id TEXT NOT NULL,
+		revision_id TEXT NOT NULL,
+		payload TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
+		UNIQUE (revision_id, finding_id),
+		FOREIGN KEY (revision_id, finding_id) REFERENCES findings(revision_id, id)
+	);
+	PRAGMA user_version = 4;
+`;
+
+const MIGRATE_V4_TO_V5 = `
+	CREATE TABLE tool_calls (
+		call_id TEXT NOT NULL,
+		revision_id TEXT NOT NULL REFERENCES revisions(revision_id),
+		payload TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
+		PRIMARY KEY (revision_id, call_id)
+	);
+	PRAGMA user_version = 5;
 `;
 
 const MIGRATE_V1_TO_V2 = `
@@ -129,7 +196,7 @@ const MIGRATE_V1_TO_V2 = `
 		method TEXT NOT NULL, confidence REAL NOT NULL, status TEXT NOT NULL, provenance TEXT, updated_at INTEGER NOT NULL,
 		PRIMARY KEY (source_revision_id, source_function_rva, target_revision_id, target_function_rva)
 	);
-	PRAGMA user_version = ${PROJECT_SCHEMA_VERSION};
+	PRAGMA user_version = 2;
 `;
 
 interface IOpenProject {
@@ -205,6 +272,18 @@ export class DelverProjectStoreService implements IDelverProjectStoreService {
 				let version = await readSchemaVersion(db);
 				if (version === 1) {
 					await transaction(db, () => dbExec(db, MIGRATE_V1_TO_V2));
+					version = 2;
+				}
+				if (version === 2) {
+					await transaction(db, () => dbExec(db, MIGRATE_V2_TO_V3));
+					version = 3;
+				}
+				if (version === 3) {
+					await transaction(db, () => dbExec(db, MIGRATE_V3_TO_V4));
+					version = 4;
+				}
+				if (version === 4) {
+					await transaction(db, () => dbExec(db, MIGRATE_V4_TO_V5));
 					version = PROJECT_SCHEMA_VERSION;
 				}
 				if (version !== PROJECT_SCHEMA_VERSION) {
@@ -295,7 +374,23 @@ export class DelverProjectStoreService implements IDelverProjectStoreService {
 			}));
 			const interpretations = (await dbAll(project.db, 'SELECT payload FROM interpretations WHERE revision_id = ? ORDER BY seq', [revision.revisionId]))
 				.map(row => JSON.parse(requireString(row.payload, 'interpretation payload')) as IInterpretationEditWire);
-			return { metadata: metadataForRevision(project.metadata, revision, project.metadata.updatedAt), ...snapshots, decompiledFunctions, interpretations };
+			const findings = (await dbAll(project.db, 'SELECT payload FROM findings WHERE revision_id = ? ORDER BY created_at, rowid', [revision.revisionId]))
+				.map(row => delverFindingToWire(delverFindingFromWire(JSON.parse(requireString(row.payload, 'finding payload')))));
+			const findingDecisions = (await dbAll(project.db,
+				'SELECT payload FROM finding_decisions WHERE revision_id = ? ORDER BY created_at, rowid', [revision.revisionId]))
+				.map(row => delverFindingDecisionToWire(delverFindingDecisionFromWire(JSON.parse(requireString(row.payload, 'finding decision payload')))));
+			const toolCalls = (await dbAll(project.db,
+				'SELECT payload FROM tool_calls WHERE revision_id = ? ORDER BY created_at, rowid', [revision.revisionId]))
+				.map(row => delverToolCallToWire(delverToolCallFromWire(JSON.parse(requireString(row.payload, 'tool-call payload')))));
+			return {
+				metadata: metadataForRevision(project.metadata, revision, project.metadata.updatedAt),
+				...snapshots,
+				decompiledFunctions,
+				interpretations,
+				findings,
+				findingDecisions,
+				toolCalls,
+			};
 		});
 	}
 
@@ -321,6 +416,154 @@ export class DelverProjectStoreService implements IDelverProjectStoreService {
 				}
 			});
 			if (edits.length > 0) {
+				project.metadata = { ...project.metadata, updatedAt: now };
+			}
+		});
+	}
+
+	appendFindings(projectId: string, findings: readonly IDelverFindingWire[]): Promise<void> {
+		return this.sequencer.queue(async () => {
+			const project = this.getProject(projectId);
+			const validated = findings.map(finding => delverFindingFromWire(finding));
+			if (new Set(validated.map(finding => finding.id)).size !== validated.length) {
+				throw new Error('Finding batch contains duplicate ids');
+			}
+			const revisions = new Map<string, IDelverProjectRevision>();
+			for (const finding of validated) {
+				const contentHashes = new Set([
+					...finding.anchors.map(anchor => anchor.contentHash),
+					...finding.evidence.map(entry => entry.anchor.contentHash),
+				]);
+				if (contentHashes.size !== 1) {
+					throw new Error('Finding evidence must belong to one target revision');
+				}
+				const contentHash = [...contentHashes][0];
+				const revision = await findRevisionByContentHash(project.db, contentHash);
+				if (!revision) {
+					throw new Error('Finding belongs to different target bytes');
+				}
+				revisions.set(finding.id, revision);
+			}
+			const now = Date.now();
+			await transaction(project.db, async () => {
+				for (let index = 0; index < findings.length; index++) {
+					const finding = validated[index];
+					await dbRun(project.db, 'INSERT OR IGNORE INTO findings (id, revision_id, payload, created_at) VALUES (?, ?, ?, ?)', [
+						finding.id, revisions.get(finding.id)!.revisionId, JSON.stringify(findings[index]), finding.at,
+					]);
+				}
+				if (findings.length > 0) {
+					await dbRun(project.db, 'UPDATE project_metadata SET updated_at = ? WHERE id = 1', [now]);
+				}
+			});
+			if (findings.length > 0) {
+				project.metadata = { ...project.metadata, updatedAt: now };
+			}
+		});
+	}
+
+	appendFindingDecisions(projectId: string, decisions: readonly IDelverFindingDecisionWire[]): Promise<void> {
+		return this.sequencer.queue(async () => {
+			const project = this.getProject(projectId);
+			const validated = decisions.map(decision => delverFindingDecisionFromWire(decision));
+			if (new Set(validated.map(decision => decision.id)).size !== validated.length) {
+				throw new Error('Finding decision batch contains duplicate ids');
+			}
+			if (new Set(validated.map(decision => decision.findingId)).size !== validated.length) {
+				throw new Error('A finding decision batch cannot decide the same finding twice');
+			}
+
+			const revisions = new Map<string, string>();
+			const alreadyStored = new Set<string>();
+			for (const decision of validated) {
+				const row = await dbGet(project.db, `SELECT f.payload, f.revision_id FROM findings f
+					JOIN revisions r ON r.revision_id = f.revision_id
+					WHERE f.id = ? AND r.content_hash = ?`, [decision.findingId, decision.contentHash]);
+				if (!row) {
+					throw new Error(`No pending finding ${decision.findingId}`);
+				}
+				const finding = delverFindingFromWire(JSON.parse(requireString(row.payload, 'finding payload')));
+				if (finding.status !== 'proposed') {
+					throw new Error(`Finding ${decision.findingId} is not proposed`);
+				}
+				const existing = await dbGet(project.db,
+					'SELECT id, payload FROM finding_decisions WHERE revision_id = ? AND finding_id = ?',
+					[requireString(row.revision_id, 'finding revision id'), decision.findingId]);
+				if (existing) {
+					const stored = delverFindingDecisionFromWire(JSON.parse(requireString(existing.payload, 'finding decision payload')));
+					if (stored.id !== decision.id || JSON.stringify(delverFindingDecisionToWire(stored)) !== JSON.stringify(delverFindingDecisionToWire(decision))) {
+						throw new Error(`Finding ${decision.findingId} has already been decided`);
+					}
+					alreadyStored.add(decision.id);
+				}
+				revisions.set(decision.id, requireString(row.revision_id, 'finding revision id'));
+			}
+
+			const now = Date.now();
+			await transaction(project.db, async () => {
+				for (const decision of validated) {
+					if (alreadyStored.has(decision.id)) {
+						continue;
+					}
+					await dbRun(project.db, `INSERT INTO finding_decisions
+						(id, finding_id, revision_id, payload, created_at) VALUES (?, ?, ?, ?, ?)`, [
+						decision.id,
+						decision.findingId,
+						revisions.get(decision.id)!,
+						JSON.stringify(delverFindingDecisionToWire(decision)),
+						decision.at,
+					]);
+				}
+				if (decisions.length > alreadyStored.size) {
+					await dbRun(project.db, 'UPDATE project_metadata SET updated_at = ? WHERE id = 1', [now]);
+				}
+			});
+			if (decisions.length > alreadyStored.size) {
+				project.metadata = { ...project.metadata, updatedAt: now };
+			}
+		});
+	}
+
+	appendToolCalls(projectId: string, calls: readonly IDelverToolCallRecordWire[]): Promise<void> {
+		return this.sequencer.queue(async () => {
+			const project = this.getProject(projectId);
+			const validated = calls.map(call => delverToolCallFromWire(call));
+			if (new Set(validated.map(call => call.callId)).size !== validated.length) {
+				throw new Error('Tool-call batch contains duplicate ids');
+			}
+			const revisions = new Map<string, IDelverProjectRevision>();
+			const alreadyStored = new Set<string>();
+			for (const call of validated) {
+				const revision = await findRevisionByContentHash(project.db, call.contentHash);
+				if (!revision) {
+					throw new Error('Tool call belongs to different target bytes');
+				}
+				const existing = await dbGet(project.db,
+					'SELECT payload FROM tool_calls WHERE revision_id = ? AND call_id = ?', [revision.revisionId, call.callId]);
+				if (existing) {
+					const stored = delverToolCallFromWire(JSON.parse(requireString(existing.payload, 'tool-call payload')));
+					if (JSON.stringify(delverToolCallToWire(stored)) !== JSON.stringify(delverToolCallToWire(call))) {
+						throw new Error(`Tool call ${call.callId} conflicts with an existing record`);
+					}
+					alreadyStored.add(call.callId);
+				}
+				revisions.set(call.callId, revision);
+			}
+			const now = Date.now();
+			await transaction(project.db, async () => {
+				for (const call of validated) {
+					if (alreadyStored.has(call.callId)) {
+						continue;
+					}
+					await dbRun(project.db, 'INSERT OR IGNORE INTO tool_calls (call_id, revision_id, payload, created_at) VALUES (?, ?, ?, ?)', [
+						call.callId, revisions.get(call.callId)!.revisionId, JSON.stringify(delverToolCallToWire(call)), call.startedAt,
+					]);
+				}
+				if (calls.length > alreadyStored.size) {
+					await dbRun(project.db, 'UPDATE project_metadata SET updated_at = ? WHERE id = 1', [now]);
+				}
+			});
+			if (calls.length > alreadyStored.size) {
 				project.metadata = { ...project.metadata, updatedAt: now };
 			}
 		});

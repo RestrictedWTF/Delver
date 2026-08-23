@@ -68,6 +68,16 @@ export class DelverAgentBridgeActivation {
 		await this.reconcile();
 	}
 
+	async retry(): Promise<void> {
+		if (this.disposed) {
+			throw new Error('The Delver agent bridge activation owner is disposed.');
+		}
+		if (!this.started) {
+			return this.start();
+		}
+		await this.reconcile();
+	}
+
 	async dispose(): Promise<void> {
 		if (this.disposed) {
 			await this.runtime?.dispose();

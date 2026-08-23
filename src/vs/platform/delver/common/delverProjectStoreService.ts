@@ -4,7 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { createDecorator } from '../../instantiation/common/instantiation.js';
+import { IDelverFindingDecisionWire, IDelverFindingWire } from './findings.js';
 import { IInterpretationEditWire } from './delverInterpretationStoreService.js';
+import { IDelverToolCallRecordWire } from './delverToolCall.js';
 
 export const IDelverProjectStoreService = createDecorator<IDelverProjectStoreService>('delverProjectStoreService');
 
@@ -65,6 +67,9 @@ export interface IDelverProjectSnapshotUpdate {
 export interface IDelverProjectSnapshot extends IDelverProjectSnapshotUpdate {
 	readonly metadata: IDelverProjectMetadata;
 	readonly interpretations: readonly IInterpretationEditWire[];
+	readonly findings: readonly IDelverFindingWire[];
+	readonly findingDecisions: readonly IDelverFindingDecisionWire[];
+	readonly toolCalls: readonly IDelverToolCallRecordWire[];
 }
 
 export type DelverFunctionMigrationMethod = 'exact' | 'symbol' | 'structural' | 'manual';
@@ -97,6 +102,9 @@ export interface IDelverProjectStoreService {
 	storeFunctionMigrationMappings(projectId: string, mappings: readonly IDelverFunctionMigrationMapping[]): Promise<void>;
 	loadFunctionMigrationMappings(projectId: string, sourceRevisionId: string, targetRevisionId: string): Promise<readonly IDelverFunctionMigrationMapping[]>;
 	appendInterpretations(projectId: string, edits: readonly IInterpretationEditWire[]): Promise<void>;
+	appendFindings(projectId: string, findings: readonly IDelverFindingWire[]): Promise<void>;
+	appendFindingDecisions(projectId: string, decisions: readonly IDelverFindingDecisionWire[]): Promise<void>;
+	appendToolCalls(projectId: string, calls: readonly IDelverToolCallRecordWire[]): Promise<void>;
 	copyInterpretations(sourceProjectId: string, destinationProjectId: string): Promise<number>;
 	close(projectId: string): Promise<void>;
 }
