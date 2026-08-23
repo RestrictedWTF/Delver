@@ -11,17 +11,22 @@ import { AnalysisSessionId, IDelverAnalysisService, IDelverReadMemoryWire } from
 import { createDelverFinding, IDelverFinding, IDelverFindingDraft } from '../../../../../platform/delver/common/findings.js';
 import { IDelverProjectSnapshot } from '../../../../../platform/delver/common/delverProjectStoreService.js';
 import { IDelverToolCallRecord } from '../../../../../platform/delver/common/delverToolCall.js';
+import { IDelverNamedSignature, IDelverNamedSignatureDraft } from '../../../../../platform/delver/common/delverSignature.js';
 import { Anchor, EditOp, EditStatus, EditValue, IAuthor, IEdit, IInterpretationAt } from '../../../../../platform/delver/common/interpretation.js';
 import { STATIC_MOMENT } from '../../../../../platform/delver/common/moment.js';
 import {
 	FunctionSourceWire,
+	FlowKindWire,
 	IFunctionsResult,
 	IFunctionWire,
+	IGetImageInfoResult,
 	IListingWindowResult,
 	MomentKindWire,
 	IStringsResult,
 	IXrefsResult,
+	SignatureFieldReasonWire,
 	StringEncodingWire,
+	XrefKindWire,
 } from '../../../../../platform/delver/common/protocol.generated.js';
 import { getSingletonServiceDescriptors } from '../../../../../platform/instantiation/common/extensions.js';
 import { NullLogService } from '../../../../../platform/log/common/log.js';
@@ -78,10 +83,46 @@ const FUNCTIONS: readonly IFunctionWire[] = [
 	{ rva: '0x2000', end_rva: '0x2080', authoritative: false, source: FunctionSourceWire.LinearSweep },
 ];
 
+const IMAGE_INFO: IGetImageInfoResult = {
+	arch: 'x86_64',
+	content_hash: CONTENT_HASH,
+	entry: '0x140001000',
+	export_count: 0,
+	function_seed_count: 2,
+	image_base: '0x140000000',
+	import_module_count: 0,
+	import_symbol_count: 0,
+	relocation_count: 0,
+	sections: [
+		{
+			name: '.text',
+			virtual_address: '0x1000',
+			virtual_size: 0x300,
+			raw_offset: '0x400',
+			raw_size: 0x200,
+			entropy: 6.1,
+			readable: true,
+			writable: false,
+			executable: true,
+		},
+		{
+			name: '.data',
+			virtual_address: '0x2000',
+			virtual_size: 0x180,
+			raw_offset: '0x800',
+			raw_size: 0x200,
+			entropy: 3.2,
+			readable: true,
+			writable: true,
+			executable: false,
+		},
+	],
+};
+
 function snapshotFor(contentHash = CONTENT_HASH, revisionId = REVISION_ID): IDelverProjectSnapshot {
 	return {
 		metadata: {
-			schemaVersion: 5,
+			schemaVersion: 6,
 			contentHash,
 			currentRevisionId: revisionId,
 			displayName: 'sample.exe',
@@ -92,6 +133,7 @@ function snapshotFor(contentHash = CONTENT_HASH, revisionId = REVISION_ID): IDel
 		findings: [],
 		findingDecisions: [],
 		toolCalls: [],
+		signatures: [],
 	};
 }
 
@@ -123,6 +165,7 @@ class FakeSessionService implements Partial<IDelverSessionService> {
 	isProjectDirty = false;
 	functionsResult: IFunctionsResult = { functions: [] };
 	stringsResult: IStringsResult = { strings: [], truncated: false };
+	imageInfoResult: IGetImageInfoResult = IMAGE_INFO;
 	/** Runs inside `functions()`, so a test can cancel while a handler is awaiting. */
 	beforeFunctions: (() => void) | undefined;
 
@@ -137,6 +180,11 @@ class FakeSessionService implements Partial<IDelverSessionService> {
 		return this.stringsResult;
 	}
 
+	async imageInfo(): Promise<IGetImageInfoResult> {
+		this.calls.push('imageInfo');
+		return this.imageInfoResult;
+	}
+
 	markProjectDirty(): void {
 		this.isProjectDirty = true;
 	}
@@ -148,6 +196,12 @@ class FakeSessionService implements Partial<IDelverSessionService> {
 
 class FakeAnalysisService implements Partial<IDelverAnalysisService> {
 	readonly calls: string[] = [];
+	rowResult: number | undefined = 0;
+	rowReader: ((rva: string) => number | undefined) | undefined;
+	listingResult: IListingWindowResult = { rows: [], total_rows: 0 };
+	listingReader: ((startRow: number, count: number) => IListingWindowResult) | undefined;
+	xrefsToResult: IXrefsResult = { xrefs: [] };
+	memoryReader: ((space: 'image' | 'file', address: string, count: number) => IDelverReadMemoryWire) | undefined;
 	memoryResult: IDelverReadMemoryWire = {
 		bytesHex: '78563412ffeeddccaa',
 		valid: [{ start: '0x1000', end: '0x1009' }],
@@ -156,22 +210,22 @@ class FakeAnalysisService implements Partial<IDelverAnalysisService> {
 
 	async rowForAddress(_sessionId: AnalysisSessionId, rva: string): Promise<number | undefined> {
 		this.calls.push(`rowForAddress:${rva}`);
-		return 0;
+		return this.rowReader?.(rva) ?? this.rowResult;
 	}
 
 	async listingWindow(_sessionId: AnalysisSessionId, startRow: number, count: number): Promise<IListingWindowResult> {
 		this.calls.push(`listingWindow:${startRow}:${count}`);
-		return { rows: [], total_rows: 0 };
+		return this.listingReader?.(startRow, count) ?? this.listingResult;
 	}
 
 	async readMemory(_sessionId: AnalysisSessionId, space: 'image' | 'file', address: string, count: number): Promise<IDelverReadMemoryWire> {
 		this.calls.push(`readMemory:${space}:${address}:${count}`);
-		return this.memoryResult;
+		return this.memoryReader?.(space, address, count) ?? this.memoryResult;
 	}
 
 	async xrefsTo(_sessionId: AnalysisSessionId, rva: string): Promise<IXrefsResult> {
 		this.calls.push(`xrefsTo:${rva}`);
-		return { xrefs: [] };
+		return this.xrefsToResult;
 	}
 
 	async xrefsFrom(_sessionId: AnalysisSessionId, rva: string): Promise<IXrefsResult> {
@@ -268,6 +322,7 @@ class FakeProjectService implements Partial<IDelverProjectService> {
 	namedPath: string | undefined;
 	readonly findings: IDelverFinding[] = [];
 	readonly toolCalls: IDelverToolCallRecord[] = [];
+	readonly signatures = new Map<string, IDelverNamedSignature[]>();
 
 	projectSnapshot(contentHash: string): IDelverProjectSnapshot | undefined {
 		return this.snapshot?.metadata.contentHash === contentHash ? this.snapshot : undefined;
@@ -287,6 +342,29 @@ class FakeProjectService implements Partial<IDelverProjectService> {
 
 	toolCall(contentHash: string, callId: string): IDelverToolCallRecord | undefined {
 		return this.toolCalls.find(call => call.contentHash === contentHash && call.callId === callId);
+	}
+
+	async saveSignature(contentHash: string, draft: IDelverNamedSignatureDraft): Promise<IDelverNamedSignature> {
+		const retained = this.signatures.get(contentHash) ?? [];
+		const existingIndex = retained.findIndex(signature => signature.name.toLowerCase() === draft.name.toLowerCase());
+		const existing = retained[existingIndex];
+		const signature: IDelverNamedSignature = {
+			...draft,
+			id: existing?.id ?? `signature-${retained.length + 1}`,
+			createdAt: existing?.createdAt ?? 100,
+			updatedAt: existing ? 101 : 100,
+		};
+		if (existingIndex < 0) {
+			retained.push(signature);
+		} else {
+			retained[existingIndex] = signature;
+		}
+		this.signatures.set(contentHash, retained);
+		return signature;
+	}
+
+	signaturesFor(contentHash: string): readonly IDelverNamedSignature[] {
+		return this.signatures.get(contentHash) ?? [];
 	}
 
 	async reportFindings(_contentHash: string, drafts: readonly IDelverFindingDraft[]): Promise<readonly IDelverFinding[]> {
@@ -386,6 +464,74 @@ interface IReadBytesPayload {
 	readonly elementWidth: number;
 	readonly values?: readonly string[];
 	readonly trailingByteCount?: number;
+}
+
+interface IConvertAddressPayload {
+	readonly input: { readonly space: string; readonly address: string };
+	readonly rva: string;
+	readonly va: string;
+	readonly fileOffset?: string;
+	readonly fileBacked: boolean;
+	readonly offsetWithinSection: string;
+	readonly section: {
+		readonly name: string;
+		readonly rvaStart: string;
+		readonly rvaEnd: string;
+		readonly vaStart: string;
+		readonly vaEnd: string;
+		readonly rawOffset: string;
+		readonly rawEnd: string;
+		readonly virtualSize: number;
+		readonly rawSize: number;
+		readonly readable: boolean;
+		readonly writable: boolean;
+		readonly executable: boolean;
+	};
+}
+
+interface ISearchBytesPayload {
+	readonly pattern: string;
+	readonly patternByteCount: number;
+	readonly searchableByteCount: number;
+	readonly candidateCount: number;
+	readonly scannedCandidateCount: number;
+	readonly sections: readonly string[];
+	readonly executableOnly: boolean;
+	readonly matches: readonly {
+		readonly rva: string;
+		readonly va: string;
+		readonly fileOffset: string;
+		readonly section: string;
+		readonly bytesHex: string;
+	}[];
+}
+
+interface IMakeSignaturePayload {
+	readonly pattern: string;
+	readonly byteCount: number;
+	readonly fixedByteCount: number;
+	readonly wildcardByteCount: number;
+	readonly wildcardedOperands: readonly {
+		readonly instructionRva: string;
+		readonly byteOffset: number;
+		readonly byteLength: number;
+		readonly patternByteOffset: number;
+		readonly reason: string;
+	}[];
+	readonly proof: {
+		readonly matchCount: number;
+		readonly matchCountExact: boolean;
+		readonly unique: boolean;
+		readonly targetMatched: boolean;
+	};
+	readonly quality: { readonly score: number; readonly confidence: string; readonly reasons: readonly string[] };
+	readonly alternativeXrefSignature?: {
+		readonly available: boolean;
+		readonly kind?: string;
+		readonly pattern?: string;
+		readonly sourceReference?: { readonly from: string; readonly to: string; readonly kind: string };
+		readonly proof?: { readonly unique: boolean; readonly matchRva: string };
+	};
 }
 
 interface ILookupPayload {
@@ -746,6 +892,100 @@ suite('DelverAgentService', () => {
 		});
 	});
 
+	test('converts RVA, VA, and file offsets from an offline section table', async () => {
+		const { service, session } = createService(store);
+		session.activeSession = OFFLINE_SESSION;
+
+		const fromRva = await service.invoke({
+			capability: 'delver_convert_address',
+			args: { address: '0x1010', from: 'rva' },
+		}, CancellationToken.None);
+		const fromVa = await service.invoke({
+			capability: 'delver_convert_address',
+			args: { address: '0x140001250', from: 'va' },
+		}, CancellationToken.None);
+		const fromFile = await service.invoke({
+			capability: 'delver_convert_address',
+			args: { address: '0x410', from: 'file' },
+		}, CancellationToken.None);
+
+		assert.deepStrictEqual({
+			fromRva: payloadOf<IConvertAddressPayload>(fromRva),
+			fromRvaProvenance: fromRva.provenance,
+			fromVa: payloadOf<IConvertAddressPayload>(fromVa),
+			fromFile: payloadOf<IConvertAddressPayload>(fromFile),
+			unmappedRva: await errorCode(service, { capability: 'delver_convert_address', args: { address: '0x500', from: 'rva' } }),
+			belowImageBase: await errorCode(service, { capability: 'delver_convert_address', args: { address: '0x13fffffff', from: 'va' } }),
+			fileHeader: await errorCode(service, { capability: 'delver_convert_address', args: { address: '0x100', from: 'file' } }),
+			rawPadding: await errorCode(service, { capability: 'delver_convert_address', args: { address: '0x990', from: 'file' } }),
+			invalidSpace: await errorCode(service, { capability: 'delver_convert_address', args: { address: '0x1010', from: 'image' } }),
+			missingSpace: await errorCode(service, { capability: 'delver_convert_address', args: { address: '0x1010' } }),
+		}, {
+			fromRva: {
+				input: { space: 'rva', address: '0x1010' },
+				rva: '0x1010',
+				va: '0x140001010',
+				fileOffset: '0x410',
+				fileBacked: true,
+				offsetWithinSection: '0x10',
+				section: {
+					name: '.text',
+					rvaStart: '0x1000',
+					rvaEnd: '0x1300',
+					vaStart: '0x140001000',
+					vaEnd: '0x140001300',
+					rawOffset: '0x400',
+					rawEnd: '0x600',
+					virtualSize: 0x300,
+					rawSize: 0x200,
+					readable: true,
+					writable: false,
+					executable: true,
+				},
+			},
+			fromRvaProvenance: [{
+				source: 'project',
+				detail: 'Address conversion derived from the image base and PE section table.',
+				contentHash: CONTENT_HASH,
+				addresses: ['0x1010'],
+				untrusted: true,
+			}],
+			fromVa: {
+				input: { space: 'va', address: '0x140001250' },
+				rva: '0x1250',
+				va: '0x140001250',
+				fileBacked: false,
+				offsetWithinSection: '0x250',
+				section: {
+					name: '.text', rvaStart: '0x1000', rvaEnd: '0x1300',
+					vaStart: '0x140001000', vaEnd: '0x140001300',
+					rawOffset: '0x400', rawEnd: '0x600', virtualSize: 0x300, rawSize: 0x200,
+					readable: true, writable: false, executable: true,
+				},
+			},
+			fromFile: {
+				input: { space: 'file', address: '0x410' },
+				rva: '0x1010',
+				va: '0x140001010',
+				fileOffset: '0x410',
+				fileBacked: true,
+				offsetWithinSection: '0x10',
+				section: {
+					name: '.text', rvaStart: '0x1000', rvaEnd: '0x1300',
+					vaStart: '0x140001000', vaEnd: '0x140001300',
+					rawOffset: '0x400', rawEnd: '0x600', virtualSize: 0x300, rawSize: 0x200,
+					readable: true, writable: false, executable: true,
+				},
+			},
+			unmappedRva: 'ADDRESS_NOT_MAPPED',
+			belowImageBase: 'ADDRESS_NOT_MAPPED',
+			fileHeader: 'ADDRESS_NOT_MAPPED',
+			rawPadding: 'ADDRESS_NOT_MAPPED',
+			invalidSpace: 'INVALID_ARGUMENT',
+			missingSpace: 'INVALID_ARGUMENT',
+		});
+	});
+
 	test('reads exact image bytes and decodes bounded little-endian integers', async () => {
 		const { service, session, analysis } = createService(store);
 		session.activeSession = LIVE_SESSION;
@@ -836,6 +1076,327 @@ suite('DelverAgentService', () => {
 			invalidSpace: 'INVALID_ARGUMENT',
 			invalidFormat: 'INVALID_ARGUMENT',
 			unmapped: 'ADDRESS_NOT_MAPPED',
+		});
+	});
+
+	test('searches wildcard byte patterns across chunks with resumable overlapping matches', async () => {
+		const { service, session, analysis } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		const textBytes = new Uint8Array(0x10020);
+		const dataBytes = new Uint8Array(0x10);
+		textBytes.set([0x48, 0x8b, 0x12, 0xff], 0xffff);
+		textBytes.set([0x48, 0x8f, 0x34, 0xff], 0x10010);
+		session.imageInfoResult = {
+			...IMAGE_INFO,
+			sections: [
+				{ ...IMAGE_INFO.sections[0], virtual_size: textBytes.length, raw_size: textBytes.length },
+				{
+					name: '.data', virtual_address: '0x20000', virtual_size: dataBytes.length,
+					raw_offset: '0x20000', raw_size: dataBytes.length, entropy: 0,
+					readable: true, writable: true, executable: false,
+				},
+			],
+		};
+		const regions = [
+			{ rva: 0x1000n, bytes: textBytes },
+			{ rva: 0x20000n, bytes: dataBytes },
+		];
+		const readRegion = (space: 'image' | 'file', address: string, count: number): IDelverReadMemoryWire => {
+			assert.strictEqual(space, 'image');
+			const start = BigInt(address);
+			const region = regions.find(candidate => start >= candidate.rva && start < candidate.rva + BigInt(candidate.bytes.length));
+			if (!region) {
+				return { bytesHex: '', valid: [], servedMoment: { kind: MomentKindWire.Static, epoch: 0 } };
+			}
+			const offset = Number(start - region.rva);
+			const bytes = region.bytes.slice(offset, offset + count);
+			return {
+				bytesHex: [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join(''),
+				valid: [{ start: toWireAddress(start), end: toWireAddress(start + BigInt(bytes.length)) }],
+				servedMoment: { kind: MomentKindWire.Static, epoch: 0 },
+			};
+		};
+		analysis.memoryReader = readRegion;
+
+		const first = await service.invoke({
+			capability: 'delver_search_bytes',
+			args: { pattern: '48 8? ?? FF', sections: ['.text'], count: 1 },
+		}, CancellationToken.None);
+		const resumed = await service.invoke({
+			capability: 'delver_search_bytes',
+			args: { pattern: '48 8? ?? ff', sections: ['.text'], count: 1, cursor: first.nextCursor },
+		}, CancellationToken.None);
+		const negative = await service.invoke({
+			capability: 'delver_search_bytes',
+			args: { pattern: '48 8? ?? ff', sections: ['.data'] },
+		}, CancellationToken.None);
+		const overlappingFirst = await service.invoke({
+			capability: 'delver_search_bytes',
+			args: { pattern: '00 00', sections: ['.data'], count: 1 },
+		}, CancellationToken.None);
+		const overlappingResumed = await service.invoke({
+			capability: 'delver_search_bytes',
+			args: { pattern: '00 00', sections: ['.data'], count: 1, cursor: overlappingFirst.nextCursor },
+		}, CancellationToken.None);
+		analysis.memoryReader = (space, address, count) => {
+			const result = readRegion(space, address, count);
+			return { ...result, bytesHex: result.bytesHex.slice(0, -2) };
+		};
+		const incompleteRead = await errorCode(service, {
+			capability: 'delver_search_bytes',
+			args: { pattern: '90', sections: ['.data'] },
+		});
+
+		assert.deepStrictEqual({
+			first: payloadOf<ISearchBytesPayload>(first),
+			firstCompleteness: first.completeness,
+			firstHasCursor: typeof first.nextCursor === 'string',
+			firstOmitted: first.omitted,
+			firstProvenance: first.provenance,
+			resumed: payloadOf<ISearchBytesPayload>(resumed),
+			resumedCompleteness: resumed.completeness,
+			negative: payloadOf<ISearchBytesPayload>(negative),
+			negativeCompleteness: negative.completeness,
+			overlappingRvas: [
+				payloadOf<ISearchBytesPayload>(overlappingFirst).matches[0].rva,
+				payloadOf<ISearchBytesPayload>(overlappingResumed).matches[0].rva,
+			],
+			incompleteRead,
+			changedPattern: await errorCode(service, {
+				capability: 'delver_search_bytes',
+				args: { pattern: '48 8? 00 ff', sections: ['.text'], cursor: first.nextCursor },
+			}),
+			invalidPattern: await errorCode(service, { capability: 'delver_search_bytes', args: { pattern: '48 zz' } }),
+			unknownSection: await errorCode(service, { capability: 'delver_search_bytes', args: { pattern: '90', sections: ['.missing'] } }),
+			invalidExecutableOnly: await errorCode(service, { capability: 'delver_search_bytes', args: { pattern: '90', executableOnly: 'yes' } }),
+		}, {
+			first: {
+				pattern: '48 8? ?? ff',
+				patternByteCount: 4,
+				searchableByteCount: 0x10020,
+				candidateCount: 0x1001d,
+				scannedCandidateCount: 0x10011,
+				sections: ['.text'],
+				executableOnly: false,
+				matches: [{
+					rva: '0x10fff', va: '0x140010fff', fileOffset: '0x103ff',
+					section: '.text', bytesHex: '488b12ff',
+				}],
+			},
+			firstCompleteness: 'partial',
+			firstHasCursor: true,
+			firstOmitted: { reason: 'More matches remain; continue with nextCursor. The remaining count is unknown until the selected bytes are fully scanned.' },
+			firstProvenance: [{
+				source: 'analysis',
+				detail: 'Scanned selected provider-backed section bytes until the next page of matches was proven.',
+				contentHash: CONTENT_HASH,
+				untrusted: true,
+				ranges: [{ start: '0x10fff', end: '0x11003' }],
+			}],
+			resumed: {
+				pattern: '48 8? ?? ff',
+				patternByteCount: 4,
+				searchableByteCount: 0x10020,
+				candidateCount: 0x1001d,
+				scannedCandidateCount: 13,
+				sections: ['.text'],
+				executableOnly: false,
+				matches: [{
+					rva: '0x11010', va: '0x140011010', fileOffset: '0x10410',
+					section: '.text', bytesHex: '488f34ff',
+				}],
+			},
+			resumedCompleteness: 'complete',
+			negative: {
+				pattern: '48 8? ?? ff', patternByteCount: 4,
+				searchableByteCount: 16, candidateCount: 13, scannedCandidateCount: 13,
+				sections: ['.data'], executableOnly: false, matches: [],
+			},
+			negativeCompleteness: 'complete',
+			overlappingRvas: ['0x20000', '0x20001'],
+			incompleteRead: 'ANALYSIS_INCOMPLETE',
+			changedPattern: 'STALE_REVISION',
+			invalidPattern: 'INVALID_ARGUMENT',
+			unknownSection: 'INVALID_ARGUMENT',
+			invalidExecutableOnly: 'INVALID_ARGUMENT',
+		});
+	});
+
+	test('makes and proves decoder-backed relocation-stable signatures', async () => {
+		const { service, session, analysis } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		session.functionsResult = { functions: [...FUNCTIONS] };
+		const textBytes = new Uint8Array(0x200).fill(0x90);
+		textBytes.set([0x55, 0x48, 0x89, 0xe5, 0xe8, 0x11, 0x22, 0x33, 0x44, 0x48, 0x83, 0xec, 0x20]);
+		analysis.listingResult = {
+			total_rows: 4,
+			rows: [
+				{ row: 0, rva: '0x1000', len: 1, bytes_hex: '55', mnemonic: 'push', operands: 'rbp', flow: FlowKindWire.Sequential, signature_fields: [] },
+				{ row: 1, rva: '0x1001', len: 3, bytes_hex: '4889e5', mnemonic: 'mov', operands: 'rbp,rsp', flow: FlowKindWire.Sequential, signature_fields: [] },
+				{
+					row: 2, rva: '0x1004', len: 5, bytes_hex: 'e811223344', mnemonic: 'call', operands: '4433321a', flow: FlowKindWire.Call, branch_target: '0x4433321a',
+					signature_fields: [{ index: 1, length: 4, reason: SignatureFieldReasonWire.RelativeBranch }],
+				},
+				{ row: 3, rva: '0x1009', len: 4, bytes_hex: '4883ec20', mnemonic: 'sub', operands: 'rsp,20h', flow: FlowKindWire.Sequential, signature_fields: [] },
+			],
+		};
+		analysis.memoryReader = (space, address, count) => {
+			assert.strictEqual(space, 'image');
+			const start = Number(BigInt(address) - 0x1000n);
+			const bytes = textBytes.slice(start, start + count);
+			return {
+				bytesHex: [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join(''),
+				valid: [{ start: address, end: toWireAddress(BigInt(address) + BigInt(bytes.length)) }],
+				servedMoment: { kind: MomentKindWire.Static, epoch: 0 },
+			};
+		};
+
+		const result = await service.invoke({
+			capability: 'delver_make_signature',
+			args: { address: '0x1008', policy: 'relocation-stable', scope: 'executableSections', maxBytes: 13 },
+		}, CancellationToken.None);
+		const payload = payloadOf<IMakeSignaturePayload>(result);
+		const saved = await service.invoke({
+			capability: 'delver_save_signature',
+			args: { name: 'decrypt_config', sourceCallId: result.callId },
+		}, CancellationToken.None);
+		const replaced = await service.invoke({
+			capability: 'delver_save_signature',
+			args: { name: 'DECRYPT_CONFIG', sourceCallId: result.callId },
+		}, CancellationToken.None);
+		const listed = await service.invoke({ capability: 'delver_list_signatures' }, CancellationToken.None);
+
+		assert.deepStrictEqual({
+			pattern: payload.pattern,
+			byteCount: payload.byteCount,
+			fixedByteCount: payload.fixedByteCount,
+			wildcardByteCount: payload.wildcardByteCount,
+			wildcards: payload.wildcardedOperands,
+			proof: {
+				matchCount: payload.proof.matchCount,
+				matchCountExact: payload.proof.matchCountExact,
+				unique: payload.proof.unique,
+				targetMatched: payload.proof.targetMatched,
+			},
+			confidence: payload.quality.confidence,
+			completeness: result.completeness,
+			saved: (saved.data as { signature: IDelverNamedSignature }).signature,
+			replacedExistingName: (saved.data as { replacedExistingName: boolean }).replacedExistingName,
+			replacement: (replaced.data as { signature: IDelverNamedSignature; replacedExistingName: boolean }),
+			listed: JSON.parse(JSON.stringify((listed.data as { signatures: readonly IDelverNamedSignature[] }).signatures)),
+			crossRevision: await errorCode(service, {
+				capability: 'delver_make_signature',
+				args: { address: '0x1000', policy: 'cross-revision-stable' },
+			}),
+			bothTargets: await errorCode(service, {
+				capability: 'delver_make_signature',
+				args: { address: '0x1000', function: 'SUB_1000' },
+			}),
+		}, {
+			pattern: '55 48 89 e5 e8 ?? ?? ?? ??',
+			byteCount: 9,
+			fixedByteCount: 5,
+			wildcardByteCount: 4,
+			wildcards: [{
+				instructionRva: '0x1004', byteOffset: 1, byteLength: 4,
+				patternByteOffset: 5, reason: 'relativeBranch',
+			}],
+			proof: { matchCount: 1, matchCountExact: true, unique: true, targetMatched: true },
+			confidence: 'medium',
+			completeness: 'complete',
+			replacedExistingName: false,
+			replacement: {
+				replacedExistingName: true,
+				signature: {
+					id: 'signature-1', name: 'DECRYPT_CONFIG', contentHash: CONTENT_HASH, sourceCallId: result.callId,
+					functionRva: '0x1000', functionName: 'SUB_1000', variant: 'primary', scope: 'executableSections', policy: 'relocation-stable',
+					pattern: '55 48 89 e5 e8 ?? ?? ?? ??', byteCount: 9, fixedByteCount: 5, wildcardByteCount: 4,
+					coveredStartRva: '0x1000', coveredEndRva: '0x1009',
+					wildcards: [{ instructionRva: '0x1004', instructionByteIndex: 1, length: 4, patternByteIndex: 5, reason: 'relativeBranch' }],
+					unique: true, matchCount: 1, matchCountExact: true, qualityScore: 0.567, confidence: 'medium', createdAt: 100, updatedAt: 101,
+				},
+			},
+			saved: {
+				id: 'signature-1', name: 'decrypt_config', contentHash: CONTENT_HASH, sourceCallId: result.callId,
+				functionRva: '0x1000', functionName: 'SUB_1000', variant: 'primary', scope: 'executableSections', policy: 'relocation-stable',
+				pattern: '55 48 89 e5 e8 ?? ?? ?? ??', byteCount: 9, fixedByteCount: 5, wildcardByteCount: 4,
+				coveredStartRva: '0x1000', coveredEndRva: '0x1009',
+				wildcards: [{ instructionRva: '0x1004', instructionByteIndex: 1, length: 4, patternByteIndex: 5, reason: 'relativeBranch' }],
+				unique: true, matchCount: 1, matchCountExact: true, qualityScore: 0.567, confidence: 'medium', createdAt: 100, updatedAt: 100,
+			},
+			listed: [{
+				id: 'signature-1', name: 'DECRYPT_CONFIG', contentHash: CONTENT_HASH, sourceCallId: result.callId,
+				functionRva: '0x1000', functionName: 'SUB_1000', variant: 'primary', scope: 'executableSections', policy: 'relocation-stable',
+				pattern: '55 48 89 e5 e8 ?? ?? ?? ??', byteCount: 9, fixedByteCount: 5, wildcardByteCount: 4,
+				coveredStartRva: '0x1000', coveredEndRva: '0x1009',
+				wildcards: [{ instructionRva: '0x1004', instructionByteIndex: 1, length: 4, patternByteIndex: 5, reason: 'relativeBranch' }],
+				unique: true, matchCount: 1, matchCountExact: true, qualityScore: 0.567, confidence: 'medium', createdAt: 100, updatedAt: 101,
+			}],
+			crossRevision: 'ANALYSIS_INCOMPLETE',
+			bothTargets: 'INVALID_ARGUMENT',
+		});
+	});
+
+	test('returns a proven xref-site signature when target bytes are ambiguous', async () => {
+		const { service, session, analysis } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		session.functionsResult = { functions: [
+			{ rva: '0x1000', end_rva: '0x1002', authoritative: true, source: FunctionSourceWire.ExceptionDirectory },
+			{ rva: '0x1040', end_rva: '0x1048', authoritative: true, source: FunctionSourceWire.ExceptionDirectory },
+		] };
+		const textBytes = new Uint8Array(0x200).fill(0x90);
+		textBytes.set([0x55, 0xc3], 0);
+		textBytes.set([0x55, 0xc3], 0x20);
+		textBytes.set([0xe8, 0xbb, 0xff, 0xff, 0xff, 0x48, 0x83, 0xec], 0x40);
+		const targetRows: IListingWindowResult = {
+			total_rows: 4,
+			rows: [
+				{ row: 0, rva: '0x1000', len: 1, bytes_hex: '55', mnemonic: 'push', operands: 'rbp', flow: FlowKindWire.Sequential, signature_fields: [] },
+				{ row: 1, rva: '0x1001', len: 1, bytes_hex: 'c3', mnemonic: 'ret', operands: '', flow: FlowKindWire.Return, signature_fields: [] },
+			],
+		};
+		const xrefRows: IListingWindowResult = {
+			total_rows: 4,
+			rows: [
+				{
+					row: 2, rva: '0x1040', len: 5, bytes_hex: 'e8bbffffff', mnemonic: 'call', operands: '1000h', flow: FlowKindWire.Call, branch_target: '0x1000',
+					signature_fields: [{ index: 1, length: 4, reason: SignatureFieldReasonWire.RelativeBranch }],
+				},
+				{ row: 3, rva: '0x1045', len: 3, bytes_hex: '4883ec', mnemonic: 'sub', operands: 'rsp', flow: FlowKindWire.Sequential, signature_fields: [] },
+			],
+		};
+		analysis.rowReader = rva => rva === '0x1040' ? 2 : 0;
+		analysis.listingReader = startRow => startRow === 2 ? xrefRows : targetRows;
+		analysis.xrefsToResult = { xrefs: [{ from: '0x1040', to: '0x1000', kind: XrefKindWire.Call }] };
+		analysis.memoryReader = (_space, address, count) => {
+			const start = Number(BigInt(address) - 0x1000n);
+			const bytes = textBytes.slice(start, start + count);
+			return {
+				bytesHex: [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join(''),
+				valid: [{ start: address, end: toWireAddress(BigInt(address) + BigInt(bytes.length)) }],
+				servedMoment: { kind: MomentKindWire.Static, epoch: 0 },
+			};
+		};
+
+		const result = await service.invoke({
+			capability: 'delver_make_signature',
+			args: { address: '0x1000', policy: 'relocation-stable', maxBytes: 8 },
+		}, CancellationToken.None);
+		const payload = payloadOf<IMakeSignaturePayload>(result);
+		assert.deepStrictEqual({
+			primaryUnique: payload.proof.unique,
+			available: payload.alternativeXrefSignature?.available,
+			kind: payload.alternativeXrefSignature?.kind,
+			pattern: payload.alternativeXrefSignature?.pattern,
+			sourceReference: payload.alternativeXrefSignature?.sourceReference,
+			proof: payload.alternativeXrefSignature?.proof,
+		}, {
+			primaryUnique: false,
+			available: true,
+			kind: 'xref-site',
+			pattern: 'e8 ?? ?? ?? ?? 48 83 ec',
+			sourceReference: { from: '0x1040', to: '0x1000', kind: 'call' },
+			proof: { matchCount: 1, matchCountExact: true, unique: true, matchRva: '0x1040', searchableByteCount: 512 },
 		});
 	});
 

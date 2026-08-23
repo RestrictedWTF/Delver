@@ -679,6 +679,13 @@
             "null"
           ]
         },
+        "bytes_hex": {
+          "description": "Exact encoded instruction bytes, when the analysis server retained the source image.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "flow": {
           "$ref": "#/definitions/FlowKindWire",
           "description": "How execution proceeds after this instruction."
@@ -706,6 +713,13 @@
         "rva": {
           "description": "Instruction address.",
           "type": "string"
+        },
+        "signature_fields": {
+          "description": "Address-bearing encoded fields that a relocation-stable byte signature should wildcard.",
+          "items": {
+            "$ref": "#/definitions/SignatureFieldWire"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -1164,6 +1178,59 @@
           "type": "string"
         }
       ]
+    },
+    "SignatureFieldReasonWire": {
+      "description": "Why an encoded field is wildcarded in a reusable signature.",
+      "oneOf": [
+        {
+          "description": "Relative immediate used by a direct branch or call.",
+          "enum": [
+            "relativeBranch"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Displacement used by RIP/EIP-relative memory addressing.",
+          "enum": [
+            "ipRelativeMemory"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Pointer-sized field named by the PE base-relocation table.",
+          "enum": [
+            "baseRelocation"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "SignatureFieldWire": {
+      "description": "One exact unstable field inside an encoded instruction.",
+      "properties": {
+        "index": {
+          "description": "Zero-based byte offset from the instruction start.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "length": {
+          "description": "Number of bytes occupied by the field.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "reason": {
+          "$ref": "#/definitions/SignatureFieldReasonWire",
+          "description": "Why the field is unsafe to retain literally."
+        }
+      },
+      "required": [
+        "index",
+        "length",
+        "reason"
+      ],
+      "type": "object"
     },
     "StringEncodingWire": {
       "description": "String encoding on the wire.",

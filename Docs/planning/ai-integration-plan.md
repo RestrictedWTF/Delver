@@ -253,8 +253,10 @@ unless the caller requests reveal.
 
 ```text
 delver_image_info           delver_list_functions
-delver_lookup_function      delver_read_bytes
-delver_disassemble
+delver_lookup_function      delver_convert_address
+delver_read_bytes           delver_search_bytes
+delver_make_signature       delver_list_signatures
+delver_save_signature       delver_disassemble
 delver_decompile            delver_xrefs_to
 delver_xrefs_from           delver_list_strings
 delver_search_strings       delver_imports
@@ -274,7 +276,7 @@ enough for a real function investigation before the broader catalog exists.
 ```text
 delver_basic_blocks         delver_callers          delver_callees
 delver_call_graph           delver_find_paths
-delver_search_bytes         delver_search_instructions
+delver_make_signature      delver_search_instructions
 delver_list_globals         delver_global_accesses
 delver_stack_frame          delver_list_types       delver_struct_info
 ```
@@ -284,7 +286,7 @@ Required substrate work:
 - expose basic blocks and CFG edges;
 - build bounded call-graph and path queries;
 - add indirect-call candidates with confidence and derivation;
-- add raw section/byte reads and byte/instruction search;
+- add raw section/byte reads, byte/instruction search, and reusable signatures;
 - model globals and data references;
 - persist prototypes, stack variables, structures, unions, and enums; and
 - invalidate and refresh dependent decompilation after accepted type changes.

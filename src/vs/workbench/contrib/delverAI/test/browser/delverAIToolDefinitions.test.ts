@@ -25,6 +25,52 @@ suite('Delver AI Tool Definitions', () => {
 		})));
 	});
 
+	test('describes exact byte reads, search, and address-space conversion', () => {
+		const tools = new Map(getDelverAgentToolData().map(tool => [tool.id, tool]));
+		const convert = tools.get('delver_convert_address');
+		const read = tools.get('delver_read_bytes');
+		const search = tools.get('delver_search_bytes');
+		const signature = tools.get('delver_make_signature');
+		const listSignatures = tools.get('delver_list_signatures');
+		const saveSignature = tools.get('delver_save_signature');
+
+		assert.deepStrictEqual({
+			convertRequired: convert?.inputSchema?.required,
+			convertSpaces: convert?.inputSchema?.properties?.from?.enum,
+			convertOffline: convert?.modelDescription.includes('offline project'),
+			readSpaces: read?.inputSchema?.properties?.space?.enum,
+			readFormats: read?.inputSchema?.properties?.format?.enum,
+			searchRequired: search?.inputSchema?.required,
+			searchSectionItems: search?.inputSchema?.properties?.sections?.items,
+			searchCountMaximum: search?.inputSchema?.properties?.count?.maximum,
+			signaturePolicies: signature?.inputSchema?.properties?.policy?.enum,
+			signatureScopes: signature?.inputSchema?.properties?.scope?.enum,
+			signatureMaximum: signature?.inputSchema?.properties?.maxBytes?.maximum,
+			crossRevisionFailClosed: signature?.modelDescription.includes('ANALYSIS_INCOMPLETE'),
+			listSignatureCountMaximum: listSignatures?.inputSchema?.properties?.count?.maximum,
+			saveSignatureRequired: saveSignature?.inputSchema?.required,
+			saveSignatureVariants: saveSignature?.inputSchema?.properties?.variant?.enum,
+			saveRequiresEvidence: saveSignature?.modelDescription.includes('source call'),
+		}, {
+			convertRequired: ['address', 'from'],
+			convertSpaces: ['rva', 'va', 'file'],
+			convertOffline: true,
+			readSpaces: ['image', 'file'],
+			readFormats: ['hex', 'u8', 'u16le', 'u32le', 'u64le'],
+			searchRequired: ['pattern'],
+			searchSectionItems: { type: 'string' },
+			searchCountMaximum: 256,
+			signaturePolicies: ['unique-now', 'relocation-stable', 'cross-revision-stable'],
+			signatureScopes: ['function', 'executableSections', 'image'],
+			signatureMaximum: 256,
+			crossRevisionFailClosed: true,
+			listSignatureCountMaximum: 200,
+			saveSignatureRequired: ['name', 'sourceCallId'],
+			saveSignatureVariants: ['primary', 'xref-site'],
+			saveRequiresEvidence: true,
+		});
+	});
+
 	test('describes review-only proposal batches with bounded canonical schemas', () => {
 		const tools = new Map(getDelverAgentToolData().map(tool => [tool.id, tool]));
 		const rename = tools.get('delver_propose_rename');

@@ -464,6 +464,10 @@ export interface IListingRowWire {
 	 */
 	branch_target?: string;
 	/**
+	 * Exact encoded instruction bytes, when the analysis server retained the source image.
+	 */
+	bytes_hex?: string;
+	/**
 	 * How execution proceeds after this instruction.
 	 */
 	flow: FlowKindWire;
@@ -487,6 +491,10 @@ export interface IListingRowWire {
 	 * Instruction address.
 	 */
 	rva: string;
+	/**
+	 * Address-bearing encoded fields that a relocation-stable byte signature should wildcard.
+	 */
+	signature_fields?: ISignatureFieldWire[];
 }
 
 /**
@@ -793,6 +801,42 @@ export const enum SeedSourceWire {
 	 * A TLS callback, which runs before the entry point.
 	 */
 	TlsCallback = 'tlsCallback',
+}
+
+/**
+ * Why an encoded field is wildcarded in a reusable signature.
+ */
+export const enum SignatureFieldReasonWire {
+	/**
+	 * Relative immediate used by a direct branch or call.
+	 */
+	RelativeBranch = 'relativeBranch',
+	/**
+	 * Displacement used by RIP/EIP-relative memory addressing.
+	 */
+	IpRelativeMemory = 'ipRelativeMemory',
+	/**
+	 * Pointer-sized field named by the PE base-relocation table.
+	 */
+	BaseRelocation = 'baseRelocation',
+}
+
+/**
+ * One exact unstable field inside an encoded instruction.
+ */
+export interface ISignatureFieldWire {
+	/**
+	 * Zero-based byte offset from the instruction start.
+	 */
+	index: number;
+	/**
+	 * Number of bytes occupied by the field.
+	 */
+	length: number;
+	/**
+	 * Why the field is unsafe to retain literally.
+	 */
+	reason: SignatureFieldReasonWire;
 }
 
 /**

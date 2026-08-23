@@ -70,10 +70,10 @@ untitled projects.
 The Review view now groups pending interpretation proposals and findings, offers
 human Accept/Reject actions, and publishes proposal locations and finding ranges
 through the focus bus. Finding decisions are separate append-only records in
-portable-project schema v5; neither acceptance nor rejection rewrites the model's
+portable-project schema v6; neither acceptance nor rejection rewrites the model's
 claim.
 
-Portable-project schema v5 also retains each successful project-bound dispatcher
+Portable-project schema v6 also retains each successful project-bound dispatcher
 request/result envelope. Finding ranges can cite earlier results by `callId`;
 references are validated against the same target revision and appear beneath the
 range in Review. Selecting one opens its complete retained request/result in a
@@ -85,18 +85,30 @@ This exit is complete for the static-session baseline.
 
 ### S2 — Read the bytes, not just their rendering
 
-The first vertical slice is implemented: `delver_read_bytes` provides bounded
-image-RVA and raw-file-offset reads plus exact little-endian integer views over
-the existing provider binary-frame protocol. Byte-pattern and instruction
-search, address conversion helpers, structured data/global reads, and optional
-instruction encodings remain.
+The first four vertical slices are implemented: `delver_read_bytes` provides
+bounded image-RVA and raw-file-offset reads plus exact little-endian integer
+views over the existing provider binary-frame protocol, and
+`delver_convert_address` maps RVA, absolute VA, and raw file offsets from live or
+persisted section metadata without pretending headers or virtual zero-fill have
+raw backing. `delver_search_bytes` adds cursor-bound exact/nibble-wildcard scans
+over selected raw-backed image sections, including complete negative results.
+`delver_make_signature` grows instruction-aligned patterns and proves them over
+function, executable-section, or image scope. Its relocation-stable mode uses
+decoder and PE relocation metadata, reports every wildcard and covered RVA, and
+can return a separately proven incoming-xref-site signature when target bytes
+are ambiguous. Proven primary or xref-site results can be named through their
+retained source call and restored offline from the per-revision schema-v6
+signature table. Cross-revision selection remains fail-closed until historical
+sample bytes can be retained or attached. Instruction search and structured
+data/global reads remain.
 
 Add bounded, batch-first operations for:
 
 - raw bytes and typed integers;
 - string/data/global reads at an address;
-- RVA, VA, and file-offset conversion;
-- byte patterns with wildcards;
+- RVA, VA, and file-offset conversion (`done`);
+- byte patterns with wildcards (`done`);
+- instruction-aware function signatures (`done` for unique-now and relocation-stable; cross-revision byte retention remains);
 - instruction, immediate, constant, regex, and later YARA searches.
 
 Disassembly results should optionally include encoded bytes. Searches that exceed

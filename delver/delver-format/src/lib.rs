@@ -35,10 +35,19 @@ pub struct ParsedImage {
 	pub exports: Vec<Export>,
 	/// Candidate function starts, ordered by descending confidence.
 	pub function_seeds: Vec<FunctionSeed>,
-	/// Base relocation targets as RVAs.
-	pub relocations: Vec<u64>,
+	/// Base relocation targets and their encoded widths.
+	pub relocations: Vec<BaseRelocation>,
 	/// TLS directory, when present.
 	pub tls: Option<TlsInfo>,
+}
+
+/// One PE base-relocation field that must change when the image is rebased.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BaseRelocation {
+	/// Image-relative start of the relocated field.
+	pub rva: u64,
+	/// Encoded field width in bytes.
+	pub width: u8,
 }
 
 impl ParsedImage {

@@ -25,6 +25,7 @@ import { StopWatch } from '../../../../base/common/stopwatch.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { AnalysisSessionId, IDelverAnalysisService } from '../../../../platform/delver/common/delverAnalysisService.js';
 import { DELVER_FINDING_LIMITS, DelverFindingSeverity, IDelverFindingDraft, IDelverFindingEvidence } from '../../../../platform/delver/common/findings.js';
+import { DelverSignatureVariant, IDelverNamedSignatureDraft } from '../../../../platform/delver/common/delverSignature.js';
 import { EditOp, EditValue, IAuthor, IEdit } from '../../../../platform/delver/common/interpretation.js';
 import { functionDisplayName, placeholderFunctionName } from '../../../../platform/delver/common/naming.js';
 import {
@@ -32,6 +33,7 @@ import {
 	IFunctionWire,
 	IImportedModuleWire,
 	IListingRowWire,
+	ISectionWire,
 	IStringWire,
 	IXrefWire,
 } from '../../../../platform/delver/common/protocol.generated.js';
@@ -108,7 +110,12 @@ export const enum DelverAgentCapabilityId {
 	ImageInfo = 'delver_image_info',
 	ListFunctions = 'delver_list_functions',
 	LookupFunction = 'delver_lookup_function',
+	ConvertAddress = 'delver_convert_address',
 	ReadBytes = 'delver_read_bytes',
+	SearchBytes = 'delver_search_bytes',
+	MakeSignature = 'delver_make_signature',
+	ListSignatures = 'delver_list_signatures',
+	SaveSignature = 'delver_save_signature',
 	Disassemble = 'delver_disassemble',
 	Decompile = 'delver_decompile',
 	XrefsTo = 'delver_xrefs_to',
@@ -168,9 +175,34 @@ export const DELVER_AGENT_CAPABILITIES: readonly IDelverAgentCapability[] = [
 		description: 'Resolves one function by name, or the function containing a given address.',
 	},
 	{
+		id: DelverAgentCapabilityId.ConvertAddress, group: 'analysis', kind: 'read', requiresAttachedTarget: false,
+		title: 'Delver Convert Address',
+		description: 'Converts an RVA, virtual address, or raw file offset into the other address spaces and identifies its section.',
+	},
+	{
 		id: DelverAgentCapabilityId.ReadBytes, group: 'analysis', kind: 'read', requiresAttachedTarget: true,
 		title: 'Delver Read Bytes',
 		description: 'Reads bounded raw bytes from an image RVA or file offset, optionally decoding little-endian integers. Requires the sample to be attached.',
+	},
+	{
+		id: DelverAgentCapabilityId.SearchBytes, group: 'analysis', kind: 'read', requiresAttachedTarget: true,
+		title: 'Delver Search Bytes',
+		description: 'Searches provider-backed image sections for an exact byte pattern with optional nibble wildcards. Requires the sample to be attached.',
+	},
+	{
+		id: DelverAgentCapabilityId.MakeSignature, group: 'analysis', kind: 'read', requiresAttachedTarget: true,
+		title: 'Delver Make Signature',
+		description: 'Builds and proves an instruction-aware masked byte signature for a detected function. Requires the sample to be attached.',
+	},
+	{
+		id: DelverAgentCapabilityId.ListSignatures, group: 'analysis', kind: 'read', requiresAttachedTarget: false,
+		title: 'Delver List Signatures',
+		description: 'Pages through named, evidence-linked signatures retained for the current project revision.',
+	},
+	{
+		id: DelverAgentCapabilityId.SaveSignature, group: 'analysis', kind: 'write', requiresAttachedTarget: false,
+		title: 'Delver Save Signature',
+		description: 'Names and persists a primary or xref-site signature from a completed delver_make_signature call.',
 	},
 	{
 		id: DelverAgentCapabilityId.Disassemble, group: 'analysis', kind: 'read', requiresAttachedTarget: true,
@@ -288,6 +320,56 @@ interface IParsedFinding {
 
 type ByteReadSpace = 'image' | 'file';
 type ByteReadFormat = 'hex' | 'u8' | 'u16le' | 'u32le' | 'u64le';
+type AddressConversionSpace = 'rva' | 'va' | 'file';
+
+interface IBytePattern {
+	readonly canonical: string;
+	readonly bytes: readonly { readonly value: number; readonly mask: number }[];
+}
+
+interface IByteSearchSegment {
+	readonly section: ISectionWire;
+	readonly rva: bigint;
+	readonly rawOffset: bigint;
+	readonly size: number;
+	readonly flatStart: number;
+}
+
+interface IByteSearchMatch {
+	readonly flatOffset: number;
+	readonly rva: bigint;
+	readonly fileOffset: bigint;
+	readonly section: string;
+	readonly bytesHex: string;
+}
+
+interface IByteSearchScanResult {
+	readonly matches: readonly IByteSearchMatch[];
+	readonly scannedCandidateCount: number;
+	readonly candidateCount: number;
+	readonly searchableByteCount: number;
+	readonly nextOffset?: number;
+}
+
+type SignatureScope = 'function' | 'executableSections' | 'image';
+type SignaturePolicy = 'unique-now' | 'relocation-stable' | 'cross-revision-stable';
+
+interface ISignatureWildcard {
+	readonly instructionRva: bigint;
+	readonly byteOffset: number;
+	readonly byteLength: number;
+	readonly patternByteOffset: number;
+	readonly reason: string;
+}
+
+interface ISignatureCandidate {
+	readonly pattern: IBytePattern;
+	readonly rows: readonly IListingRowWire[];
+	readonly wildcards: readonly ISignatureWildcard[];
+	readonly fixedByteCount: number;
+}
+
+const BYTE_SEARCH_CHUNK_SIZE = 64 * 1024;
 
 /**
  * A function with its display name resolved.
@@ -445,7 +527,12 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 		this.handlers.set(DelverAgentCapabilityId.ImageInfo, context => this.handleImageInfo(context));
 		this.handlers.set(DelverAgentCapabilityId.ListFunctions, context => this.handleListFunctions(context));
 		this.handlers.set(DelverAgentCapabilityId.LookupFunction, context => this.handleLookupFunction(context));
+		this.handlers.set(DelverAgentCapabilityId.ConvertAddress, context => this.handleConvertAddress(context));
 		this.handlers.set(DelverAgentCapabilityId.ReadBytes, context => this.handleReadBytes(context));
+		this.handlers.set(DelverAgentCapabilityId.SearchBytes, context => this.handleSearchBytes(context));
+		this.handlers.set(DelverAgentCapabilityId.MakeSignature, context => this.handleMakeSignature(context));
+		this.handlers.set(DelverAgentCapabilityId.ListSignatures, context => this.handleListSignatures(context));
+		this.handlers.set(DelverAgentCapabilityId.SaveSignature, context => this.handleSaveSignature(context));
 		this.handlers.set(DelverAgentCapabilityId.Disassemble, context => this.handleDisassemble(context));
 		this.handlers.set(DelverAgentCapabilityId.Decompile, context => this.handleDecompile(context));
 		this.handlers.set(DelverAgentCapabilityId.XrefsTo, context => this.handleXrefs(context, 'to'));
@@ -754,6 +841,86 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 		};
 	}
 
+	private async handleConvertAddress(context: IHandlerContext): Promise<IHandlerOutput> {
+		const session = this.requireSession();
+		const address = parseWireAddress(context.args.address);
+		const from = addressConversionSpace(context.args.from);
+		const info = await this.sessionService.imageInfo();
+		this.throwIfCancelled(context.token);
+
+		const imageBase = parseWireAddress(info.image_base, 'image base');
+		let rva: bigint;
+		let fileOffset: bigint | undefined;
+		let section: ISectionWire | undefined;
+		if (from === 'file') {
+			section = info.sections.find(candidate => containsWireRange(address, candidate.raw_offset, candidate.raw_size));
+			if (section) {
+				const offsetInSection = address - parseWireAddress(section.raw_offset, 'section raw offset');
+				if (offsetInSection >= BigInt(section.virtual_size)) {
+					throw addressNotMapped(from, address);
+				}
+				fileOffset = address;
+				rva = parseWireAddress(section.virtual_address, 'section virtual address')
+					+ offsetInSection;
+			} else {
+				rva = 0n;
+			}
+		} else {
+			if (from === 'va' && address < imageBase) {
+				throw addressNotMapped(from, address);
+			}
+			rva = from === 'va' ? address - imageBase : address;
+			section = info.sections.find(candidate => containsWireRange(rva, candidate.virtual_address, candidate.virtual_size));
+			if (section) {
+				const offsetInSection = rva - parseWireAddress(section.virtual_address, 'section virtual address');
+				if (offsetInSection < BigInt(section.raw_size)) {
+					fileOffset = parseWireAddress(section.raw_offset, 'section raw offset') + offsetInSection;
+				}
+			}
+		}
+
+		if (!section) {
+			throw addressNotMapped(from, address);
+		}
+
+		const virtualStart = parseWireAddress(section.virtual_address, 'section virtual address');
+		const virtualEnd = virtualStart + BigInt(section.virtual_size);
+		const rawStart = parseWireAddress(section.raw_offset, 'section raw offset');
+		const rawEnd = rawStart + BigInt(section.raw_size);
+		const va = imageBase + rva;
+		return {
+			data: {
+				input: { space: from, address: toWireAddress(address) },
+				rva: toWireAddress(rva),
+				va: toWireAddress(va),
+				...(fileOffset === undefined ? {} : { fileOffset: toWireAddress(fileOffset) }),
+				fileBacked: fileOffset !== undefined,
+				offsetWithinSection: toWireAddress(rva - virtualStart),
+				section: {
+					name: section.name,
+					rvaStart: toWireAddress(virtualStart),
+					rvaEnd: toWireAddress(virtualEnd),
+					vaStart: toWireAddress(imageBase + virtualStart),
+					vaEnd: toWireAddress(imageBase + virtualEnd),
+					rawOffset: toWireAddress(rawStart),
+					rawEnd: toWireAddress(rawEnd),
+					virtualSize: section.virtual_size,
+					rawSize: section.raw_size,
+					readable: section.readable,
+					writable: section.writable,
+					executable: section.executable,
+				},
+			},
+			provenance: [{
+				source: session.sessionId ? 'analysis' : 'project',
+				detail: 'Address conversion derived from the image base and PE section table.',
+				contentHash: session.contentHash,
+				addresses: [toWireAddress(rva)],
+				untrusted: true,
+			}],
+		};
+	}
+
 	private async handleDisassemble(context: IHandlerContext): Promise<IHandlerOutput> {
 		const session = this.requireAttached();
 		const { startIndex, count, project } = this.pageArgs(context, DelverAgentCapabilityId.Disassemble, DELVER_AGENT_LIMITS.listingRows);
@@ -864,6 +1031,414 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 				contentHash: session.contentHash,
 				untrusted: true,
 				...(space === 'image' ? { ranges: validRanges } : {}),
+			}],
+		};
+	}
+
+	private async handleSearchBytes(context: IHandlerContext): Promise<IHandlerOutput> {
+		const session = this.requireAttached();
+		const pattern = parseBytePattern(context.args.pattern);
+		const info = await this.sessionService.imageInfo();
+		this.throwIfCancelled(context.token);
+		const sectionNames = byteSearchSectionNames(context.args.sections, info.sections);
+		const executableOnly = optionalBoolean(context.args.executableOnly, 'executableOnly') ?? false;
+		const project = this.requireProjectIdentity();
+		const filter = filterFingerprint({
+			pattern: pattern.canonical,
+			sections: sectionNames,
+			executableOnly,
+		});
+		const startOffset = decodeCursor(context.args.cursor, DelverAgentCapabilityId.SearchBytes, project, filter);
+		const count = boundedCount(context.args.count, DELVER_AGENT_LIMITS.byteSearchMatches);
+		const segments = byteSearchSegments(info.sections, sectionNames, executableOnly);
+		const searchableByteCount = segments.reduce((total, segment) => total + segment.size, 0);
+		if (startOffset > searchableByteCount) {
+			throw new DelverAgentError(DelverAgentErrorCode.StaleRevision, 'The byte-search cursor is outside the selected section data. Restart the search.');
+		}
+		const scan = await this.scanBytePattern(session, segments, pattern, startOffset, count, context.token);
+
+		const imageBase = parseWireAddress(info.image_base, 'image base');
+		const ranges = scan.matches.map(match => ({
+			start: toWireAddress(match.rva),
+			end: toWireAddress(match.rva + BigInt(pattern.bytes.length)),
+		}));
+		return {
+			data: {
+				pattern: pattern.canonical,
+				patternByteCount: pattern.bytes.length,
+				searchableByteCount: scan.searchableByteCount,
+				candidateCount: scan.candidateCount,
+				scannedCandidateCount: scan.scannedCandidateCount,
+				sections: segments.map(segment => segment.section.name),
+				executableOnly,
+				matches: scan.matches.map(match => ({
+					rva: toWireAddress(match.rva),
+					va: toWireAddress(imageBase + match.rva),
+					fileOffset: toWireAddress(match.fileOffset),
+					section: match.section,
+					bytesHex: match.bytesHex,
+				})),
+			},
+			completeness: scan.nextOffset === undefined ? 'complete' : 'partial',
+			...(scan.nextOffset === undefined ? {} : {
+				nextCursor: encodeCursor(DelverAgentCapabilityId.SearchBytes, project, scan.nextOffset, filter),
+				omitted: { reason: 'More matches remain; continue with nextCursor. The remaining count is unknown until the selected bytes are fully scanned.' },
+			}),
+			provenance: [{
+				source: 'analysis',
+				detail: scan.nextOffset === undefined
+					? 'Completed a wildcard byte-pattern scan over every selected provider-backed section byte.'
+					: 'Scanned selected provider-backed section bytes until the next page of matches was proven.',
+				contentHash: session.contentHash,
+				untrusted: true,
+				ranges,
+			}],
+		};
+	}
+
+	private async scanBytePattern(
+		session: IDelverSession & { readonly sessionId: AnalysisSessionId },
+		segments: readonly IByteSearchSegment[],
+		pattern: IBytePattern,
+		startOffset: number,
+		matchLimit: number,
+		token: CancellationToken,
+	): Promise<IByteSearchScanResult> {
+		const searchableByteCount = segments.reduce((total, segment) => total + segment.size, 0);
+		const candidateCount = segments.reduce((total, segment) => total + Math.max(0, segment.size - pattern.bytes.length + 1), 0);
+		const matches: IByteSearchMatch[] = [];
+		let scannedCandidateCount = 0;
+		let nextOffset: number | undefined;
+
+		segmentLoop: for (const segment of segments) {
+			let localOffset = Math.max(0, startOffset - segment.flatStart);
+			const candidateLimit = segment.size - pattern.bytes.length + 1;
+			if (localOffset >= candidateLimit) {
+				continue;
+			}
+			while (localOffset < candidateLimit) {
+				const candidateEnd = Math.min(candidateLimit, localOffset + BYTE_SEARCH_CHUNK_SIZE);
+				const readLength = candidateEnd - localOffset + pattern.bytes.length - 1;
+				const read = await this.analysisService.readMemory(
+					session.sessionId,
+					'image',
+					toWireAddress(segment.rva + BigInt(localOffset)),
+					readLength,
+				);
+				this.throwIfCancelled(token);
+				const bytes = bytesFromHex(read.bytesHex);
+				if (bytes.length !== readLength) {
+					throw new DelverAgentError(
+						DelverAgentErrorCode.AnalysisIncomplete,
+						`The provider returned ${bytes.length} of ${readLength} bytes while scanning image RVA ${toWireAddress(segment.rva + BigInt(localOffset))}.`,
+					);
+				}
+
+				for (let candidate = localOffset; candidate < candidateEnd; candidate++) {
+					scannedCandidateCount++;
+					if ((scannedCandidateCount & 0xfff) === 0) {
+						this.throwIfCancelled(token);
+					}
+					const byteOffset = candidate - localOffset;
+					if (!bytePatternMatches(bytes, byteOffset, pattern.bytes)) {
+						continue;
+					}
+					const flatOffset = segment.flatStart + candidate;
+					if (matches.length >= matchLimit) {
+						nextOffset = flatOffset;
+						break segmentLoop;
+					}
+					matches.push({
+						flatOffset,
+						rva: segment.rva + BigInt(candidate),
+						fileOffset: segment.rawOffset + BigInt(candidate),
+						section: segment.section.name,
+						bytesHex: hexFromBytes(bytes, byteOffset, pattern.bytes.length),
+					});
+				}
+				localOffset = candidateEnd;
+			}
+		}
+
+		return { matches, scannedCandidateCount, candidateCount, searchableByteCount, nextOffset };
+	}
+
+	private async handleMakeSignature(context: IHandlerContext): Promise<IHandlerOutput> {
+		const session = this.requireAttached();
+		const scope = signatureScope(context.args.scope);
+		const policy = signaturePolicy(context.args.policy);
+		const maxBytes = signatureMaxBytes(context.args.maxBytes);
+		const functions = await this.resolvedFunctions(session);
+		const target = resolveSignatureFunction(context.args, functions);
+		if (policy === 'cross-revision-stable') {
+			throw new DelverAgentError(
+				DelverAgentErrorCode.AnalysisIncomplete,
+				'Cross-revision signature generation is not available yet because portable .delverdb snapshots retain revision facts but not historical sample bytes, and the analysis service cannot attach multiple revisions. Use relocation-stable for the current binary.',
+			);
+		}
+		const targetIndex = functions.indexOf(target);
+		const functionEnd = target.endRva ?? functions[targetIndex + 1]?.rva;
+		if (functionEnd !== undefined && functionEnd <= target.rva) {
+			throw new DelverAgentError(DelverAgentErrorCode.AnalysisIncomplete, `The detected end of ${target.name} is not after its entry point.`);
+		}
+		if (scope === 'function' && functionEnd === undefined) {
+			throw new DelverAgentError(DelverAgentErrorCode.AnalysisIncomplete, `The function scope requires a detected end boundary for ${target.name}.`);
+		}
+
+		const startRow = await this.analysisService.rowForAddress(session.sessionId, toWireAddress(target.rva), false);
+		this.throwIfCancelled(context.token);
+		if (startRow === undefined) {
+			throw new DelverAgentError(
+				DelverAgentErrorCode.AnalysisIncomplete,
+				`${target.name} at ${toWireAddress(target.rva)} does not begin on a decoded instruction boundary.`,
+			);
+		}
+		const listing = await this.analysisService.listingWindow(session.sessionId, startRow, Math.min(maxBytes, 256));
+		this.throwIfCancelled(context.token);
+		const rows = signatureRows(listing.rows, target.rva, functionEnd, maxBytes, policy);
+		if (rows.length === 0) {
+			throw new DelverAgentError(DelverAgentErrorCode.AnalysisIncomplete, `No signature-capable instructions are available at ${toWireAddress(target.rva)}.`);
+		}
+
+		const info = await this.sessionService.imageInfo();
+		this.throwIfCancelled(context.token);
+		const segments = signatureSearchSegments(info.sections, scope, target.rva, functionEnd);
+		if (segments.length === 0) {
+			throw new DelverAgentError(DelverAgentErrorCode.AddressNotMapped, `${target.name} is not inside provider-backed section bytes.`);
+		}
+
+		const candidates = signatureCandidates(rows, policy);
+		let selected: ISignatureCandidate | undefined;
+		let selectedScan: IByteSearchScanResult | undefined;
+		for (const candidate of candidates) {
+			const scan = await this.scanBytePattern(session, segments, candidate.pattern, 0, DELVER_AGENT_LIMITS.byteSearchMatches.max, context.token);
+			selected = candidate;
+			selectedScan = scan;
+			if (signatureIsUniqueAt(scan, target.rva)) {
+				break;
+			}
+		}
+		if (!selected || !selectedScan) {
+			throw new DelverAgentError(DelverAgentErrorCode.AnalysisIncomplete, 'No instruction-aligned signature candidate could be constructed.');
+		}
+
+		const unique = signatureIsUniqueAt(selectedScan, target.rva);
+		const matchCountExact = selectedScan.nextOffset === undefined;
+		const quality = signatureQuality(selected, unique, matchCountExact);
+		const coveredStart = BigInt(selected.rows[0].rva);
+		const coveredEnd = BigInt(selected.rows[selected.rows.length - 1].rva) + BigInt(selected.rows[selected.rows.length - 1].len);
+		const matches = selectedScan.matches.map(match => ({
+			rva: toWireAddress(match.rva),
+			section: match.section,
+			fileOffset: toWireAddress(match.fileOffset),
+		}));
+		let alternativeXrefSignature: Record<string, unknown> | undefined;
+		if (!unique) {
+			alternativeXrefSignature = await this.makeXrefSignature(session, target, functions, info.sections, policy, maxBytes, context.token);
+		}
+
+		return {
+			data: {
+				target: describeFunction(target),
+				scope,
+				policy,
+				pattern: selected.pattern.canonical,
+				byteCount: selected.pattern.bytes.length,
+				fixedByteCount: selected.fixedByteCount,
+				wildcardByteCount: selected.pattern.bytes.length - selected.fixedByteCount,
+				coveredInstructions: selected.rows.map(row => ({
+					rva: row.rva,
+					endRva: toWireAddress(BigInt(row.rva) + BigInt(row.len)),
+					length: row.len,
+					bytesHex: row.bytes_hex,
+					mnemonic: row.mnemonic,
+					operands: row.operands,
+				})),
+				wildcardedOperands: selected.wildcards.map(wildcard => ({
+					instructionRva: toWireAddress(wildcard.instructionRva),
+					byteOffset: wildcard.byteOffset,
+					byteLength: wildcard.byteLength,
+					patternByteOffset: wildcard.patternByteOffset,
+					reason: wildcard.reason,
+				})),
+				proof: {
+					matchCount: selectedScan.matches.length,
+					matchCountExact,
+					...(matchCountExact ? {} : { matchCountLowerBound: selectedScan.matches.length + 1 }),
+					unique,
+					targetMatched: selectedScan.matches.some(match => match.rva === target.rva),
+					searchableByteCount: selectedScan.searchableByteCount,
+					candidateCount: selectedScan.candidateCount,
+					matches,
+				},
+				quality,
+				...(alternativeXrefSignature === undefined ? {} : { alternativeXrefSignature }),
+			},
+			completeness: matchCountExact ? 'complete' : 'partial',
+			...(matchCountExact ? {} : {
+				omitted: { reason: 'The signature exceeded the bounded match proof. The reported lower bound is exact, but the total match count is not.' },
+			}),
+			provenance: [{
+				source: 'analysis',
+				detail: unique
+					? `Instruction-aware signature proven unique under ${scope} scope.`
+					: `Instruction-aware signature generated, but uniqueness was not proven under ${scope} scope.`,
+				contentHash: session.contentHash,
+				untrusted: true,
+				ranges: [{ start: toWireAddress(coveredStart), end: toWireAddress(coveredEnd) }],
+			}],
+		};
+	}
+
+	private async makeXrefSignature(
+		session: IDelverSession & { readonly sessionId: AnalysisSessionId },
+		target: IResolvedFunction,
+		functions: readonly IResolvedFunction[],
+		sections: readonly ISectionWire[],
+		policy: Exclude<SignaturePolicy, 'cross-revision-stable'>,
+		maxBytes: number,
+		token: CancellationToken,
+	): Promise<Record<string, unknown>> {
+		const incoming = await this.analysisService.xrefsTo(session.sessionId, toWireAddress(target.rva));
+		this.throwIfCancelled(token);
+		const codeReferences = incoming.xrefs.filter(xref => xref.kind === 'call' || xref.kind === 'jump' || xref.kind === 'conditionalJump');
+		const searchSegments = byteSearchSegments(sections, [], true);
+		for (const xref of codeReferences.slice(0, 16)) {
+			const sourceRva = BigInt(xref.from);
+			const sourceFunction = containingFunction(functions, sourceRva);
+			const sourceIndex = sourceFunction === undefined ? -1 : functions.indexOf(sourceFunction);
+			const sourceEnd = sourceFunction?.endRva ?? (sourceIndex >= 0 ? functions[sourceIndex + 1]?.rva : undefined);
+			const rowIndex = await this.analysisService.rowForAddress(session.sessionId, xref.from, false);
+			this.throwIfCancelled(token);
+			if (rowIndex === undefined) {
+				continue;
+			}
+			const listing = await this.analysisService.listingWindow(session.sessionId, rowIndex, Math.min(maxBytes, 64));
+			this.throwIfCancelled(token);
+			if (listing.rows[0]?.branch_target !== toWireAddress(target.rva)) {
+				continue;
+			}
+			let rows: readonly IListingRowWire[];
+			try {
+				rows = signatureRows(listing.rows, sourceRva, sourceEnd, Math.min(maxBytes, 64), policy);
+			} catch (error) {
+				if (error instanceof DelverAgentError && error.code === DelverAgentErrorCode.AnalysisIncomplete) {
+					continue;
+				}
+				throw error;
+			}
+			if (rows.length === 0) {
+				continue;
+			}
+			for (const candidate of signatureCandidates(rows, policy)) {
+				const scan = await this.scanBytePattern(session, searchSegments, candidate.pattern, 0, DELVER_AGENT_LIMITS.byteSearchMatches.max, token);
+				if (!signatureIsUniqueAt(scan, sourceRva)) {
+					continue;
+				}
+				return {
+					available: true,
+					kind: 'xref-site',
+					scope: 'executableSections',
+					pattern: candidate.pattern.canonical,
+					byteCount: candidate.pattern.bytes.length,
+					fixedByteCount: candidate.fixedByteCount,
+					wildcardByteCount: candidate.pattern.bytes.length - candidate.fixedByteCount,
+					sourceReference: { from: xref.from, to: xref.to, kind: xref.kind },
+					targetRecovery: 'Decode the direct branch at byte offset 0 of the unique signature match; its branch target is the function entry.',
+					coveredInstructions: candidate.rows.map(row => ({
+						rva: row.rva,
+						endRva: toWireAddress(BigInt(row.rva) + BigInt(row.len)),
+						length: row.len,
+						bytesHex: row.bytes_hex,
+						mnemonic: row.mnemonic,
+						operands: row.operands,
+					})),
+					wildcardedOperands: candidate.wildcards.map(wildcard => ({
+						instructionRva: toWireAddress(wildcard.instructionRva),
+						byteOffset: wildcard.byteOffset,
+						byteLength: wildcard.byteLength,
+						patternByteOffset: wildcard.patternByteOffset,
+						reason: wildcard.reason,
+					})),
+					proof: {
+						matchCount: 1,
+						matchCountExact: true,
+						unique: true,
+						matchRva: xref.from,
+						searchableByteCount: scan.searchableByteCount,
+					},
+					quality: signatureQuality(candidate, true, true),
+				};
+			}
+		}
+		return {
+			available: false,
+			incomingReferenceCount: incoming.xrefs.length,
+			codeReferenceCount: codeReferences.length,
+			reason: codeReferences.length === 0
+				? 'No decoded incoming code reference can anchor an xref-based signature.'
+				: 'No incoming branch site produced a signature proven unique across executable sections within the byte limit.',
+			referenceRvas: codeReferences.slice(0, 32).map(xref => xref.from),
+		};
+	}
+
+	private async handleListSignatures(context: IHandlerContext): Promise<IHandlerOutput> {
+		const session = this.requireSession();
+		const { startIndex, count, project, filter } = this.pageArgs(
+			context,
+			DelverAgentCapabilityId.ListSignatures,
+			DELVER_AGENT_LIMITS.signatures,
+			['nameContains'],
+		);
+		const nameContains = optionalBoundedText(context.args.nameContains, DELVER_AGENT_LIMITS.signatureNameCharacters, 'nameContains')?.toLowerCase();
+		const all = this.projectService.signaturesFor(session.contentHash);
+		const filtered = nameContains === undefined ? all : all.filter(signature => signature.name.toLowerCase().includes(nameContains));
+		const page = paginate(filtered, startIndex, count);
+		return {
+			data: {
+				total: page.total,
+				totalUnfiltered: all.length,
+				signatures: page.items,
+			},
+			completeness: page.nextIndex === undefined ? 'complete' : 'partial',
+			...(page.nextIndex === undefined ? {} : {
+				nextCursor: encodeCursor(DelverAgentCapabilityId.ListSignatures, project, page.nextIndex, filter),
+				omitted: { count: page.omittedCount, reason: 'More named signatures remain; continue with nextCursor.' },
+			}),
+			provenance: [{
+				source: 'project',
+				detail: `Named signatures ${startIndex}..${startIndex + page.items.length} of ${page.total} for the selected revision.`,
+				contentHash: session.contentHash,
+				revisionId: project.revisionId,
+			}],
+		};
+	}
+
+	private async handleSaveSignature(context: IHandlerContext): Promise<IHandlerOutput> {
+		const session = this.requireSession();
+		const name = requiredBoundedText(context.args.name, DELVER_AGENT_LIMITS.signatureNameCharacters, 'name');
+		const sourceCallId = requiredBoundedText(context.args.sourceCallId, 128, 'sourceCallId');
+		const variant = signatureVariant(context.args.variant);
+		const sourceCall = this.projectService.toolCall(session.contentHash, sourceCallId);
+		if (!sourceCall || sourceCall.capability !== DelverAgentCapabilityId.MakeSignature) {
+			throw new DelverAgentError(
+				DelverAgentErrorCode.InvalidArgument,
+				`sourceCallId must identify a retained ${DelverAgentCapabilityId.MakeSignature} result for the current project revision.`,
+			);
+		}
+		const replacedExistingName = this.projectService.signaturesFor(session.contentHash)
+			.some(signature => signature.name.toLowerCase() === name.toLowerCase());
+		const draft = namedSignatureDraft(name, sourceCallId, session.contentHash, variant, sourceCall.resultJson);
+		const signature = await this.projectService.saveSignature(session.contentHash, draft);
+		return {
+			data: { signature, replacedExistingName },
+			provenance: [{
+				source: 'project',
+				detail: `Named ${variant} signature retained from tool call ${sourceCallId}.`,
+				contentHash: session.contentHash,
+				addresses: [signature.functionRva],
+				ranges: [{ start: signature.coveredStartRva, end: signature.coveredEndRva }],
+				untrusted: true,
 			}],
 		};
 	}
@@ -1489,6 +2064,480 @@ function findingText(value: unknown, maxLength: number, path: string): string {
 
 function proposalArgument(message: string): DelverAgentError {
 	return new DelverAgentError(DelverAgentErrorCode.InvalidArgument, message);
+}
+
+function addressConversionSpace(value: unknown): AddressConversionSpace {
+	if (value === 'rva' || value === 'va' || value === 'file') {
+		return value;
+	}
+	throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, 'from must be "rva", "va", or "file".');
+}
+
+function containsWireRange(address: bigint, startWire: string, size: number): boolean {
+	const start = parseWireAddress(startWire);
+	return address >= start && address < start + BigInt(size);
+}
+
+function addressNotMapped(space: AddressConversionSpace, address: bigint): DelverAgentError {
+	return new DelverAgentError(
+		DelverAgentErrorCode.AddressNotMapped,
+		`${toWireAddress(address)} is not inside a loadable PE section in ${space} space. Headers and section gaps are not mapped by this conversion.`,
+	);
+}
+
+function parseBytePattern(value: unknown): IBytePattern {
+	if (typeof value !== 'string' || value.trim().length === 0) {
+		throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, 'pattern must contain hexadecimal byte tokens such as "48 8b ?? ff".');
+	}
+	const tokens = value.trim().split(/\s+/).map(token => token === '?' ? '??' : token.toLowerCase());
+	if (tokens.length > DELVER_AGENT_LIMITS.bytePatternBytes) {
+		throw new DelverAgentError(
+			DelverAgentErrorCode.InvalidArgument,
+			`pattern must not exceed ${DELVER_AGENT_LIMITS.bytePatternBytes} bytes.`,
+		);
+	}
+	const bytes = tokens.map((token, index) => {
+		if (!/^[0-9a-f?]{2}$/.test(token)) {
+			throw new DelverAgentError(
+				DelverAgentErrorCode.InvalidArgument,
+				`pattern token ${index + 1} (${JSON.stringify(token)}) must contain two hexadecimal digits or '?' wildcards.`,
+			);
+		}
+		let mask = 0;
+		let byte = 0;
+		for (let nibble = 0; nibble < 2; nibble++) {
+			if (token[nibble] === '?') {
+				continue;
+			}
+			const shift = nibble === 0 ? 4 : 0;
+			mask |= 0xf << shift;
+			byte |= Number.parseInt(token[nibble], 16) << shift;
+		}
+		return { value: byte, mask };
+	});
+	return { canonical: tokens.join(' '), bytes };
+}
+
+function byteSearchSectionNames(value: unknown, sections: readonly ISectionWire[]): readonly string[] {
+	if (value === undefined) {
+		return [];
+	}
+	if (!Array.isArray(value) || value.length === 0 || value.length > sections.length) {
+		throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, 'sections must be a non-empty array of section names from delver_image_info.');
+	}
+	const names = value.map((candidate, index) => {
+		if (typeof candidate !== 'string' || candidate.trim().length === 0) {
+			throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, `sections[${index}] must be a non-empty string.`);
+		}
+		return candidate.trim();
+	});
+	const canonical = [...new Set(names)].sort();
+	const available = new Set(sections.map(section => section.name));
+	const missing = canonical.find(name => !available.has(name));
+	if (missing !== undefined) {
+		throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, `No image section is named ${JSON.stringify(missing)}.`);
+	}
+	return canonical;
+}
+
+function byteSearchSegments(sections: readonly ISectionWire[], sectionNames: readonly string[], executableOnly: boolean): readonly IByteSearchSegment[] {
+	const selectedNames = new Set(sectionNames);
+	const segments: IByteSearchSegment[] = [];
+	let flatStart = 0;
+	for (const section of sections) {
+		if ((selectedNames.size > 0 && !selectedNames.has(section.name)) || (executableOnly && !section.executable)) {
+			continue;
+		}
+		const size = Math.min(section.virtual_size, section.raw_size);
+		if (size <= 0) {
+			continue;
+		}
+		segments.push({
+			section,
+			rva: parseWireAddress(section.virtual_address, 'section virtual address'),
+			rawOffset: parseWireAddress(section.raw_offset, 'section raw offset'),
+			size,
+			flatStart,
+		});
+		flatStart += size;
+		if (!Number.isSafeInteger(flatStart)) {
+			throw new DelverAgentError(DelverAgentErrorCode.ResultLimitExceeded, 'The selected section bytes exceed the safe scan-size limit.');
+		}
+	}
+	return segments;
+}
+
+function signatureScope(value: unknown): SignatureScope {
+	if (value === undefined || value === 'executableSections') {
+		return 'executableSections';
+	}
+	if (value === 'function' || value === 'image') {
+		return value;
+	}
+	throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, 'scope must be "function", "executableSections", or "image".');
+}
+
+function signaturePolicy(value: unknown): SignaturePolicy {
+	if (value === undefined || value === 'relocation-stable') {
+		return 'relocation-stable';
+	}
+	if (value === 'unique-now' || value === 'cross-revision-stable') {
+		return value;
+	}
+	throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, 'policy must be "unique-now", "relocation-stable", or "cross-revision-stable".');
+}
+
+function signatureMaxBytes(value: unknown): number {
+	if (value === undefined) {
+		return 128;
+	}
+	if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > DELVER_AGENT_LIMITS.bytePatternBytes) {
+		throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, `maxBytes must be an integer between 1 and ${DELVER_AGENT_LIMITS.bytePatternBytes}.`);
+	}
+	return value as number;
+}
+
+function resolveSignatureFunction(args: Readonly<Record<string, unknown>>, functions: readonly IResolvedFunction[]): IResolvedFunction {
+	const hasAddress = args.address !== undefined;
+	const hasFunction = args.function !== undefined;
+	if (hasAddress === hasFunction) {
+		throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, 'Pass exactly one of address or function.');
+	}
+	if (hasAddress) {
+		const address = parseWireAddress(args.address);
+		const target = containingFunction(functions, address);
+		if (!target) {
+			throw new DelverAgentError(DelverAgentErrorCode.FunctionNotFound, `No detected function contains ${toWireAddress(address)}.`);
+		}
+		return target;
+	}
+	if (typeof args.function !== 'string' || args.function.trim().length === 0) {
+		throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, 'function must be a non-empty detected or authored function name.');
+	}
+	const query = args.function.trim();
+	let matches = functions.filter(candidate => candidate.name === query);
+	if (matches.length === 0) {
+		const folded = query.toLowerCase();
+		matches = functions.filter(candidate => candidate.name.toLowerCase() === folded);
+	}
+	if (matches.length !== 1) {
+		throw new DelverAgentError(
+			DelverAgentErrorCode.FunctionNotFound,
+			matches.length === 0 ? `No detected function is named ${JSON.stringify(query)}.` : `The function name ${JSON.stringify(query)} is ambiguous; pass an address instead.`,
+		);
+	}
+	return matches[0];
+}
+
+function signatureRows(
+	listingRows: readonly IListingRowWire[],
+	startRva: bigint,
+	endRva: bigint | undefined,
+	maxBytes: number,
+	policy: SignaturePolicy,
+): readonly IListingRowWire[] {
+	const result: IListingRowWire[] = [];
+	let nextRva = startRva;
+	let byteCount = 0;
+	for (const row of listingRows) {
+		const rowRva = BigInt(row.rva);
+		if (rowRva !== nextRva || (endRva !== undefined && rowRva + BigInt(row.len) > endRva) || byteCount + row.len > maxBytes) {
+			break;
+		}
+		if (row.bytes_hex === undefined || row.bytes_hex.length !== row.len * 2 || !/^[0-9a-f]*$/i.test(row.bytes_hex)) {
+			throw new DelverAgentError(DelverAgentErrorCode.AnalysisIncomplete, `Exact encoded bytes are unavailable for the instruction at ${row.rva}. Restart the current Delver analysis backend.`);
+		}
+		if (policy === 'relocation-stable' && row.signature_fields === undefined) {
+			throw new DelverAgentError(DelverAgentErrorCode.AnalysisIncomplete, `Signature mask metadata is unavailable for the instruction at ${row.rva}. Restart the current Delver analysis backend.`);
+		}
+		result.push(row);
+		byteCount += row.len;
+		nextRva = rowRva + BigInt(row.len);
+	}
+	return result;
+}
+
+function signatureCandidates(rows: readonly IListingRowWire[], policy: SignaturePolicy): readonly ISignatureCandidate[] {
+	const thresholds = [8, 16, 24, 32, 48, 64, 96, 128, 192, 256];
+	const ends = new Set<number>();
+	let byteCount = 0;
+	let thresholdIndex = 0;
+	for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+		byteCount += rows[rowIndex].len;
+		while (thresholdIndex < thresholds.length && byteCount >= thresholds[thresholdIndex]) {
+			ends.add(rowIndex + 1);
+			thresholdIndex++;
+		}
+	}
+	ends.add(rows.length);
+	return [...ends].sort((left, right) => left - right).map(end => makeSignatureCandidate(rows.slice(0, end), policy));
+}
+
+function makeSignatureCandidate(rows: readonly IListingRowWire[], policy: SignaturePolicy): ISignatureCandidate {
+	const bytes: { value: number; mask: number }[] = [];
+	const wildcards: ISignatureWildcard[] = [];
+	let patternOffset = 0;
+	for (const row of rows) {
+		const rowBytes = bytesFromHex(row.bytes_hex!);
+		for (const byte of rowBytes) {
+			bytes.push({ value: byte, mask: 0xff });
+		}
+		if (policy === 'relocation-stable') {
+			for (const field of row.signature_fields ?? []) {
+				if (!Number.isInteger(field.index) || !Number.isInteger(field.length) || field.index < 0 || field.length <= 0 || field.index + field.length > row.len) {
+					throw new DelverAgentError(DelverAgentErrorCode.AnalysisIncomplete, `The analysis backend returned an invalid signature field for ${row.rva}.`);
+				}
+				for (let index = 0; index < field.length; index++) {
+					bytes[patternOffset + field.index + index] = { value: 0, mask: 0 };
+				}
+				wildcards.push({
+					instructionRva: BigInt(row.rva),
+					byteOffset: field.index,
+					byteLength: field.length,
+					patternByteOffset: patternOffset + field.index,
+					reason: field.reason,
+				});
+			}
+		}
+		patternOffset += row.len;
+	}
+	const canonical = bytes.map(byte => byte.mask === 0 ? '??' : byte.value.toString(16).padStart(2, '0')).join(' ');
+	return {
+		pattern: { canonical, bytes },
+		rows,
+		wildcards,
+		fixedByteCount: bytes.reduce((count, byte) => count + (byte.mask === 0xff ? 1 : 0), 0),
+	};
+}
+
+function signatureSearchSegments(
+	sections: readonly ISectionWire[],
+	scope: SignatureScope,
+	functionStart: bigint,
+	functionEnd: bigint | undefined,
+): readonly IByteSearchSegment[] {
+	if (scope === 'image') {
+		return byteSearchSegments(sections, [], false);
+	}
+	if (scope === 'executableSections') {
+		return byteSearchSegments(sections, [], true);
+	}
+	const segments: IByteSearchSegment[] = [];
+	let flatStart = 0;
+	for (const section of sections) {
+		const sectionRva = parseWireAddress(section.virtual_address, 'section virtual address');
+		const rawSize = BigInt(Math.min(section.virtual_size, section.raw_size));
+		const start = functionStart > sectionRva ? functionStart : sectionRva;
+		const rawEnd = sectionRva + rawSize;
+		const end = functionEnd! < rawEnd ? functionEnd! : rawEnd;
+		if (end <= start) {
+			continue;
+		}
+		const size = Number(end - start);
+		segments.push({
+			section,
+			rva: start,
+			rawOffset: parseWireAddress(section.raw_offset, 'section raw offset') + (start - sectionRva),
+			size,
+			flatStart,
+		});
+		flatStart += size;
+	}
+	return segments;
+}
+
+function signatureIsUniqueAt(scan: IByteSearchScanResult, targetRva: bigint): boolean {
+	return scan.nextOffset === undefined && scan.matches.length === 1 && scan.matches[0].rva === targetRva;
+}
+
+function signatureQuality(candidate: ISignatureCandidate, unique: boolean, matchCountExact: boolean): Record<string, unknown> {
+	const fixedRatio = candidate.pattern.bytes.length === 0 ? 0 : candidate.fixedByteCount / candidate.pattern.bytes.length;
+	const lengthScore = Math.min(1, candidate.fixedByteCount / 32);
+	const score = Math.max(0, Math.min(1, fixedRatio * 0.5 + lengthScore * 0.25 + (unique ? 0.25 : 0)));
+	const reasons = [
+		unique ? 'The selected scope contains exactly one match at the target entry.' : 'The selected scope does not contain exactly one proven target match.',
+		`${candidate.fixedByteCount} of ${candidate.pattern.bytes.length} bytes remain fixed after masking.`,
+		...(matchCountExact ? [] : ['The exact match count exceeded the bounded proof result.']),
+	];
+	return {
+		score: Number(score.toFixed(3)),
+		confidence: unique && score >= 0.8 ? 'high' : unique && score >= 0.55 ? 'medium' : 'low',
+		reasons,
+	};
+}
+
+function signatureVariant(value: unknown): DelverSignatureVariant {
+	if (value === undefined || value === 'primary') {
+		return 'primary';
+	}
+	if (value === 'xref-site') {
+		return value;
+	}
+	throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, 'variant must be "primary" or "xref-site".');
+}
+
+function namedSignatureDraft(
+	name: string,
+	sourceCallId: string,
+	contentHash: string,
+	variant: DelverSignatureVariant,
+	resultJson: string,
+): IDelverNamedSignatureDraft {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(resultJson);
+	} catch {
+		throw new DelverAgentError(DelverAgentErrorCode.AnalysisIncomplete, 'The retained signature source result is not valid JSON.');
+	}
+	const envelope = signatureRecord(parsed, 'source result');
+	if (envelope.capability !== DelverAgentCapabilityId.MakeSignature) {
+		throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, 'The retained source result was not produced by delver_make_signature.');
+	}
+	const data = signatureRecord(envelope.data, 'source result data');
+	const target = signatureRecord(data.target, 'signature target');
+	const selected = variant === 'primary'
+		? data
+		: signatureRecord(data.alternativeXrefSignature, 'xref-site signature');
+	if (variant === 'xref-site' && selected.available !== true) {
+		throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, 'The source result does not contain an available xref-site signature.');
+	}
+	const proof = signatureRecord(selected.proof, 'signature proof');
+	if (proof.unique !== true || proof.matchCountExact !== true || proof.matchCount !== 1) {
+		throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, `The selected ${variant} signature was not proven unique and cannot be named.`);
+	}
+	const quality = signatureRecord(selected.quality, 'signature quality');
+	const covered = signatureArray(selected.coveredInstructions, 'covered instructions');
+	if (covered.length === 0) {
+		throw new DelverAgentError(DelverAgentErrorCode.AnalysisIncomplete, 'The retained signature has no covered instructions.');
+	}
+	const first = signatureRecord(covered[0], 'first covered instruction');
+	const last = signatureRecord(covered[covered.length - 1], 'last covered instruction');
+	const wildcardValues = signatureArray(selected.wildcardedOperands, 'signature wildcards');
+	const policy = data.policy;
+	if (policy !== 'unique-now' && policy !== 'relocation-stable') {
+		throw new DelverAgentError(DelverAgentErrorCode.AnalysisIncomplete, 'The retained signature has an unsupported policy.');
+	}
+	const scope = selected.scope ?? data.scope;
+	if (scope !== 'function' && scope !== 'executableSections' && scope !== 'image') {
+		throw new DelverAgentError(DelverAgentErrorCode.AnalysisIncomplete, 'The retained signature has an unsupported scope.');
+	}
+	const confidence = quality.confidence;
+	if (confidence !== 'low' && confidence !== 'medium' && confidence !== 'high') {
+		throw new DelverAgentError(DelverAgentErrorCode.AnalysisIncomplete, 'The retained signature has invalid confidence metadata.');
+	}
+	return {
+		name,
+		contentHash,
+		sourceCallId,
+		functionRva: toWireAddress(parseWireAddress(target.rva, 'signature function RVA')),
+		functionName: requiredBoundedText(target.name, 512, 'signature function name'),
+		variant,
+		scope,
+		policy,
+		pattern: requiredBoundedText(selected.pattern, DELVER_AGENT_LIMITS.bytePatternBytes * 3, 'signature pattern'),
+		byteCount: signatureInteger(selected.byteCount, 1, DELVER_AGENT_LIMITS.bytePatternBytes, 'signature byte count'),
+		fixedByteCount: signatureInteger(selected.fixedByteCount, 0, DELVER_AGENT_LIMITS.bytePatternBytes, 'signature fixed-byte count'),
+		wildcardByteCount: signatureInteger(selected.wildcardByteCount, 0, DELVER_AGENT_LIMITS.bytePatternBytes, 'signature wildcard-byte count'),
+		coveredStartRva: toWireAddress(parseWireAddress(first.rva, 'signature covered start RVA')),
+		coveredEndRva: toWireAddress(parseWireAddress(last.endRva, 'signature covered end RVA')),
+		wildcards: wildcardValues.map((value, index) => {
+			const wildcard = signatureRecord(value, `signature wildcard ${index}`);
+			const reason = wildcard.reason;
+			if (reason !== 'relativeBranch' && reason !== 'ipRelativeMemory' && reason !== 'baseRelocation') {
+				throw new DelverAgentError(DelverAgentErrorCode.AnalysisIncomplete, `Signature wildcard ${index} has an unsupported reason.`);
+			}
+			return {
+				instructionRva: toWireAddress(parseWireAddress(wildcard.instructionRva, `signature wildcard ${index} instruction RVA`)),
+				instructionByteIndex: signatureInteger(wildcard.byteOffset, 0, 15, `signature wildcard ${index} instruction byte index`),
+				length: signatureInteger(wildcard.byteLength, 1, 8, `signature wildcard ${index} length`),
+				patternByteIndex: signatureInteger(wildcard.patternByteOffset, 0, DELVER_AGENT_LIMITS.bytePatternBytes - 1, `signature wildcard ${index} pattern byte index`),
+				reason,
+			};
+		}),
+		unique: true,
+		matchCount: 1,
+		matchCountExact: true,
+		qualityScore: signatureNumber(quality.score, 0, 1, 'signature quality score'),
+		confidence,
+	};
+}
+
+function signatureRecord(value: unknown, label: string): Readonly<Record<string, unknown>> {
+	if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+		throw new DelverAgentError(DelverAgentErrorCode.AnalysisIncomplete, `The retained ${label} is malformed.`);
+	}
+	return value as Readonly<Record<string, unknown>>;
+}
+
+function signatureArray(value: unknown, label: string): readonly unknown[] {
+	if (!Array.isArray(value)) {
+		throw new DelverAgentError(DelverAgentErrorCode.AnalysisIncomplete, `The retained ${label} is malformed.`);
+	}
+	return value;
+}
+
+function signatureInteger(value: unknown, minimum: number, maximum: number, label: string): number {
+	if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < minimum || value > maximum) {
+		throw new DelverAgentError(DelverAgentErrorCode.AnalysisIncomplete, `The retained ${label} is invalid.`);
+	}
+	return value;
+}
+
+function signatureNumber(value: unknown, minimum: number, maximum: number, label: string): number {
+	if (typeof value !== 'number' || !Number.isFinite(value) || value < minimum || value > maximum) {
+		throw new DelverAgentError(DelverAgentErrorCode.AnalysisIncomplete, `The retained ${label} is invalid.`);
+	}
+	return value;
+}
+
+function requiredBoundedText(value: unknown, maxLength: number, name: string): string {
+	if (typeof value !== 'string') {
+		throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, `${name} must be a string.`);
+	}
+	const text = value.trim();
+	if (text.length === 0 || text.length > maxLength) {
+		throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, `${name} must contain between 1 and ${maxLength} characters.`);
+	}
+	return text;
+}
+
+function optionalBoundedText(value: unknown, maxLength: number, name: string): string | undefined {
+	return value === undefined ? undefined : requiredBoundedText(value, maxLength, name);
+}
+
+function optionalBoolean(value: unknown, name: string): boolean | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (typeof value !== 'boolean') {
+		throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, `${name} must be a boolean.`);
+	}
+	return value;
+}
+
+function bytesFromHex(value: string): Uint8Array {
+	const bytes = new Uint8Array(value.length / 2);
+	for (let index = 0; index < bytes.length; index++) {
+		bytes[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16);
+	}
+	return bytes;
+}
+
+function bytePatternMatches(bytes: Uint8Array, startIndex: number, pattern: IBytePattern['bytes']): boolean {
+	for (let index = 0; index < pattern.length; index++) {
+		if ((bytes[startIndex + index] & pattern[index].mask) !== pattern[index].value) {
+			return false;
+		}
+	}
+	return true;
+}
+
+function hexFromBytes(bytes: Uint8Array, startIndex: number, count: number): string {
+	let result = '';
+	for (let index = startIndex; index < startIndex + count; index++) {
+		result += bytes[index].toString(16).padStart(2, '0');
+	}
+	return result;
 }
 
 function byteReadSpace(value: unknown): ByteReadSpace {

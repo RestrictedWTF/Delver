@@ -177,6 +177,20 @@ const PRESENTATIONS = new Map<string, IDelverToolPresentation>([
 			},
 		}),
 	}],
+	[DelverAgentCapabilityId.ConvertAddress, {
+		icon: Codicon.arrowSwap,
+		displayName: localize('delverTool.convertAddress.displayName', "Delver Convert Address"),
+		userDescription: localize('delverTool.convertAddress.userDescription', "Convert an RVA, virtual address, or file offset"),
+		usage: `Use this before mixing addresses from headers, debugger output, raw-file tools, and Delver's image-relative results. The output identifies the containing section and reports exact hexadecimal RVA, VA, and file offset values. A section's zero-filled virtual tail has no file offset and is reported with \`fileBacked: false\`. Headers and gaps return ADDRESS_NOT_MAPPED. This works from a saved offline project. ${UNTRUSTED_NOTE}`,
+		inputSchema: objectSchema({
+			address: addressProperty('Address to convert, interpreted according to `from`.'),
+			from: {
+				type: 'string',
+				enum: ['rva', 'va', 'file'],
+				description: 'Input address space: image-relative RVA, absolute virtual address, or raw file offset.',
+			},
+		}, ['address', 'from']),
+	}],
 	[DelverAgentCapabilityId.ReadBytes, {
 		icon: Codicon.fileBinary,
 		displayName: localize('delverTool.readBytes.displayName', "Delver Read Bytes"),
@@ -196,6 +210,101 @@ const PRESENTATIONS = new Map<string, IDelverToolPresentation>([
 				description: 'Output interpretation. Defaults to hex; integer formats decode complete little-endian elements.',
 			},
 		}, ['address']),
+	}],
+	[DelverAgentCapabilityId.SearchBytes, {
+		icon: Codicon.searchFuzzy,
+		displayName: localize('delverTool.searchBytes.displayName', "Delver Search Bytes"),
+		userDescription: localize('delverTool.searchBytes.userDescription', "Search image sections for a byte pattern"),
+		usage: `Searches every selected provider-backed image byte for a spaced hexadecimal pattern. Use \`??\` for a whole-byte wildcard or one \`?\` for a nibble wildcard, for example \`48 8b ?? 4? ff\`. Restrict with \`sections\` or \`executableOnly\` when the claim is scoped. A complete zero-match result proves the pattern is absent from the selected raw-backed section bytes; a partial result must be continued with the same filters and \`nextCursor\`. Virtual zero-fill is excluded because it has no source bytes. ${ATTACHED_NOTE} ${PAGINATION_NOTE} ${UNTRUSTED_NOTE}`,
+		inputSchema: objectSchema({
+			pattern: {
+				type: 'string',
+				description: `One to ${DELVER_AGENT_LIMITS.bytePatternBytes} whitespace-separated hexadecimal byte tokens. Each nibble may be '?' as a wildcard.`,
+			},
+			sections: {
+				type: 'array',
+				minItems: 1,
+				uniqueItems: true,
+				items: { type: 'string' },
+				description: 'Optional exact section names from delver_image_info. All sections are searched when omitted.',
+			},
+			executableOnly: {
+				type: 'boolean',
+				description: 'Search only sections marked executable. Defaults to false.',
+			},
+			count: countProperty('matches', DELVER_AGENT_LIMITS.byteSearchMatches),
+			cursor: cursorProperty(),
+		}, ['pattern']),
+	}],
+	[DelverAgentCapabilityId.MakeSignature, {
+		icon: Codicon.symbolMethod,
+		displayName: localize('delverTool.makeSignature.displayName', "Delver Make Signature"),
+		userDescription: localize('delverTool.makeSignature.userDescription', "Generate and prove a masked function signature"),
+		usage: `Builds an instruction-aligned AOB signature for one detected function and proves its match count over the requested scope. Pass exactly one of \`address\` or \`function\`. The relocation-stable policy wildcards direct branch immediates, instruction-pointer-relative memory displacements, and PE base relocations using exact decoder metadata; the result explains every wildcard. The cross-revision-stable policy fails with ANALYSIS_INCOMPLETE until the project format and analysis service expose historical revision bytes, so it never substitutes same-binary uniqueness for revision stability. ${ATTACHED_NOTE} ${UNTRUSTED_NOTE}`,
+		inputSchema: objectSchema({
+			address: addressProperty('Any address inside the function to sign. Pass exactly one of address or function.'),
+			function: {
+				type: 'string',
+				minLength: 1,
+				description: 'Exact detected or authored function name. Pass exactly one of function or address.',
+			},
+			scope: {
+				type: 'string',
+				enum: ['function', 'executableSections', 'image'],
+				description: 'Where uniqueness is proved. Defaults to executableSections.',
+			},
+			policy: {
+				type: 'string',
+				enum: ['unique-now', 'relocation-stable', 'cross-revision-stable'],
+				description: 'Which encoded fields may be wildcarded. Defaults to relocation-stable.',
+			},
+			maxBytes: {
+				type: 'integer',
+				minimum: 1,
+				maximum: DELVER_AGENT_LIMITS.bytePatternBytes,
+				description: 'Maximum instruction-aligned signature length. Defaults to 128 bytes.',
+			},
+		}),
+	}],
+	[DelverAgentCapabilityId.ListSignatures, {
+		icon: Codicon.listTree,
+		displayName: localize('delverTool.listSignatures.displayName', "Delver List Signatures"),
+		userDescription: localize('delverTool.listSignatures.userDescription', "List named signatures saved in the project"),
+		usage: `Returns the compact, reusable signatures retained for the selected project revision, including their source tool-call evidence, function, pattern, policy, wildcard reasons, uniqueness proof, and quality. This works from an offline .delverdb because it reads saved evidence rather than target bytes. ${PAGINATION_NOTE} ${UNTRUSTED_NOTE}`,
+		inputSchema: objectSchema({
+			nameContains: {
+				type: 'string',
+				maxLength: DELVER_AGENT_LIMITS.signatureNameCharacters,
+				description: 'Optional case-insensitive signature-name substring.',
+			},
+			count: countProperty('signatures', DELVER_AGENT_LIMITS.signatures),
+			cursor: cursorProperty(),
+		}),
+	}],
+	[DelverAgentCapabilityId.SaveSignature, {
+		icon: Codicon.save,
+		displayName: localize('delverTool.saveSignature.displayName', "Delver Save Signature"),
+		userDescription: localize('delverTool.saveSignature.userDescription', "Name and persist a proven generated signature"),
+		usage: `Persists a signature in the current .delverdb revision by citing a completed delver_make_signature call. This is a durable write. The source call must belong to the current bytes, and the selected primary or xref-site variant must have an exact one-match uniqueness proof; arbitrary caller-supplied patterns are never accepted. Saving the same name again replaces its evidence while preserving its stable id. ${UNTRUSTED_NOTE}`,
+		inputSchema: objectSchema({
+			name: {
+				type: 'string',
+				minLength: 1,
+				maxLength: DELVER_AGENT_LIMITS.signatureNameCharacters,
+				description: 'Project-local signature name. Matching is case-insensitive.',
+			},
+			sourceCallId: {
+				type: 'string',
+				minLength: 1,
+				maxLength: 128,
+				description: 'Call id of a retained delver_make_signature result for this revision.',
+			},
+			variant: {
+				type: 'string',
+				enum: ['primary', 'xref-site'],
+				description: 'Which proven signature from the source result to retain. Defaults to primary.',
+			},
+		}, ['name', 'sourceCallId']),
 	}],
 	[DelverAgentCapabilityId.Disassemble, {
 		icon: Codicon.chip,

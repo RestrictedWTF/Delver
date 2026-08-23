@@ -14,6 +14,7 @@ import {
 	IDelverProjectStoreService,
 } from '../../../../../platform/delver/common/delverProjectStoreService.js';
 import { IDelverToolCallRecordWire } from '../../../../../platform/delver/common/delverToolCall.js';
+import { IDelverNamedSignatureDraft, IDelverNamedSignatureWire } from '../../../../../platform/delver/common/delverSignature.js';
 import { IDialogService, IFileDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
 import { IDelverInterpretationService } from '../../common/delverInterpretationService.js';
 import { DelverProjectService } from '../../common/delverProjectService.js';
@@ -29,6 +30,7 @@ class FakeProjectStore implements Partial<IDelverProjectStoreService> {
 	readonly appendedDecisions: IDelverFindingDecisionWire[] = [];
 	readonly appendedFindings: IDelverFindingWire[] = [];
 	readonly appendedToolCalls: IDelverToolCallRecordWire[] = [];
+	readonly upsertedSignatures: IDelverNamedSignatureWire[] = [];
 	snapshot = snapshot();
 
 	async open(): Promise<IDelverProjectHandle> { return this.handle; }
@@ -41,6 +43,9 @@ class FakeProjectStore implements Partial<IDelverProjectStoreService> {
 	}
 	async appendToolCalls(_projectId: string, calls: readonly IDelverToolCallRecordWire[]): Promise<void> {
 		this.appendedToolCalls.push(...calls);
+	}
+	async upsertSignatures(_projectId: string, signatures: readonly IDelverNamedSignatureWire[]): Promise<void> {
+		this.upsertedSignatures.push(...signatures);
 	}
 	async close(): Promise<void> { }
 }
@@ -121,6 +126,27 @@ suite('DelverProjectService findings', () => {
 			...draft(), evidence: [{ ...draft().evidence[0], sourceCallIds: ['missing-call'] }],
 		}]), /unknown tool call/);
 	});
+
+	test('replaces named signatures case-insensitively while preserving their stable id', async () => {
+		const { service, store } = createService();
+		disposables.add(service);
+		await service.openProject(store.handle.path);
+		const first = await service.saveSignature(HASH, signatureDraft('decrypt_config', 0.7));
+		const replaced = await service.saveSignature(HASH, signatureDraft('DECRYPT_CONFIG', 0.9));
+
+		assert.deepStrictEqual({
+			ids: [first.id, replaced.id],
+			retained: service.signaturesFor(HASH).map(signature => ({ name: signature.name, score: signature.qualityScore })),
+			persisted: store.upsertedSignatures.map(signature => ({ id: signature.id, name: signature.name, score: signature.qualityScore })),
+		}, {
+			ids: [first.id, first.id],
+			retained: [{ name: 'DECRYPT_CONFIG', score: 0.9 }],
+			persisted: [
+				{ id: first.id, name: 'decrypt_config', score: 0.7 },
+				{ id: first.id, name: 'DECRYPT_CONFIG', score: 0.9 },
+			],
+		});
+	});
 });
 
 function createService(): { service: DelverProjectService; store: FakeProjectStore } {
@@ -184,9 +210,34 @@ function toolCall(): IDelverToolCallRecordWire {
 	};
 }
 
+function signatureDraft(name: string, qualityScore: number): IDelverNamedSignatureDraft {
+	return {
+		name,
+		contentHash: HASH,
+		sourceCallId: 'call-signature-1',
+		functionRva: '0x1000',
+		functionName: 'SUB_1000',
+		variant: 'primary',
+		scope: 'executableSections',
+		policy: 'relocation-stable',
+		pattern: '55 48 89 e5',
+		byteCount: 4,
+		fixedByteCount: 4,
+		wildcardByteCount: 0,
+		coveredStartRva: '0x1000',
+		coveredEndRva: '0x1004',
+		wildcards: [],
+		unique: true,
+		matchCount: 1,
+		matchCountExact: true,
+		qualityScore,
+		confidence: qualityScore >= 0.8 ? 'high' : 'medium',
+	};
+}
+
 function metadata() {
 	return {
-		schemaVersion: 5,
+		schemaVersion: 6,
 		contentHash: HASH,
 		displayName: 'sample.exe',
 		currentRevisionId: HASH,
@@ -202,5 +253,6 @@ function snapshot(): IDelverProjectSnapshot {
 		findings: [],
 		findingDecisions: [],
 		toolCalls: [],
+		signatures: [],
 	};
 }

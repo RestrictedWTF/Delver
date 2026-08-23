@@ -30,8 +30,9 @@ import {
 } from '../common/findings.js';
 import { IInterpretationEditWire, isContentHash } from '../common/delverInterpretationStoreService.js';
 import { delverToolCallFromWire, delverToolCallToWire, IDelverToolCallRecordWire } from '../common/delverToolCall.js';
+import { delverNamedSignatureFromWire, delverNamedSignatureToWire, IDelverNamedSignatureWire } from '../common/delverSignature.js';
 
-const PROJECT_SCHEMA_VERSION = 5;
+const PROJECT_SCHEMA_VERSION = 6;
 const WIRE_RVA = /^0x[0-9a-fA-F]+$/;
 const SNAPSHOT_KINDS = ['imageInfo', 'functions', 'imports', 'exports', 'strings'] as const;
 type SnapshotKind = typeof SNAPSHOT_KINDS[number];
@@ -102,6 +103,16 @@ const PROJECT_SCHEMA = `
 		created_at  INTEGER NOT NULL,
 		PRIMARY KEY (revision_id, call_id)
 	);
+	CREATE TABLE named_signatures (
+		id          TEXT PRIMARY KEY NOT NULL,
+		name        TEXT NOT NULL,
+		name_key    TEXT NOT NULL,
+		revision_id TEXT NOT NULL REFERENCES revisions(revision_id),
+		payload     TEXT NOT NULL,
+		created_at  INTEGER NOT NULL,
+		updated_at  INTEGER NOT NULL,
+		UNIQUE (revision_id, name_key)
+	);
 	CREATE TABLE function_migrations (
 		source_revision_id TEXT NOT NULL REFERENCES revisions(revision_id),
 		source_function_rva TEXT NOT NULL,
@@ -150,6 +161,20 @@ const MIGRATE_V4_TO_V5 = `
 		PRIMARY KEY (revision_id, call_id)
 	);
 	PRAGMA user_version = 5;
+`;
+
+const MIGRATE_V5_TO_V6 = `
+	CREATE TABLE named_signatures (
+		id TEXT PRIMARY KEY NOT NULL,
+		name TEXT NOT NULL,
+		name_key TEXT NOT NULL,
+		revision_id TEXT NOT NULL REFERENCES revisions(revision_id),
+		payload TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL,
+		UNIQUE (revision_id, name_key)
+	);
+	PRAGMA user_version = 6;
 `;
 
 const MIGRATE_V1_TO_V2 = `
@@ -284,6 +309,10 @@ export class DelverProjectStoreService implements IDelverProjectStoreService {
 				}
 				if (version === 4) {
 					await transaction(db, () => dbExec(db, MIGRATE_V4_TO_V5));
+					version = 5;
+				}
+				if (version === 5) {
+					await transaction(db, () => dbExec(db, MIGRATE_V5_TO_V6));
 					version = PROJECT_SCHEMA_VERSION;
 				}
 				if (version !== PROJECT_SCHEMA_VERSION) {
@@ -382,6 +411,9 @@ export class DelverProjectStoreService implements IDelverProjectStoreService {
 			const toolCalls = (await dbAll(project.db,
 				'SELECT payload FROM tool_calls WHERE revision_id = ? ORDER BY created_at, rowid', [revision.revisionId]))
 				.map(row => delverToolCallToWire(delverToolCallFromWire(JSON.parse(requireString(row.payload, 'tool-call payload')))));
+			const signatures = (await dbAll(project.db,
+				'SELECT payload FROM named_signatures WHERE revision_id = ? ORDER BY name_key, name, id', [revision.revisionId]))
+				.map(row => delverNamedSignatureToWire(delverNamedSignatureFromWire(JSON.parse(requireString(row.payload, 'signature payload')))));
 			return {
 				metadata: metadataForRevision(project.metadata, revision, project.metadata.updatedAt),
 				...snapshots,
@@ -390,6 +422,7 @@ export class DelverProjectStoreService implements IDelverProjectStoreService {
 				findings,
 				findingDecisions,
 				toolCalls,
+				signatures,
 			};
 		});
 	}
@@ -564,6 +597,48 @@ export class DelverProjectStoreService implements IDelverProjectStoreService {
 				}
 			});
 			if (calls.length > alreadyStored.size) {
+				project.metadata = { ...project.metadata, updatedAt: now };
+			}
+		});
+	}
+
+	upsertSignatures(projectId: string, signatures: readonly IDelverNamedSignatureWire[]): Promise<void> {
+		return this.sequencer.queue(async () => {
+			const project = this.getProject(projectId);
+			const validated = signatures.map(signature => delverNamedSignatureFromWire(signature));
+			const names = validated.map(signature => signature.name.toLowerCase());
+			if (new Set(names).size !== names.length || new Set(validated.map(signature => signature.id)).size !== validated.length) {
+				throw new Error('Signature batch contains duplicate names or ids');
+			}
+			const revisions = new Map<string, IDelverProjectRevision>();
+			for (const signature of validated) {
+				const revision = await findRevisionByContentHash(project.db, signature.contentHash);
+				if (!revision) {
+					throw new Error('Signature belongs to different target bytes');
+				}
+				const existing = await dbGet(project.db,
+					'SELECT id FROM named_signatures WHERE revision_id = ? AND name_key = ?', [revision.revisionId, signature.name.toLowerCase()]);
+				if (existing && requireString(existing.id, 'signature id') !== signature.id) {
+					throw new Error(`Signature ${signature.name} conflicts with an existing id`);
+				}
+				revisions.set(signature.id, revision);
+			}
+			const now = Date.now();
+			await transaction(project.db, async () => {
+				for (const signature of validated) {
+					await dbRun(project.db, `INSERT INTO named_signatures
+						(id, name, name_key, revision_id, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+						ON CONFLICT(revision_id, name_key) DO UPDATE SET
+							name = excluded.name, payload = excluded.payload, updated_at = excluded.updated_at`, [
+						signature.id, signature.name, signature.name.toLowerCase(), revisions.get(signature.id)!.revisionId,
+						JSON.stringify(delverNamedSignatureToWire(signature)), signature.createdAt, signature.updatedAt,
+					]);
+				}
+				if (signatures.length > 0) {
+					await dbRun(project.db, 'UPDATE project_metadata SET updated_at = ? WHERE id = 1', [now]);
+				}
+			});
+			if (signatures.length > 0) {
 				project.metadata = { ...project.metadata, updatedAt: now };
 			}
 		});

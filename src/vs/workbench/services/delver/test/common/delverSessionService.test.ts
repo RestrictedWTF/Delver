@@ -15,6 +15,7 @@ import { IDelverAnalysisService } from '../../../../../platform/delver/common/de
 import { DelverFindingOutcome, IDelverFinding, IDelverFindingDecision, IDelverFindingDraft } from '../../../../../platform/delver/common/findings.js';
 import { IDelverProjectSnapshot } from '../../../../../platform/delver/common/delverProjectStoreService.js';
 import { IDelverToolCallRecord } from '../../../../../platform/delver/common/delverToolCall.js';
+import { IDelverNamedSignature, IDelverNamedSignatureDraft } from '../../../../../platform/delver/common/delverSignature.js';
 import { MockContextKeyService } from '../../../../../platform/keybinding/test/common/mockKeybindingService.js';
 import { testWorkspace } from '../../../../../platform/workspace/test/common/testWorkspace.js';
 import { IDelverInterpretationService } from '../../common/delverInterpretationService.js';
@@ -125,6 +126,8 @@ class FakeProjectLifecycleDelegate implements IDelverProjectService {
 	async recordToolCall(): Promise<void> { }
 	toolCallsFor(): readonly IDelverToolCallRecord[] { return []; }
 	toolCall(): IDelverToolCallRecord | undefined { return undefined; }
+	async saveSignature(_contentHash: string, _draft: IDelverNamedSignatureDraft): Promise<IDelverNamedSignature> { throw new Error('not implemented'); }
+	signaturesFor(): readonly IDelverNamedSignature[] { return []; }
 
 	async reportFindings(_contentHash: string, _drafts: readonly IDelverFindingDraft[]): Promise<readonly IDelverFinding[]> { return []; }
 
@@ -174,7 +177,7 @@ function createService(store: Pick<ReturnType<typeof ensureNoDisposablesAreLeake
 function openedProject(contentHash: string, sourcePath: string): IDelverOpenedProject {
 	const snapshot: IDelverProjectSnapshot = {
 		metadata: {
-			schemaVersion: 5,
+			schemaVersion: 6,
 			currentRevisionId: contentHash,
 			contentHash,
 			displayName: 'sample.exe',
@@ -186,6 +189,7 @@ function openedProject(contentHash: string, sourcePath: string): IDelverOpenedPr
 		findings: [],
 		findingDecisions: [],
 		toolCalls: [],
+		signatures: [],
 	};
 	return {
 		path: 'C:\\workspace\\sample.delverdb',
@@ -237,7 +241,7 @@ suite('DelverSessionService', () => {
 		const hash = 'b'.repeat(64);
 		const snapshot = {
 			metadata: {
-				schemaVersion: 5,
+				schemaVersion: 6,
 				currentRevisionId: 'revision-1',
 				contentHash: hash,
 				displayName: 'offline.exe',
@@ -249,6 +253,7 @@ suite('DelverSessionService', () => {
 			findings: [],
 			findingDecisions: [],
 			toolCalls: [],
+			signatures: [],
 			functions: JSON.stringify({ functions: [{ rva: '0x1080' }] }),
 			strings: JSON.stringify({ strings: [], truncated: false }),
 		} as IDelverProjectSnapshot;
@@ -333,7 +338,7 @@ suite('DelverSessionService', () => {
 		const projectHash = 'b'.repeat(64);
 		const snapshot = {
 			metadata: {
-				schemaVersion: 5,
+				schemaVersion: 6,
 				currentRevisionId: 'revision-1',
 				contentHash: projectHash,
 				displayName: 'offline.exe',
@@ -344,6 +349,7 @@ suite('DelverSessionService', () => {
 			findings: [],
 			findingDecisions: [],
 			toolCalls: [],
+			signatures: [],
 		} as IDelverProjectSnapshot;
 		projectLifecycle.openedProject = {
 			path: 'C:\\projects\\offline.delverdb',

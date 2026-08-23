@@ -7,6 +7,7 @@ import { createDecorator } from '../../instantiation/common/instantiation.js';
 import { IDelverFindingDecisionWire, IDelverFindingWire } from './findings.js';
 import { IInterpretationEditWire } from './delverInterpretationStoreService.js';
 import { IDelverToolCallRecordWire } from './delverToolCall.js';
+import { IDelverNamedSignatureWire } from './delverSignature.js';
 
 export const IDelverProjectStoreService = createDecorator<IDelverProjectStoreService>('delverProjectStoreService');
 
@@ -70,6 +71,7 @@ export interface IDelverProjectSnapshot extends IDelverProjectSnapshotUpdate {
 	readonly findings: readonly IDelverFindingWire[];
 	readonly findingDecisions: readonly IDelverFindingDecisionWire[];
 	readonly toolCalls: readonly IDelverToolCallRecordWire[];
+	readonly signatures: readonly IDelverNamedSignatureWire[];
 }
 
 export type DelverFunctionMigrationMethod = 'exact' | 'symbol' | 'structural' | 'manual';
@@ -105,6 +107,7 @@ export interface IDelverProjectStoreService {
 	appendFindings(projectId: string, findings: readonly IDelverFindingWire[]): Promise<void>;
 	appendFindingDecisions(projectId: string, decisions: readonly IDelverFindingDecisionWire[]): Promise<void>;
 	appendToolCalls(projectId: string, calls: readonly IDelverToolCallRecordWire[]): Promise<void>;
+	upsertSignatures(projectId: string, signatures: readonly IDelverNamedSignatureWire[]): Promise<void>;
 	copyInterpretations(sourceProjectId: string, destinationProjectId: string): Promise<number>;
 	close(projectId: string): Promise<void>;
 }

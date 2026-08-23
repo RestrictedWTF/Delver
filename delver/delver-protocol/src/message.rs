@@ -263,6 +263,37 @@ pub struct ListingRowWire {
 	)]
 	#[schemars(with = "Option<String>")]
 	pub branch_target: Option<u64>,
+	/// Exact encoded instruction bytes, when the analysis server retained the
+	/// source image.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub bytes_hex: Option<String>,
+	/// Address-bearing encoded fields that a relocation-stable byte signature
+	/// should wildcard.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub signature_fields: Vec<SignatureFieldWire>,
+}
+
+/// One exact unstable field inside an encoded instruction.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SignatureFieldWire {
+	/// Zero-based byte offset from the instruction start.
+	pub index: u32,
+	/// Number of bytes occupied by the field.
+	pub length: u32,
+	/// Why the field is unsafe to retain literally.
+	pub reason: SignatureFieldReasonWire,
+}
+
+/// Why an encoded field is wildcarded in a reusable signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum SignatureFieldReasonWire {
+	/// Relative immediate used by a direct branch or call.
+	RelativeBranch,
+	/// Displacement used by RIP/EIP-relative memory addressing.
+	IpRelativeMemory,
+	/// Pointer-sized field named by the PE base-relocation table.
+	BaseRelocation,
 }
 
 /// Control-flow classification on the wire.

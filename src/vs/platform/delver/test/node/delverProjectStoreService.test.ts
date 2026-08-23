@@ -14,6 +14,7 @@ import { IDelverFindingDecisionWire, IDelverFindingWire } from '../../common/fin
 import { IInterpretationEditWire } from '../../common/delverInterpretationStoreService.js';
 import { EditOp, EditStatus } from '../../common/interpretation.js';
 import { IDelverToolCallRecordWire } from '../../common/delverToolCall.js';
+import { IDelverNamedSignatureWire } from '../../common/delverSignature.js';
 import { DelverProjectStoreService } from '../../node/delverProjectStoreService.js';
 
 const HASH_A = 'a'.repeat(64);
@@ -70,6 +71,37 @@ function toolCall(contentHash = HASH_A, callId = 'call-decompile-1'): IDelverToo
 	};
 }
 
+function signature(contentHash = HASH_A, name = 'decrypt_config', id = 'signature-1'): IDelverNamedSignatureWire {
+	return {
+		id,
+		name,
+		contentHash,
+		sourceCallId: 'call-signature-1',
+		functionRva: '0x1000',
+		functionName: 'SUB_1000',
+		variant: 'primary',
+		scope: 'executableSections',
+		policy: 'relocation-stable',
+		pattern: '55 48 89 e5 e8 ?? ?? ?? ??',
+		byteCount: 9,
+		fixedByteCount: 5,
+		wildcardByteCount: 4,
+		coveredStartRva: '0x1000',
+		coveredEndRva: '0x1009',
+		wildcards: [{
+			instructionRva: '0x1004', instructionByteIndex: 1, length: 4,
+			patternByteIndex: 5, reason: 'relativeBranch',
+		}],
+		unique: true,
+		matchCount: 1,
+		matchCountExact: true,
+		qualityScore: 0.75,
+		confidence: 'medium',
+		createdAt: 1_700_000_000_000,
+		updatedAt: 1_700_000_000_000,
+	};
+}
+
 function findingDecision(contentHash = HASH_A, findingId = 'finding-1', id = 'decision-1'): IDelverFindingDecisionWire {
 	return {
 		id,
@@ -116,6 +148,7 @@ suite('DelverProjectStoreService', () => {
 		await service.appendToolCalls(created.projectId, [toolCall()]);
 		await service.appendFindings(created.projectId, [finding()]);
 		await service.appendFindingDecisions(created.projectId, [findingDecision()]);
+		await service.upsertSignatures(created.projectId, [signature()]);
 		await service.close(created.projectId);
 
 		const reopened = await service.open(path, HASH_A);
@@ -135,9 +168,10 @@ suite('DelverProjectStoreService', () => {
 			findings: snapshot.findings,
 			findingDecisions: snapshot.findingDecisions,
 			toolCalls: snapshot.toolCalls,
+			signatures: snapshot.signatures,
 			containsPeHeader: databaseBytes.includes(Buffer.from('MZThis must not be persisted')),
 		}, {
-			metadata: { ...target(), schemaVersion: 5, currentRevisionId: HASH_A, createdAt: 0, updatedAt: 0 },
+			metadata: { ...target(), schemaVersion: 6, currentRevisionId: HASH_A, createdAt: 0, updatedAt: 0 },
 			imageInfo: JSON.stringify({ architecture: 'x86_64' }),
 			functions: JSON.stringify({ functions: [{ rva: '0x1000' }, { rva: '0x2000' }] }),
 			imports: JSON.stringify({ modules: [] }),
@@ -154,6 +188,7 @@ suite('DelverProjectStoreService', () => {
 			findings: [finding()],
 			findingDecisions: [findingDecision()],
 			toolCalls: [toolCall()],
+			signatures: [signature()],
 			containsPeHeader: false,
 		});
 	});
@@ -198,11 +233,17 @@ suite('DelverProjectStoreService', () => {
 		await assert.rejects(() => service.appendInterpretations(different.projectId, [edit()]), /different target bytes/);
 		await assert.rejects(() => service.appendFindings(different.projectId, [finding()]), /different target bytes/);
 		await assert.rejects(() => service.appendToolCalls(different.projectId, [toolCall()]), /different target bytes/);
+		await assert.rejects(() => service.upsertSignatures(different.projectId, [signature()]), /different target bytes/);
 		await service.appendToolCalls(first.projectId, [toolCall()]);
 		await service.appendToolCalls(first.projectId, [toolCall()]);
 		await assert.rejects(() => service.appendToolCalls(first.projectId, [{ ...toolCall(), resultJson: '{"ok":false}' }]), /conflicts with an existing record/);
 		await assert.rejects(() => service.appendFindings(first.projectId, [finding(), finding()]), /duplicate ids/);
 		await assert.rejects(() => service.appendFindingDecisions(first.projectId, [findingDecision(), findingDecision()]), /duplicate ids/);
+		await assert.rejects(() => service.upsertSignatures(first.projectId, [signature(), signature()]), /duplicate names or ids/);
+		await assert.rejects(() => service.upsertSignatures(first.projectId, [{ ...signature(), coveredEndRva: '0x1008' }]), /covered range does not match/);
+		await service.upsertSignatures(first.projectId, [signature(HASH_A, 'Änalysis')]);
+		await service.upsertSignatures(first.projectId, [{ ...signature(HASH_A, 'änALYSIS'), qualityScore: 0.9, confidence: 'high', updatedAt: 1_700_000_000_001 }]);
+		await assert.rejects(() => service.upsertSignatures(first.projectId, [signature(HASH_A, 'ÄNALYSIS', 'other-id')]), /conflicts with an existing id/);
 		await service.appendFindingDecisions(first.projectId, [findingDecision()]);
 		await service.appendFindingDecisions(first.projectId, [findingDecision()]);
 		await assert.rejects(() => service.appendFindingDecisions(first.projectId, [{
@@ -211,7 +252,12 @@ suite('DelverProjectStoreService', () => {
 		assert.deepStrictEqual({
 			findings: (await service.loadSnapshot(first.projectId)).findings,
 			decisions: (await service.loadSnapshot(first.projectId)).findingDecisions,
-		}, { findings: [finding()], decisions: [findingDecision()] });
+			signatures: (await service.loadSnapshot(first.projectId)).signatures,
+		}, {
+			findings: [finding()],
+			decisions: [findingDecision()],
+			signatures: [{ ...signature(HASH_A, 'änALYSIS'), qualityScore: 0.9, confidence: 'high', updatedAt: 1_700_000_000_001 }],
+		});
 
 		await service.close(first.projectId);
 		await service.close(second.projectId);
@@ -236,12 +282,14 @@ suite('DelverProjectStoreService', () => {
 		await service.saveSnapshot(project.projectId, { functions: '{"build":"old"}' });
 		await service.appendInterpretations(project.projectId, [edit(HASH_A)]);
 		await service.appendFindings(project.projectId, [finding(HASH_A, 'old-finding')]);
+		await service.upsertSignatures(project.projectId, [signature(HASH_A, 'old-signature', 'signature-old')]);
 		await service.appendFindingDecisions(project.projectId, [findingDecision(HASH_A, 'old-finding', 'old-decision')]);
 		const next = await service.addRevision(project.projectId, {
 			...target(HASH_B), displayName: 'sample-2.exe', sourcePath: 'C:\\samples\\sample-2.exe', byteLength: 8192,
 		}, { functions: '{"build":"new"}' });
 		await service.appendInterpretations(project.projectId, [edit(HASH_B)]);
 		await service.appendFindings(project.projectId, [finding(HASH_B, 'new-finding')]);
+		await service.upsertSignatures(project.projectId, [signature(HASH_B, 'new-signature', 'signature-new')]);
 
 		const revisions = await service.listRevisions(project.projectId);
 		const oldSnapshot = await service.loadSnapshot(project.projectId, HASH_A);
@@ -255,6 +303,7 @@ suite('DelverProjectStoreService', () => {
 			interpretationHashes: [oldSnapshot.interpretations[0]?.anchor.contentHash, newSnapshot.interpretations[0]?.anchor.contentHash],
 			findingHashes: [oldSnapshot.findings[0]?.anchors[0]?.contentHash, newSnapshot.findings[0]?.anchors[0]?.contentHash],
 			decisionHashes: [oldSnapshot.findingDecisions[0]?.contentHash, newSnapshot.findingDecisions[0]?.contentHash],
+			signatureHashes: [oldSnapshot.signatures[0]?.contentHash, newSnapshot.signatures[0]?.contentHash],
 		}, {
 			revisions: [
 				{ ...target(), revisionId: HASH_A, createdAt: 0 },
@@ -265,6 +314,7 @@ suite('DelverProjectStoreService', () => {
 			interpretationHashes: [HASH_A, HASH_B],
 			findingHashes: [HASH_A, HASH_B],
 			decisionHashes: [HASH_A, undefined],
+			signatureHashes: [HASH_A, HASH_B],
 		});
 	});
 
@@ -324,9 +374,10 @@ suite('DelverProjectStoreService', () => {
 			findings: snapshot.findings,
 			findingDecisions: snapshot.findingDecisions,
 			toolCalls: snapshot.toolCalls,
+			signatures: snapshot.signatures,
 			revisions: revisions.map(revision => ({ ...revision, createdAt: 0 })),
 		}, {
-			schemaVersion: 5,
+			schemaVersion: 6,
 			currentRevisionId: HASH_A,
 			functions: '{"legacy":true}',
 			decompiledFunctions: [{ backendId: 'ghidra', backendVersion: '12.1', functionRva: '0x1000', serialized: '{"text":"legacy"}' }],
@@ -334,6 +385,7 @@ suite('DelverProjectStoreService', () => {
 			findings: [],
 			findingDecisions: [],
 			toolCalls: [],
+			signatures: [],
 			revisions: [{ ...target(), revisionId: HASH_A, createdAt: 0 }],
 		});
 	});

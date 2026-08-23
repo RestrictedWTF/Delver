@@ -13,14 +13,14 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use clap::Parser;
 use delver_analysis::FunctionSource;
-use delver_disasm::FlowKind;
+use delver_disasm::{FlowKind, SignatureFieldKind};
 use delver_protocol::{
 	AddressForRowParams, AddressForRowResult, ErrorKind, FlowKindWire, FunctionFingerprintWire,
 	FunctionSourceWire, FunctionWire, FunctionsResult, ImageQueryParams, InitializeResult,
 	ListingRowWire, ListingWindowParams, ListingWindowResult, OpenImageParams, OpenImageResult,
-	Request, Response, RowForAddressParams, RowForAddressResult, RpcError, StringEncodingWire,
-	StringWire, StringsResult, TargetCapabilityWire, TargetDescriptorWire, XrefKindWire, XrefWire,
-	XrefsParams, XrefsResult,
+	Request, Response, RowForAddressParams, RowForAddressResult, RpcError,
+	SignatureFieldReasonWire, SignatureFieldWire, StringEncodingWire, StringWire, StringsResult,
+	TargetCapabilityWire, TargetDescriptorWire, XrefKindWire, XrefWire, XrefsParams, XrefsResult,
 };
 use delver_rpc::{Listener, Server};
 use sha2::{Digest, Sha256};
@@ -251,15 +251,17 @@ fn listing_window(
 		// The bytes are gone once analysis is done, so re-decode from the
 		// parsed image to format the row. The index guarantees `rva` is a real
 		// boundary, which is the anchor `decode_count` requires.
-		let text = decode_row(image, rva);
+		let decoded = decode_row(image, rva);
 		rows.push(ListingRowWire {
 			row: row as u64,
 			rva,
 			len,
-			mnemonic: text.0,
-			operands: text.1,
-			flow: text.2,
-			branch_target: text.3,
+			mnemonic: decoded.mnemonic,
+			operands: decoded.operands,
+			flow: decoded.flow,
+			branch_target: decoded.branch_target,
+			bytes_hex: decoded.bytes_hex,
+			signature_fields: decoded.signature_fields,
 		});
 	}
 
@@ -270,24 +272,90 @@ fn listing_window(
 	.map_err(|e| RpcError::protocol(-32603, format!("serialising result: {e}")))
 }
 
-/// Formats one row by re-decoding at a known instruction boundary.
-fn decode_row(image: &LoadedImage, rva: u64) -> (String, String, FlowKindWire, Option<u64>) {
+struct DecodedRow {
+	mnemonic: String,
+	operands: String,
+	flow: FlowKindWire,
+	branch_target: Option<u64>,
+	bytes_hex: Option<String>,
+	signature_fields: Vec<SignatureFieldWire>,
+}
+
+impl DecodedRow {
+	fn invalid() -> Self {
+		Self {
+			mnemonic: String::new(),
+			operands: String::new(),
+			flow: FlowKindWire::Invalid,
+			branch_target: None,
+			bytes_hex: None,
+			signature_fields: Vec::new(),
+		}
+	}
+}
+
+/// Formats one row and preserves the exact encoded fields required by the
+/// signature generator. Offsets are instruction-relative, never inferred from
+/// formatted operand text.
+fn decode_row(image: &LoadedImage, rva: u64) -> DecodedRow {
 	let Some(bitness) = delver_disasm::Bitness::from_arch(&image.parsed.arch) else {
-		return (String::new(), String::new(), FlowKindWire::Invalid, None);
+		return DecodedRow::invalid();
 	};
 	let Some(bytes) = image.parsed.bytes_at(&image.bytes, rva) else {
-		return (String::new(), String::new(), FlowKindWire::Invalid, None);
+		return DecodedRow::invalid();
 	};
 
 	let disasm = delver_disasm::Disassembler::new(bitness);
 	match disasm.decode_count(rva, bytes, 1).into_iter().next() {
-		Some(instruction) => (
-			instruction.mnemonic,
-			instruction.operands,
-			flow_wire(instruction.flow),
-			instruction.branch_target,
-		),
-		None => (String::new(), String::new(), FlowKindWire::Invalid, None),
+		Some(instruction) => {
+			let instruction_len = instruction.len as usize;
+			let mut signature_fields = instruction
+				.signature_fields
+				.into_iter()
+				.map(|field| SignatureFieldWire {
+					index: field.offset,
+					length: field.len,
+					reason: match field.kind {
+						SignatureFieldKind::RelativeBranch => {
+							SignatureFieldReasonWire::RelativeBranch
+						}
+						SignatureFieldKind::IpRelativeMemory => {
+							SignatureFieldReasonWire::IpRelativeMemory
+						}
+					},
+				})
+				.collect::<Vec<_>>();
+			let end_rva = rva.saturating_add(instruction.len as u64);
+			for relocation in image
+				.parsed
+				.relocations
+				.iter()
+				.copied()
+				.filter(|relocation| relocation.rva >= rva && relocation.rva < end_rva)
+			{
+				signature_fields.push(SignatureFieldWire {
+					index: (relocation.rva - rva) as u32,
+					length: u64::from(relocation.width).min(end_rva - relocation.rva) as u32,
+					reason: SignatureFieldReasonWire::BaseRelocation,
+				});
+			}
+			signature_fields.sort_by_key(|field| (field.index, field.length, field.reason as u8));
+			signature_fields.dedup_by(|left, right| {
+				left.index == right.index
+					&& left.length == right.length
+					&& left.reason == right.reason
+			});
+
+			DecodedRow {
+				mnemonic: instruction.mnemonic,
+				operands: instruction.operands,
+				flow: flow_wire(instruction.flow),
+				branch_target: instruction.branch_target,
+				bytes_hex: bytes.get(..instruction_len).map(lower_hex),
+				signature_fields,
+			}
+		}
+		None => DecodedRow::invalid(),
 	}
 }
 
@@ -387,14 +455,14 @@ fn function_fingerprint(
 		if rva >= end_rva {
 			break;
 		}
-		let (mnemonic, operands, flow, branch_target) = decode_row(image, rva);
-		hasher.update(mnemonic.to_ascii_lowercase().as_bytes());
+		let decoded = decode_row(image, rva);
+		hasher.update(decoded.mnemonic.to_ascii_lowercase().as_bytes());
 		hasher.update([0]);
 		let normalized_operands = if matches!(
-			flow,
+			decoded.flow,
 			FlowKindWire::Jump | FlowKindWire::ConditionalJump | FlowKindWire::Call
 		) {
-			match branch_target {
+			match decoded.branch_target {
 				Some(target) if target >= function.rva && target < end_rva => image
 					.analysis
 					.instructions
@@ -404,12 +472,12 @@ fn function_fingerprint(
 				_ => "external".to_string(),
 			}
 		} else {
-			normalize_operand_text(&operands)
+			normalize_operand_text(&decoded.operands)
 		};
 		hasher.update(normalized_operands.as_bytes());
 		hasher.update([0]);
 		hasher.update(len.to_le_bytes());
-		hasher.update([flow_tag(flow)]);
+		hasher.update([flow_tag(decoded.flow)]);
 		instruction_count += 1;
 	}
 

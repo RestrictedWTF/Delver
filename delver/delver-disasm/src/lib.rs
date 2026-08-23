@@ -21,7 +21,7 @@
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
-use iced_x86::{Decoder, DecoderOptions, Formatter, Instruction, IntelFormatter};
+use iced_x86::{ConstantOffsets, Decoder, DecoderOptions, Formatter, Instruction, IntelFormatter};
 
 /// Target architecture width. No default — a 32-bit image decoded as 64-bit
 /// produces confident nonsense, which is the worst failure mode available.
@@ -144,6 +144,29 @@ pub struct DecodedInstruction {
 	/// Target of a RIP-relative memory operand, as an RVA. This is how data
 	/// references are recovered on x64.
 	pub memory_target: Option<u64>,
+	/// Encoded address-bearing fields that a relocation-stable byte signature
+	/// should mask.
+	pub signature_fields: Vec<SignatureField>,
+}
+
+/// Why bytes inside one instruction are unstable as a reusable signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignatureFieldKind {
+	/// Relative immediate used by a direct branch or call.
+	RelativeBranch,
+	/// Displacement used by RIP/EIP-relative memory addressing.
+	IpRelativeMemory,
+}
+
+/// One exact byte range inside an encoded instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignatureField {
+	/// Zero-based byte offset from the instruction start.
+	pub offset: u32,
+	/// Number of encoded bytes in the field.
+	pub len: u32,
+	/// Semantic reason these bytes are unstable.
+	pub kind: SignatureFieldKind,
 }
 
 impl DecodedInstruction {
@@ -273,13 +296,18 @@ impl Disassembler {
 
 		while out.len() < limit && decoder.can_decode() {
 			decoder.decode_out(&mut instruction);
-			out.push(convert(&instruction, &mut formatter));
+			let constant_offsets = decoder.get_constant_offsets(&instruction);
+			out.push(convert(&instruction, constant_offsets, &mut formatter));
 		}
 		out
 	}
 }
 
-fn convert(instruction: &Instruction, formatter: &mut IntelFormatter) -> DecodedInstruction {
+fn convert(
+	instruction: &Instruction,
+	constant_offsets: ConstantOffsets,
+	formatter: &mut IntelFormatter,
+) -> DecodedInstruction {
 	let mut text = String::new();
 	formatter.format(instruction, &mut text);
 
@@ -300,7 +328,43 @@ fn convert(instruction: &Instruction, formatter: &mut IntelFormatter) -> Decoded
 		flow: facts.flow,
 		branch_target: facts.branch_target,
 		memory_target: facts.memory_target,
+		signature_fields: signature_fields(instruction, facts.flow, constant_offsets),
 	}
+}
+
+fn signature_fields(
+	instruction: &Instruction,
+	flow: FlowKind,
+	offsets: ConstantOffsets,
+) -> Vec<SignatureField> {
+	let mut fields = Vec::with_capacity(2);
+	if matches!(
+		flow,
+		FlowKind::Jump | FlowKind::ConditionalJump | FlowKind::Call
+	) {
+		if offsets.has_immediate() {
+			fields.push(SignatureField {
+				offset: offsets.immediate_offset() as u32,
+				len: offsets.immediate_size() as u32,
+				kind: SignatureFieldKind::RelativeBranch,
+			});
+		}
+		if offsets.has_immediate2() {
+			fields.push(SignatureField {
+				offset: offsets.immediate_offset2() as u32,
+				len: offsets.immediate_size2() as u32,
+				kind: SignatureFieldKind::RelativeBranch,
+			});
+		}
+	}
+	if instruction.is_ip_rel_memory_operand() && offsets.has_displacement() {
+		fields.push(SignatureField {
+			offset: offsets.displacement_offset() as u32,
+			len: offsets.displacement_size() as u32,
+			kind: SignatureFieldKind::IpRelativeMemory,
+		});
+	}
+	fields
 }
 
 /// Extracts everything about an instruction that is not its display text.
@@ -382,6 +446,14 @@ mod tests {
 
 		assert_eq!(decoded[0].flow, FlowKind::Call);
 		assert_eq!(decoded[0].branch_target, Some(0x1015));
+		assert_eq!(
+			decoded[0].signature_fields,
+			vec![SignatureField {
+				offset: 1,
+				len: 4,
+				kind: SignatureFieldKind::RelativeBranch,
+			}]
+		);
 	}
 
 	#[test]
@@ -393,6 +465,14 @@ mod tests {
 
 		assert_eq!(decoded[0].memory_target, Some(0x2017));
 		assert_eq!(decoded[0].branch_target, None);
+		assert_eq!(
+			decoded[0].signature_fields,
+			vec![SignatureField {
+				offset: 3,
+				len: 4,
+				kind: SignatureFieldKind::IpRelativeMemory,
+			}]
+		);
 	}
 
 	#[test]

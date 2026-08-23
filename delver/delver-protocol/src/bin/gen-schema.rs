@@ -19,8 +19,9 @@ use delver_protocol::{
 	ListSpacesResult, ListingRowWire, ListingWindowParams, ListingWindowResult, MomentKindWire,
 	MomentWire, OpenImageParams, OpenImageResult, RangeWire, ReadMemoryParams, ReadMemoryResult,
 	Request, Response, RowForAddressParams, RowForAddressResult, RpcError, SectionWire,
-	SeedSourceWire, StringEncodingWire, StringWire, StringsResult, TargetCapabilityWire,
-	TargetDescriptorWire, TlsWire, XrefKindWire, XrefWire, XrefsParams, XrefsResult,
+	SeedSourceWire, SignatureFieldReasonWire, SignatureFieldWire, StringEncodingWire, StringWire,
+	StringsResult, TargetCapabilityWire, TargetDescriptorWire, TlsWire, XrefKindWire, XrefWire,
+	XrefsParams, XrefsResult,
 };
 
 /// Registers every type that must appear in the schema.
@@ -56,6 +57,8 @@ fn register_definitions(generator: &mut SchemaGenerator) {
 		ListingWindowParams,
 		ListingWindowResult,
 		ListingRowWire,
+		SignatureFieldWire,
+		SignatureFieldReasonWire,
 		FlowKindWire,
 		RowForAddressParams,
 		RowForAddressResult,

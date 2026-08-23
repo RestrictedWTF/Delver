@@ -20,6 +20,7 @@
 
 import { decodeBase64, encodeBase64, VSBuffer } from '../../../../base/common/buffer.js';
 import { DELVER_FINDING_LIMITS } from '../../../../platform/delver/common/findings.js';
+import { DELVER_SIGNATURE_LIMITS } from '../../../../platform/delver/common/delverSignature.js';
 
 /** Envelope version. Bump only for a breaking change to the envelope itself. */
 export const DELVER_AGENT_SCHEMA_VERSION = 1;
@@ -166,6 +167,10 @@ export interface IDelverAgentCapability {
  */
 export const DELVER_AGENT_LIMITS = {
 	bytes: { default: 256, max: 64 * 1024 },
+	bytePatternBytes: 256,
+	byteSearchMatches: { default: 100, max: 256 },
+	signatures: { default: 50, max: 200 },
+	signatureNameCharacters: DELVER_SIGNATURE_LIMITS.nameCharacters,
 	listingRows: { default: 256, max: 2048 },
 	functions: { default: 100, max: 1000 },
 	xrefs: { default: 100, max: 2000 },

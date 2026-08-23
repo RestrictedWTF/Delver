@@ -13,7 +13,48 @@ something is the way it is, see [adr/](../history/adr/).
 
 ## Just landed
 
-The first S2 raw-evidence capability is live. `delver_read_bytes` reads a bounded
+Named signatures are now durable project evidence. `delver_save_signature`
+accepts only a retained `delver_make_signature` call from the current target
+revision and only a primary or xref-site variant with an exact one-match proof;
+callers cannot inject an arbitrary pattern and label it proven. Names are
+case-insensitive, replacement preserves a stable id, and schema v6 stores the
+compact pattern, function/RVA, wildcard derivation, proof, quality, and source
+call id per revision. `delver_list_signatures` pages and filters those records
+from either a live target or an offline `.delverdb`. Schema v1-v5 projects
+migrate forward with an empty signature table and retain all earlier evidence.
+
+S2 now includes an instruction-aware SigMaker vertical slice.
+`delver_make_signature` accepts an address or exact function name, grows a
+candidate only at decoded instruction boundaries, and proves its match count in
+the target function, all executable sections, or the raw-backed image. The
+`relocation-stable` policy masks direct branch immediates, RIP/EIP-relative
+memory displacements, and PE base-relocation fields from exact decoder/server
+metadata and explains every wildcard. Results include covered instructions and
+RVAs, match evidence, a deterministic quality score, and a separately proven
+xref-site signature when the function bytes remain ambiguous. The
+`cross-revision-stable` policy intentionally returns `ANALYSIS_INCOMPLETE`
+until historical revision bytes are retained or attached; same-binary
+uniqueness is never mislabeled as update stability.
+
+S2 byte-pattern search is live. `delver_search_bytes` scans raw-backed image
+section bytes for one-to-256-byte hexadecimal patterns with full-byte and
+nibble wildcards. Optional exact section-name and executable-only filters are
+bound into its revision cursor. Reads overlap by `patternLength - 1`, so matches
+crossing a 64 KiB provider chunk and overlapping matches are not lost. A page
+stops only after proving another match exists; continuing resumes at that match.
+A complete zero-match result means every selected candidate position was read,
+while a short provider read fails with `ANALYSIS_INCOMPLETE` instead of making a
+false negative claim.
+
+S2 now has canonical address conversion. `delver_convert_address` translates an
+RVA, absolute VA, or raw file offset into the other spaces using the persisted
+image base and PE section table, so it also works when a project is open without
+its sample. Results identify the section and its exact half-open virtual/raw
+ranges. A virtual zero-fill tail remains a valid RVA/VA with `fileBacked: false`;
+headers, gaps, and values below the image base return `ADDRESS_NOT_MAPPED` rather
+than inventing a correspondence.
+
+The first S2 raw-evidence capability, `delver_read_bytes`, reads a bounded
 range from image RVA or raw file-offset space through the provider's existing
 binary-frame protocol. The shared-process boundary carries verified lowercase
 hex rather than `Buffer` or `bigint`, while the dispatcher can additionally
@@ -28,7 +69,7 @@ attach the target automatically when the normalized absolute path is inside the
 current workspace. The live provider's SHA-256 must match the selected project
 revision before the attachment is published. Outside-workspace, missing, changed,
 and path-traversal candidates leave the project offline and preserve the manual
-**Locate Target...** recovery path; no sample bytes were added to schema v5.
+**Locate Target...** recovery path; no sample bytes were added to schema v6.
 
 P3c step 3 now has a direct tool-result evidence slice. Every successful
 project-bound dispatcher exchange is retained per target revision with its
@@ -37,7 +78,7 @@ bounded exact request/result JSON, caller, capability, call id, and timings.
 dangling or cross-target references before retaining any finding. Review expands
 those ranges into their cited capability/call rows; selecting a call opens a
 read-only JSON evidence document with its identity, caller, timings, and complete
-retained request/result. Portable-project schema v5
+retained request/result. Portable-project schema v6
 adds the `tool_calls` table and migrates v1-v4 projects in place; untitled
 projects become dirty as soon as a project-bound exchange becomes authored
 investigation state.
@@ -48,7 +89,7 @@ findings. Each row has human Accept/Reject actions; proposal rows navigate to
 their anchor, and expanded finding evidence rows publish their exact half-open
 image range through the focus bus. Interpretation decisions remain `resolves`
 appends. Finding decisions are likewise separate append-only, human-authored
-records, serialized per target revision in portable-project schema v5. The
+records, serialized per target revision in portable-project schema v6. The
 project service validates a complete decision batch before retention, serializes
 concurrent reviews per content hash, and fails closed on repeated decisions.
 
@@ -60,10 +101,10 @@ state. The interpretation tools append `proposed` edits; the finding tool append
 dedicated findings with severity, confidence, described image ranges, model
 authorship, and reporting-call provenance. Both work on offline projects because
 their anchors use content identity rather than live bytes. Named projects persist
-findings immediately in SQLite schema v5, while untitled projects enter the
+findings immediately in SQLite schema v6, while untitled projects enter the
 existing dirty/Save lifecycle. Once a write begins, the bounded batch completes
 so dispatcher cancellation cannot conceal a successful prefix. The generated
-chat/DTP/MCP catalog now contains twenty-one tools; MCP marks these writes
+chat/DTP/MCP catalog now contains twenty-three tools; MCP marks these writes
 non-read-only, non-destructive, and non-idempotent.
 
 P3c step 1 is done: proposed and rejected interpretation is a complete state
@@ -118,9 +159,12 @@ one of them resolves a function boundary for itself there are two analysis
 implementations that disagree, and the disagreement surfaces as a model citing
 an address no pane ever showed.
 
-Twenty-one capabilities are live: session info, capability discovery,
-current context, focus, image info, function listing and lookup, disassembly,
-raw byte reads, decompilation, both xref directions, string listing and search, imports,
+Twenty-six capabilities are live: session info, capability discovery,
+current context, focus, image info, function listing and lookup, RVA/VA/file
+address conversion, disassembly, raw byte reads, wildcard search, instruction-aware
+signature generation, offline named-signature listing, evidence-gated signature
+persistence, decompilation, both xref
+directions, string listing and search, imports,
 exports, interpretation lookup, review-only rename/comment/tag proposals, and
 evidence-backed provisional findings.
 Every result is a versioned envelope
@@ -358,7 +402,7 @@ carry confidence, method, source/target content hashes, and fingerprint
 provenance. Structural fuzzy matching and instruction-level remapping remain
 explicit future work.
 
-Portable projects now use revision-aware SQLite schema v5. Explicitly opening
+Portable projects now use revision-aware SQLite schema v6. Explicitly opening
 the same target path probes the current bytes and, when their SHA-256 changed,
 offers Add as New Revision / Create New Project / Cancel. Adding a revision is
 atomic and preserves every prior snapshot. The analysis server emits normalized
@@ -541,17 +585,29 @@ with the OS icons, so the whole set regenerates from one master.
 
 ## Verification
 
-- Agent dispatcher and contract: 29 passing. They cover zero-analysis
+- Agent dispatcher and contract: 33 passing. They cover zero-analysis
   discovery, per-capability missing-project handling, attachment refusal, the
   zero-backend saved pseudocode path, an address above 2⁵³, unsafe JSON
   numbers, count clamping, cursor binding to bytes/capability/filter,
-  containing-function resolution including padding after a known end, bounded
-  image/file byte reads with exact little-endian integer decoding,
+  containing-function resolution including padding after a known end, offline
+  RVA/VA/file-offset conversion including virtual zero-fill tails, bounded
+  image/file byte reads with exact little-endian integer decoding, wildcard
+  scans across provider chunks, overlapping matches, revision-bound search
+  cursors, complete negative scans, short-read refusal, instruction-aligned
+  relocation-stable signatures, bounded uniqueness proofs, explicit
+  cross-revision refusal, proven xref-site fallbacks, evidence-gated named
+  signature saves, and offline named-signature listing,
   untrusted string labelling, authored names beating placeholders,
   cancellation, envelope shape, attributed offline rename/comment/tag
   proposals, validation-atomic malformed batches, and the write commit boundary
-- Agent tool presentation: 2 focused tests cover catalog/tool identity and the
-  bounded, review-only proposal schemas; generated discovery reports 21 tools
+- Agent tool presentation: 3 focused tests cover catalog/tool identity, exact
+  byte/address and signature schemas, and bounded review-only proposal schemas;
+  generated discovery reports 26 tools
+- Named-signature/project focused run: 56 passing (8 SQLite store, 4 project
+  service, 33 dispatcher, 3 tool-definition, and 8 command-gateway tests),
+  including v1-to-v6 migration, reopen, per-revision isolation, atomic upsert,
+  and case-insensitive replacement with a stable id
+- Session/decompiler regression run: 41 passing
 - Provider/analysis session: 7 passing, including verified image-RVA and raw
   file-offset binary-frame reads
 - Proposal review state: 5 log-level tests (proposal invisible to the view but

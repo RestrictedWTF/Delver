@@ -25,6 +25,7 @@ import {
 } from '../../../../platform/delver/common/findings.js';
 import { IFingerprintedFunction, IFunctionRevisionMatch, matchFunctionRevisions } from '../../../../platform/delver/common/functionRevisionMatcher.js';
 import { delverToolCallFromWire, delverToolCallToWire, IDelverToolCallRecord } from '../../../../platform/delver/common/delverToolCall.js';
+import { delverNamedSignatureFromWire, delverNamedSignatureToWire, IDelverNamedSignature, IDelverNamedSignatureDraft } from '../../../../platform/delver/common/delverSignature.js';
 import { IDelverProjectDecompilation, IDelverProjectHandle, IDelverProjectSnapshot, IDelverProjectSnapshotUpdate, IDelverProjectStoreService } from '../../../../platform/delver/common/delverProjectStoreService.js';
 import { editToWire } from '../../../../platform/delver/common/delverInterpretationStoreService.js';
 import { EditOp, IAuthor } from '../../../../platform/delver/common/interpretation.js';
@@ -106,6 +107,12 @@ export interface IDelverProjectService {
 	/** Exact retained dispatcher call, when it belongs to these bytes. */
 	toolCall(contentHash: string, callId: string): IDelverToolCallRecord | undefined;
 
+	/** Creates or replaces one named signature, preserving its stable id by case-insensitive name. */
+	saveSignature(contentHash: string, draft: IDelverNamedSignatureDraft): Promise<IDelverNamedSignature>;
+
+	/** Named signatures retained for one target revision, sorted by name. */
+	signaturesFor(contentHash: string): readonly IDelverNamedSignature[];
+
 	/** Path of the named project for these bytes, when the session is no longer untitled. */
 	projectPath(contentHash: string): string | undefined;
 
@@ -124,8 +131,10 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 	private readonly findings = new Map<string, IDelverFinding[]>();
 	private readonly findingDecisions = new Map<string, IDelverFindingDecision[]>();
 	private readonly toolCalls = new Map<string, IDelverToolCallRecord[]>();
+	private readonly signatures = new Map<string, IDelverNamedSignature[]>();
 	private readonly findingReviews = new SequencerByKey<string>();
 	private readonly toolCallRecords = new SequencerByKey<string>();
+	private readonly signatureRecords = new SequencerByKey<string>();
 
 	constructor(
 		@IDelverProjectStoreService private readonly storeService: IDelverProjectStoreService,
@@ -188,6 +197,10 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 			await this.storeService.appendFindingDecisions(
 				active.handle.projectId,
 				(this.findingDecisions.get(session.contentHash) ?? []).map(delverFindingDecisionToWire),
+			);
+			await this.storeService.upsertSignatures(
+				active.handle.projectId,
+				this.signaturesFor(session.contentHash).map(delverNamedSignatureToWire),
 			);
 			active.snapshot = await this.storeService.loadSnapshot(active.handle.projectId, active.revisionId);
 			this.pendingDecompilations.delete(session.contentHash);
@@ -268,6 +281,10 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 				active.handle.projectId,
 				(this.findingDecisions.get(updated.contentHash) ?? []).map(delverFindingDecisionToWire),
 			);
+			await this.storeService.upsertSignatures(
+				active.handle.projectId,
+				this.signaturesFor(updated.contentHash).map(delverNamedSignatureToWire),
+			);
 		} catch (error) {
 			await this.dialogService.error(
 				localize('delverProjectMigrationFailed', "The updated binary was saved, but some interpretations could not be migrated."),
@@ -317,6 +334,10 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 				handle.projectId,
 				(this.findingDecisions.get(session.contentHash) ?? []).map(delverFindingDecisionToWire),
 			);
+			await this.storeService.upsertSignatures(
+				handle.projectId,
+				this.signaturesFor(session.contentHash).map(delverNamedSignatureToWire),
+			);
 
 			const previous = this.active;
 			this.active = { contentHash: session.contentHash, revisionId: handle.metadata.currentRevisionId, handle };
@@ -347,6 +368,7 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 			this.findings.set(snapshot.metadata.contentHash, snapshot.findings.map(delverFindingFromWire));
 			this.findingDecisions.set(snapshot.metadata.contentHash, snapshot.findingDecisions.map(delverFindingDecisionFromWire));
 			this.toolCalls.set(snapshot.metadata.contentHash, snapshot.toolCalls.map(delverToolCallFromWire));
+			this.signatures.set(snapshot.metadata.contentHash, snapshot.signatures.map(delverNamedSignatureFromWire));
 			this.active = {
 				contentHash: snapshot.metadata.contentHash,
 				revisionId: snapshot.metadata.currentRevisionId,
@@ -376,6 +398,7 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 		this.findings.delete(session.contentHash);
 		this.findingDecisions.delete(session.contentHash);
 		this.toolCalls.delete(session.contentHash);
+		this.signatures.delete(session.contentHash);
 		if (this.active?.contentHash !== session.contentHash) {
 			return;
 		}
@@ -538,6 +561,47 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 
 	toolCall(contentHash: string, callId: string): IDelverToolCallRecord | undefined {
 		return this.toolCallsFor(contentHash).find(call => call.callId === callId);
+	}
+
+	saveSignature(contentHash: string, draft: IDelverNamedSignatureDraft): Promise<IDelverNamedSignature> {
+		return this.signatureRecords.queue(contentHash, async () => {
+			const retained = [...this.signaturesFor(contentHash)];
+			const existingIndex = retained.findIndex(signature => signature.name.toLowerCase() === draft.name.toLowerCase());
+			const existing = existingIndex < 0 ? undefined : retained[existingIndex];
+			const now = Date.now();
+			const signature = delverNamedSignatureFromWire({
+				...draft,
+				id: existing?.id ?? generateUuid(),
+				createdAt: existing?.createdAt ?? now,
+				updatedAt: now,
+			});
+			if (signature.contentHash !== contentHash) {
+				throw new Error('Signature belongs to different target bytes');
+			}
+			const active = this.active?.contentHash === contentHash ? this.active : undefined;
+			if (active) {
+				await this.storeService.upsertSignatures(active.handle.projectId, [delverNamedSignatureToWire(signature)]);
+			}
+			if (existingIndex < 0) {
+				retained.push(signature);
+			} else {
+				retained[existingIndex] = signature;
+			}
+			retained.sort((left, right) => {
+				const leftName = left.name.toLowerCase();
+				const rightName = right.name.toLowerCase();
+				return leftName < rightName ? -1 : leftName > rightName ? 1 : left.name < right.name ? -1 : left.name > right.name ? 1 : 0;
+			});
+			this.signatures.set(contentHash, retained);
+			if (active?.snapshot) {
+				active.snapshot = { ...active.snapshot, signatures: retained.map(delverNamedSignatureToWire) };
+			}
+			return signature;
+		});
+	}
+
+	signaturesFor(contentHash: string): readonly IDelverNamedSignature[] {
+		return this.signatures.get(contentHash) ?? [];
 	}
 
 	projectPath(contentHash: string): string | undefined {

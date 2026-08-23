@@ -10,14 +10,16 @@
 use anyhow::{bail, Result};
 use object::pe::{
 	ImageRuntimeFunctionEntry, ImageTlsDirectory32, ImageTlsDirectory64,
-	IMAGE_DIRECTORY_ENTRY_EXCEPTION, IMAGE_DIRECTORY_ENTRY_TLS,
+	IMAGE_DIRECTORY_ENTRY_EXCEPTION, IMAGE_DIRECTORY_ENTRY_TLS, IMAGE_REL_BASED_DIR64,
+	IMAGE_REL_BASED_HIGH, IMAGE_REL_BASED_HIGHADJ, IMAGE_REL_BASED_HIGHLOW, IMAGE_REL_BASED_LOW,
 };
 use object::read::pe::{ExportTarget, ImageNtHeaders, ImageThunkData, PeFile, PeFile32, PeFile64};
 use object::LittleEndian as LE;
 use object::{Object, ObjectSection, ReadRef};
 
 use crate::{
-	Export, FunctionSeed, ImportedModule, ImportedSymbol, ParsedImage, Section, SeedSource, TlsInfo,
+	BaseRelocation, Export, FunctionSeed, ImportedModule, ImportedSymbol, ParsedImage, Section,
+	SeedSource, TlsInfo,
 };
 
 /// Upper bounds applied to anything sized by a value read from the file.
@@ -282,7 +284,7 @@ where
 	seeds
 }
 
-fn extract_relocations<'data, Pe, R>(file: &PeFile<'data, Pe, R>) -> Vec<u64>
+fn extract_relocations<'data, Pe, R>(file: &PeFile<'data, Pe, R>) -> Vec<BaseRelocation>
 where
 	Pe: ImageNtHeaders,
 	R: ReadRef<'data>,
@@ -303,10 +305,25 @@ where
 			if out.len() >= limits::RELOCATIONS {
 				return out;
 			}
-			out.push(reloc.virtual_address as u64);
+			let Some(width) = relocation_width(reloc.typ) else {
+				continue;
+			};
+			out.push(BaseRelocation {
+				rva: reloc.virtual_address as u64,
+				width,
+			});
 		}
 	}
 	out
+}
+
+fn relocation_width(kind: u16) -> Option<u8> {
+	match kind {
+		IMAGE_REL_BASED_HIGH | IMAGE_REL_BASED_LOW | IMAGE_REL_BASED_HIGHADJ => Some(2),
+		IMAGE_REL_BASED_HIGHLOW => Some(4),
+		IMAGE_REL_BASED_DIR64 => Some(8),
+		_ => None,
+	}
 }
 
 fn extract_tls<'data, Pe, R>(file: &PeFile<'data, Pe, R>, image_base: u64) -> Option<TlsInfo>
@@ -388,6 +405,15 @@ mod tests {
 			!image.imports.is_empty(),
 			"a Rust test binary always imports from at least one system module"
 		);
+	}
+
+	#[test]
+	fn preserves_base_relocation_field_widths() {
+		assert_eq!(relocation_width(IMAGE_REL_BASED_HIGH), Some(2));
+		assert_eq!(relocation_width(IMAGE_REL_BASED_HIGHLOW), Some(4));
+		assert_eq!(relocation_width(IMAGE_REL_BASED_DIR64), Some(8));
+		assert_eq!(relocation_width(0), None);
+		assert_eq!(relocation_width(u16::MAX), None);
 	}
 
 	#[test]
