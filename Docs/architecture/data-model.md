@@ -236,20 +236,40 @@ the first commit.
 ## 6. Findings and recipes
 
 ```ts
+export interface FindingRangeEvidence {
+	readonly kind: 'range';
+	readonly anchor: Anchor;
+	readonly endRva?: bigint;              // exclusive
+	readonly description: string;
+	readonly sourceCallIds?: readonly string[];
+}
+
 export interface IFinding {
 	readonly id: string;
+	readonly at: number;
 	readonly title: string;
+	readonly description: string;
 	readonly severity: 'info' | 'suspicious' | 'malicious';
+	readonly status: 'proposed' | 'accepted' | 'rejected';
 	readonly anchors: readonly Anchor[];
 	readonly author: IAuthor;
 	readonly confidence: number;          // 0..1, and always shown
-	readonly evidence: readonly EvidenceRef[];
-	readonly recipeId?: string;           // the rule that produced it, if any
+	readonly evidence: readonly FindingRangeEvidence[];
+	readonly provenance: { capability: string; callId: string };
 }
 ```
 
-Findings map directly onto VS Code's `IMarkerService`, which gives free
-navigation, a Problems-panel-shaped list, filtering, and gutter decorations. See
+The implemented first slice stores concrete, described image ranges, the
+dispatcher call that reported the finding, and optional references to successful
+prior tool-call records from the same target revision. Each record preserves the
+bounded model-visible request/result JSON, caller, capability, and timing. Graph
+paths and recipes extend this evidence model later; they are not flattened into
+comments.
+
+The first Review tree exposes pending findings, navigates their evidence ranges
+through the focus bus, lists cited tool calls below each range, and opens the
+complete retained exchange in a read-only JSON editor. A later projection onto VS Code's `IMarkerService`
+can add a Problems-panel-shaped list, filtering, and gutter decorations. See
 [04-IDE-Architecture.md](ide-architecture.md).
 
 A `Recipe` is a concluded investigation compiled into something re-runnable: a

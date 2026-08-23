@@ -35,13 +35,15 @@ delver_focus             delver_image_info        delver_list_functions
 delver_lookup_function   delver_disassemble       delver_decompile
 delver_xrefs_to          delver_xrefs_from        delver_list_strings
 delver_search_strings    delver_imports           delver_exports
-delver_get_interpretation
+delver_get_interpretation delver_propose_rename      delver_propose_comment
+delver_propose_tag       delver_report_finding
 ```
 
 The runtime tools this section once listed — processes, threads, registers,
 modules, regions, image diff — belong to P4 and are not stubs waiting to be
-filled in. `delver_propose_*` and `delver_report_finding` arrive with the
-proposal layer in P3c (§3).
+filled in. The rename/comment/tag proposal tools and durable range-backed
+`delver_report_finding` have arrived with P3c. Review surfaces and references to
+earlier tool-call records remain (§3).
 
 Design rules for these tools:
 
@@ -88,10 +90,10 @@ The model does not mutate the interpretation layer. It appends edits with
 - Proposals render distinctly in every view — a rename shows as
   `sub_401000 → ⟨decrypt_config?⟩` with a proposal affordance, not as a settled
   name.
-- A review surface lists pending proposals grouped by operation and confidence,
-  with accept / reject / accept-all-above-threshold. This is a filter over the
-  edit log, so it's cheap to build; the comments contrib gives you a threaded
-  review UI if you want discussion per proposal.
+- The first Review surface lists pending interpretation proposals and findings,
+  with individual accept/reject actions and focus-bus navigation. Grouping by
+  operation/confidence, threshold acceptance, and threaded discussion remain
+  later review ergonomics.
 - Accepting appends an `accepted` edit authored by the *human*, with the
   proposal as evidence. The chain of custody stays intact: you can always ask
   "who actually decided this, and on what basis?"

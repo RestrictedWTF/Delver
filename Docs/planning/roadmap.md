@@ -129,14 +129,15 @@ one decompiler engine.
 
 Ghidra and IDA expose different lifecycles, data models, and intermediate
 representations. Ghidra is most directly automated through PyGhidra, which owns
-a long-lived JVM and Ghidra project; IDA/Hex-Rays is most directly automated
-through IDAPython inside an installed, licensed IDA environment. They must not
-share a runtime.
+a long-lived JVM and Ghidra project. For IDA Pro 9.0+, the preferred integration
+is a separate Python worker using IDALib (`idapro`) to run the existing
+IDAPython and Hex-Rays APIs outside the GUI. Both require installed, licensed
+user environments and must not share a runtime.
 
 The durable boundary is therefore a **backend-neutral decompiler host protocol**,
 not a Ghidra library API. The host supervises one isolated worker per engine.
-PyGhidra is the first production adapter; a separate IDAPython/Hex-Rays adapter
-can follow without changing the workbench or pseudocode editor. A native Ghidra
+PyGhidra is the first production adapter; a separate IDALib/Hex-Rays adapter can
+follow without changing the workbench or pseudocode editor. A native Ghidra
 responder remains an optional optimization if profiling later justifies its
 maintenance cost.
 
@@ -190,14 +191,25 @@ next analysis slow, but must not remove anything the user authored or prevent a
 
 | Item | Size | Notes |
 | --- | --- | --- |
-| Separate IDAPython worker | M | Runs in the user's configured IDA installation; never import IDAPython into the PyGhidra process |
-| Hex-Rays decompilation and mappings | M | Adapt C text, variables, diagnostics, and line/address provenance into the common schema |
-| IDA database persistence and invalidation | M | Reuse a content-hash-keyed database only when IDA, decompiler, and analysis-profile versions match |
-| License/capability reporting | S | IDA may be installed while the required Hex-Rays decompiler or architecture license is unavailable |
+| Separate IDALib Python worker | M | Import `idapro` first, then use IDAPython/Hex-Rays outside the GUI in the user's configured IDA Pro 9.0+ installation; never import it into the PyGhidra process |
+| Serialized database lifecycle | S | IDALib is single-threaded and requires database calls on its initialization thread. Queue requests in the worker; hard cancellation may terminate and restart that worker |
+| Hex-Rays decompilation and mappings | M | Initialize Hex-Rays explicitly, call `ida_hexrays.decompile`, strip tagged pseudocode, and adapt variables, diagnostics, ctree/eamap-derived line/address provenance into the common schema |
+| IDA database persistence and invalidation | M | Reuse a content-hash-keyed IDB only when IDA, decompiler, processor/loader options, and analysis-profile versions match |
+| Discovery and license/capability reporting | S | Discover or accept an explicit IDA path and distinguish missing IDA, incompatible IDALib, missing Hex-Rays, and unsupported architecture/decompiler licenses |
+| Worker conformance test double | S | Prove handshake, serialization, cancellation/restart, malformed-output handling, and cache identity in CI without requiring IDA; run licensed smoke tests separately |
 
 IDA and Hex-Rays remain optional user-provided integrations. Delver does not
-bundle or redistribute them. The C++ IDA SDK is a later escape hatch for APIs or
-performance that IDAPython cannot provide; it does not change the host protocol.
+bundle or redistribute them. The first adapter uses Python IDALib rather than
+linking IDA into the Electron process: it preserves process isolation and gives
+access to the full IDAPython API with much less ABI and packaging work. The C++
+IDALib/IDA SDK remains a later escape hatch for measured API or performance
+limits; it does not change the host protocol. Product/server embedding must be
+reviewed against the applicable IDA/OEM license rather than inferred from local
+developer use.
+
+Primary references: [IDALib](https://docs.hex-rays.com/user-guide/idalib),
+[IDALib lifecycle and threading](https://cpp.docs.hex-rays.com/idalib_8hpp.html),
+and [Hex-Rays IDAPython API](https://python.docs.hex-rays.com/ida_hexrays/index.html).
 
 ## p-code
 

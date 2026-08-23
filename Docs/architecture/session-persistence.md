@@ -13,8 +13,12 @@ findings, interpretation edits, and useful presentation state in memory.
 
 Opening a `.delverdb` creates a **saved project session**. Its target is optional:
 stored facts, pseudocode, findings, and interpretation remain available when the
-sample is missing. If the user locates the sample later, Delver computes its
-content hash before attaching it and rejects a mismatch.
+sample is missing. The project retains the original source path as a locator,
+never as embedded sample data. When that absolute path is still inside the
+current workspace, Delver automatically opens it and verifies its SHA-256 before
+publishing a live attachment. Missing, outside-workspace, and changed paths leave
+the project safely offline. **Locate Target...** remains available for moved
+samples and applies the same hash check.
 
 Only one raw target belongs to the initial project shape. Multi-image projects
 must extend the schema explicitly rather than overloading a session identifier.
@@ -56,7 +60,8 @@ the artifact at rest is one self-contained file.
 
 The database stores:
 
-- target identity: content hash, format metadata, and an optional source locator;
+- target identity: content hash, format metadata, and an optional source locator
+  used only for workspace-scoped, hash-verified automatic attachment;
 - derived facts: functions, instructions, strings, xrefs, imports, exports, and
   other reproducible analysis;
 - decompiler results: text, address mappings, recovered variables, diagnostics,

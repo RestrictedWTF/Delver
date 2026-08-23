@@ -253,7 +253,8 @@ unless the caller requests reveal.
 
 ```text
 delver_image_info           delver_list_functions
-delver_lookup_function      delver_disassemble
+delver_lookup_function      delver_read_bytes
+delver_disassemble
 delver_decompile            delver_xrefs_to
 delver_xrefs_from           delver_list_strings
 delver_search_strings       delver_imports
@@ -272,7 +273,7 @@ enough for a real function investigation before the broader catalog exists.
 
 ```text
 delver_basic_blocks         delver_callers          delver_callees
-delver_call_graph           delver_find_paths       delver_read_bytes
+delver_call_graph           delver_find_paths
 delver_search_bytes         delver_search_instructions
 delver_list_globals         delver_global_accesses
 delver_stack_frame          delver_list_types       delver_struct_info
@@ -582,10 +583,19 @@ the project or worker.
    `propose`, `pendingProposals`, and a validation-atomic `resolveProposals` are
    on the interpretation service; the field round-trips through the JSONL log
    and is resequenced on import.
-2. Add proposal and finding tools with validation-atomic batches.
-3. Persist tool-call provenance and evidence edges.
-4. Build the pending-proposals review surface.
-5. Make evidence clickable through the focus bus.
+2. Add proposal and finding tools with validation-atomic batches. **Landed:**
+   attributed rename/comment/tag proposal batches and evidence-backed findings
+   are live through chat, DTP, and MCP. Findings retain severity, confidence,
+   described image ranges, model authorship, and reporting-call provenance.
+3. Persist references to prior tool-call records and richer evidence edges.
+   **Landed for direct tool-call evidence:** successful project-bound dispatcher
+   exchanges are retained per revision, finding ranges may cite earlier call ids,
+   and Review shows those calls and opens their complete retained request/result
+   in a read-only JSON editor. Graph-path edges remain.
+4. Build the pending-proposals review surface. **Landed:** one Review tree shows
+   interpretation proposals and findings with human Accept/Reject actions.
+5. Make evidence clickable through the focus bus. **Landed for range evidence:**
+   proposal locations and each described finding range publish image focus.
 
 Exit: an agent proposes names/comments and a finding; a human verifies each
 against bytes and accepts or rejects the batch.

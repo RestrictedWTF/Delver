@@ -11,8 +11,8 @@ Delver is an open-source reverse-engineering workbench built on Code - OSS. It b
 - Dedicated Overview, Functions, Sections, Imports, Exports, References, and Strings views.
 - Ghidra 12.1 decompilation through a persistent PyGhidra worker, with an explicit headless fallback and synchronized pseudocode-to-listing navigation.
 - Append-only, attributed renames, comments, and tags with undo, author reversion, import/export, and proposal-resolution support.
-- Portable SQLite `.delverdb` projects that preserve analysis, pseudocode, interpretation, provenance, and revisions without embedding the original binary.
-- Sixteen bounded, provenance-aware agent capabilities for built-in chat and external MCP clients, with local authorization, cancellation, and root-scoped transport.
+- Portable SQLite `.delverdb` projects that preserve analysis, pseudocode, interpretation, provenance, and revisions without embedding the original binary, and safely auto-attach a saved in-workspace target after hash verification.
+- Twenty bounded, provenance-aware agent capabilities for built-in chat and external MCP clients, including review-only rename, comment, and tag proposals plus durable findings that can cite retained prior tool results, with local authorization, cancellation, and root-scoped transport.
 - A Rust analysis pipeline, versioned RPC protocol, generated TypeScript types, headless `delverctl`, and a synthetic regression corpus.
 
 ## Project structure
@@ -34,7 +34,7 @@ Docs/                           Architecture, development notes, plans, and stat
 | --- | --- | --- |
 | P0-P1 | Native pipeline, PE static analysis, listing, navigation, and interpretation | Implemented |
 | P2 | Portable projects and backend-neutral decompilation | Core flow implemented; UI polish, p-code, and IDA/Hex-Rays remain |
-| P3 | Grounded AI tools, proposals, evidence, review, Python client, and notebooks | In progress; read-only tools and MCP bridge are implemented |
+| P3 | Grounded AI tools, proposals, evidence, review, Python client, and notebooks | In progress; read/navigation tools, provisional interpretation/finding writes, append-only review decisions, evidence navigation, and the MCP bridge are implemented |
 | P4 | Live process attach, debugging, memory views, and memory-vs-disk diff | Planned |
 | P5-P6 | Types, CFGs, more formats/providers, signatures, recipes, and hardening | Planned |
 | P7 | Kernel and hypervisor providers | Parked |

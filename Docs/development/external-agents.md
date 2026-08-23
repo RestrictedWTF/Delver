@@ -12,15 +12,36 @@ describes only how to wire a client up.
 
 ## What the client gets
 
-Sixteen read and navigation capabilities, identical to the ones the in-workbench
-chat uses, because both go through the same dispatcher:
+Twenty read, navigation, and review-only authoring capabilities, identical to
+the ones the in-workbench chat uses, because both go through the same dispatcher:
 
 `delver_capabilities` · `delver_session_info` · `delver_current_context` ·
 `delver_focus` · `delver_image_info` · `delver_list_functions` ·
 `delver_lookup_function` · `delver_disassemble` · `delver_decompile` ·
 `delver_xrefs_to` · `delver_xrefs_from` · `delver_list_strings` ·
 `delver_search_strings` · `delver_imports` · `delver_exports` ·
-`delver_get_interpretation`
+`delver_get_interpretation` · `delver_propose_rename` ·
+`delver_propose_comment` · `delver_propose_tag` · `delver_report_finding`
+
+The three proposal tools append attributed provisional edits. They work for an
+offline project, never change accepted interpretation directly, and accept
+bounded batches that are fully validated before the first append. Repeating a
+successful call creates another proposal, so MCP advertises them as
+non-read-only, non-destructive, and non-idempotent. Acceptance is reserved for
+human review in Delver's **Review** view.
+
+`delver_report_finding` appends attributed provisional findings with severity,
+confidence, and one or more described image ranges. A named `.delverdb` persists
+them immediately; an untitled project becomes dirty and includes them when it is
+saved. The reporting call id is retained as provenance. The Review view lists
+pending findings beside interpretation proposals, keeps accept/reject decisions
+append-only and human-authored, and navigates each evidence range through the
+shared focus bus. Every successful project-bound tool result returns a `callId`
+and is retained with its exact bounded request/result envelope. Finding evidence
+can cite prior results with `sourceCallIds`; dangling or cross-target references
+are rejected before retention, and cited calls appear beneath the evidence row
+in Review. Selecting a call opens its complete retained request/result as a
+read-only JSON evidence document.
 
 Tool names, schemas, and descriptions are discovered from the running window
 through `tools/list`. The adapter does not carry its own copy, so a client can

@@ -28,6 +28,10 @@ refresh.
    remain useful offline.
 4. Attaching a sample verifies its SHA-256 against the selected revision before
    live analysis is exposed.
+5. **Landed:** opening a project automatically attaches its saved absolute source
+   path only when the normalized path is inside the current workspace and the
+   live provider reports the selected revision's SHA-256. Any failure preserves
+   the offline project.
 5. F5 never silently changes backend. Backend startup failure is visible and
    copyable, with an explicit recovery action.
 6. Cache identity includes revision content hash, backend id/version, result
@@ -68,8 +72,8 @@ Acceptance:
   strings, interpretations, and decompiled functions through `loadSnapshot()`.
 - Route panes through a snapshot/live-source abstraction: saved categories are
   available immediately; missing categories request an attached live target.
-- Add **Locate Target...** for operations requiring bytes and reject a sample
-  whose hash does not match the selected revision.
+- Add **Locate Target...** for moved targets and operations requiring bytes;
+  reject a sample whose hash does not match the selected revision.
 - When a raw binary has a matching adjacent project, offer to open that project
   and attach the already-open target.
 
@@ -114,7 +118,11 @@ Acceptance:
 - Keep one JVM and one retained Program/DecompInterface per active target.
 - Prewarm the configured worker without blocking project-backed panes.
 - Add cache inspection/invalidation commands and bounded cleanup policy.
-- Apply the same backend-neutral lifecycle to a future IDAPython/Hex-Rays host.
+- Apply the same backend-neutral lifecycle to a future serialized Python IDALib
+  (`idapro`)/Hex-Rays worker. Keep all database calls on its initialization
+  thread, treat worker restart as the hard-cancellation fallback, and qualify
+  cached IDBs by target hash, IDA/Hex-Rays versions, processor/loader options,
+  and analysis profile.
 
 Acceptance:
 

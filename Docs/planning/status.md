@@ -8,10 +8,63 @@ something is the way it is, see [adr/](../history/adr/).
 
 ---
 
-**Last updated:** 2026-08-19
-**Current phase:** P3c — proposals, evidence, and review (P3b client conformance and P3a/P2b real-project smoke continue alongside)
+**Last updated:** 2026-08-23
+**Current phase:** P3c/P3d — reviewed evidence plus static-analysis depth (P3b client conformance and P3a/P2b real-project smoke continue alongside)
 
 ## Just landed
+
+The first S2 raw-evidence capability is live. `delver_read_bytes` reads a bounded
+range from image RVA or raw file-offset space through the provider's existing
+binary-frame protocol. The shared-process boundary carries verified lowercase
+hex rather than `Buffer` or `bigint`, while the dispatcher can additionally
+decode exact `u8`, `u16le`, `u32le`, or `u64le` values as hexadecimal strings.
+Provider-backed ranges, target moment, missing bytes, partial reads, and
+image-range provenance remain explicit. The capability requires an attached
+sample and is generated into both the built-in chat and MCP tool surfaces from
+the canonical catalog.
+
+Opening a named `.delverdb` now reuses its existing per-revision `sourcePath` to
+attach the target automatically when the normalized absolute path is inside the
+current workspace. The live provider's SHA-256 must match the selected project
+revision before the attachment is published. Outside-workspace, missing, changed,
+and path-traversal candidates leave the project offline and preserve the manual
+**Locate Target...** recovery path; no sample bytes were added to schema v5.
+
+P3c step 3 now has a direct tool-result evidence slice. Every successful
+project-bound dispatcher exchange is retained per target revision with its
+bounded exact request/result JSON, caller, capability, call id, and timings.
+`delver_report_finding` accepts prior `sourceCallIds` on each range and rejects
+dangling or cross-target references before retaining any finding. Review expands
+those ranges into their cited capability/call rows; selecting a call opens a
+read-only JSON evidence document with its identity, caller, timings, and complete
+retained request/result. Portable-project schema v5
+adds the `tool_calls` table and migrates v1-v4 projects in place; untitled
+projects become dirty as soon as a project-bound exchange becomes authored
+investigation state.
+
+P3c steps 4 and 5 now have a first complete vertical slice. A **Review** tree in
+the Delver activity-bar container combines pending interpretation proposals and
+findings. Each row has human Accept/Reject actions; proposal rows navigate to
+their anchor, and expanded finding evidence rows publish their exact half-open
+image range through the focus bus. Interpretation decisions remain `resolves`
+appends. Finding decisions are likewise separate append-only, human-authored
+records, serialized per target revision in portable-project schema v5. The
+project service validates a complete decision batch before retention, serializes
+concurrent reviews per content hash, and fails closed on repeated decisions.
+
+P3c step 2 now exposes four agent writes through the canonical dispatcher:
+`delver_propose_rename`, `delver_propose_comment`, `delver_propose_tag`, and
+`delver_report_finding`. Each accepts a bounded batch, validates the complete
+batch before retention, requires model attribution, and writes only provisional
+state. The interpretation tools append `proposed` edits; the finding tool appends
+dedicated findings with severity, confidence, described image ranges, model
+authorship, and reporting-call provenance. Both work on offline projects because
+their anchors use content identity rather than live bytes. Named projects persist
+findings immediately in SQLite schema v5, while untitled projects enter the
+existing dirty/Save lifecycle. Once a write begins, the bounded batch completes
+so dispatcher cancellation cannot conceal a successful prefix. The generated
+chat/DTP/MCP catalog now contains twenty-one tools; MCP marks these writes
+non-read-only, non-destructive, and non-idempotent.
 
 P3c step 1 is done: proposed and rejected interpretation is a complete state
 rather than an enum nothing could leave. A review decision is an ordinary
@@ -65,10 +118,12 @@ one of them resolves a function boundary for itself there are two analysis
 implementations that disagree, and the disagreement surfaces as a model citing
 an address no pane ever showed.
 
-Sixteen read/UI capabilities are live: session info, capability discovery,
+Twenty-one capabilities are live: session info, capability discovery,
 current context, focus, image info, function listing and lookup, disassembly,
-decompilation, both xref directions, string listing and search, imports,
-exports, and interpretation lookup. Every result is a versioned envelope
+raw byte reads, decompilation, both xref directions, string listing and search, imports,
+exports, interpretation lookup, review-only rename/comment/tag proposals, and
+evidence-backed provisional findings.
+Every result is a versioned envelope
 carrying byte identity, revision, provenance, and `completeness`, so a
 truncated answer cannot be read as a complete one.
 
@@ -303,7 +358,7 @@ carry confidence, method, source/target content hashes, and fingerprint
 provenance. Structural fuzzy matching and instruction-level remapping remain
 explicit future work.
 
-Portable projects now use revision-aware SQLite schema v2. Explicitly opening
+Portable projects now use revision-aware SQLite schema v5. Explicitly opening
 the same target path probes the current bytes and, when their SHA-256 changed,
 offers Add as New Revision / Create New Project / Cancel. Adding a revision is
 atomic and preserves every prior snapshot. The analysis server emits normalized
@@ -311,7 +366,11 @@ function fingerprints; unique exact matches are stored with confidence and
 provenance, then existing names, comments, and tags are copied as attributed
 import edits only when the destination has no authored value. Ambiguous or
 changed functions are left untouched, and decompiler output is regenerated.
-Schema-v1 projects upgrade in place without losing their initial analysis.
+Schema-v1 and schema-v2 projects upgrade in place without losing their initial
+analysis. The `findings` table retains one validated payload per finding and
+binds it to the matching target revision; v4 added one append-only human decision
+per finding without rewriting the original model-authored payload, and v5 adds
+bounded dispatcher exchanges keyed by revision and call id.
 
 Session persistence is now specified as a portable, IDA-like project lifecycle.
 Opening a raw binary creates an untitled session. Once durable analysis content
@@ -331,11 +390,15 @@ work. Future IDA native databases follow the same boundary.
 The production decompiler direction is now a backend-neutral persistent host,
 with isolated workers per engine. The first PyGhidra adapter keeps one JVM plus
 an analyzed Ghidra Program and DecompInterface alive across function requests. The current
-headless Ghidra path remains a compatibility fallback. A future IDAPython worker
-will use an installed, licensed IDA/Hex-Rays environment through the same host
-protocol without sharing a runtime with PyGhidra. Common results stop at text,
-variables, diagnostics, and line↔RVA mappings; p-code, microcode, and ctree remain
-optional backend-specific capabilities.
+headless Ghidra path remains a compatibility fallback. The future IDA adapter is
+now specified as a Python IDALib (`idapro`) worker targeting a user-provided IDA
+Pro 9.0+ and appropriate Hex-Rays license. It uses the existing IDAPython APIs
+outside the GUI, serializes every database operation on IDALib's initialization
+thread, and may restart the isolated worker for hard cancellation. It adapts
+Hex-Rays text, variables, diagnostics, and ctree/eamap-derived line↔RVA
+provenance through the same host protocol without sharing a runtime with
+PyGhidra. IDBs stay content-hash/version/profile-qualified local accelerators;
+p-code, microcode, and ctree remain optional backend-specific capabilities.
 
 The versioned JSON-lines host and PyGhidra worker are implemented. The shared
 process supervises one worker, negotiates backend identity and capabilities,
@@ -478,13 +541,19 @@ with the OS icons, so the whole set regenerates from one master.
 
 ## Verification
 
-- Agent dispatcher and contract: 20 passing. They cover zero-analysis
+- Agent dispatcher and contract: 29 passing. They cover zero-analysis
   discovery, per-capability missing-project handling, attachment refusal, the
   zero-backend saved pseudocode path, an address above 2⁵³, unsafe JSON
   numbers, count clamping, cursor binding to bytes/capability/filter,
-  containing-function resolution including padding after a known end,
+  containing-function resolution including padding after a known end, bounded
+  image/file byte reads with exact little-endian integer decoding,
   untrusted string labelling, authored names beating placeholders,
-  cancellation, and envelope shape
+  cancellation, envelope shape, attributed offline rename/comment/tag
+  proposals, validation-atomic malformed batches, and the write commit boundary
+- Agent tool presentation: 2 focused tests cover catalog/tool identity and the
+  bounded, review-only proposal schemas; generated discovery reports 21 tools
+- Provider/analysis session: 7 passing, including verified image-RVA and raw
+  file-offset binary-frame reads
 - Proposal review state: 5 log-level tests (proposal invisible to the view but
   present in the log, acceptance authored by the reviewer with the proposal
   traceable, rejection recording the declined value, fail-closed resolution of
@@ -571,7 +640,13 @@ with the OS icons, so the whole set regenerates from one master.
 - Client typecheck: clean
 - Generated function naming: 5 common tests and 8 Python worker tests passing
 - Listing and reference placeholder presentation: 6 passing
-- SQLite multi-function pseudocode persistence: 8 project-store tests passing
+- SQLite snapshot, revision, migration, and finding persistence: 9 project-store tests passing
+- Tool-call record validation and JSON round-trip: 3 passing
+- Finding/decision domain validation and 64-bit wire round-trip: 4 passing
+- Project finding/tool-call lifecycle and autosave: 4 passing
+- Review tree projection, evidence navigation, and tool-result document: 4 passing
+- Agent dispatcher: 28 passing, including retained exchanges and validated finding citations
+- Generated chat/MCP tool definitions: 3 passing with a twenty-tool catalog
 - Decompiler recovery/restart service: 14 focused tests passing
 - Cache cleanup boundary: 1 focused filesystem test passing
 - Decompiler cache/performance service: 15 focused tests passing
@@ -614,13 +689,12 @@ with the OS icons, so the whole set regenerates from one master.
 
 ## Next
 
-P3c continues at step 2: proposal and finding tools with validation-atomic batches, over
-the state that now exists. The dispatcher's authored operations
-(`delver_propose_rename`, `delver_propose_comment`, `delver_propose_tag`,
-`delver_report_finding`) are the next capability additions, and they are the
-first agent writes — every one of them lands as `proposed`, never as accepted
-interpretation. The pending-proposals review surface is step 4 and needs the
-tools first, so a human has something to review that a model actually wrote.
+P3c continues with graph-path evidence and bulk review operations. The static
+baseline now retains proposals/findings and
+their cited tool results, lets a human decide them, and navigates concrete range
+evidence. Next add the bytes/search and program-graph capabilities needed to
+make deeper evidence retrievable without reconstructing it from hundreds of
+narrow calls.
 
 For P3b, root-v1, the per-window lifecycle/backoff owner, production extension
 composition, approval adapter, root-scoped private relay ownership,
@@ -649,13 +723,14 @@ other contribution point for language-model tools, and upstream's own
 `browserView` contrib does the same; the exception is noted here so it is not
 mistaken for drift.
 
-The P2b project/decompiler integration slices now open `.delverdb` as an offline
-project, restore saved analysis categories and pseudocode without a provider or
-Ghidra call, attach matching bytes only after SHA-256 verification, and expose
+The P2b project/decompiler integration slices now restore saved analysis
+categories and pseudocode without a provider or Ghidra call, automatically
+attach a saved in-workspace target only after SHA-256 verification, retain an
+offline fallback plus manual Locate Target, and expose
 actual backend state and phase timings. PyGhidra failure no longer silently
 starts the minute-long headless path; headless selection is explicit.
 
-Combined verification: session lifecycle 21 passing, decompiler/worker/status
+Combined verification: session lifecycle 25 passing, decompiler/worker/status
 29 passing, SQLite project store 8 passing, Python worker 6 passing, client
 typecheck and transpilation clean.
 

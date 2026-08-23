@@ -101,7 +101,7 @@ Priority is **static reverse engineering with decompilation and AI, first**:
 1. **P1** — static core: listing, navigation, xrefs, annotation. The prototype
    the team uses, and the foundation the decompiler queries.
 2. **P2** — decompilation and p-code through a backend-neutral persistent host;
-   PyGhidra first, with a separate future IDA/Hex-Rays adapter.
+   PyGhidra first, with a separate future Python IDALib/Hex-Rays adapter.
 3. **P3** — the AI analyst, grounded in decompiled output.
 4. **P4** — runtime: live attach, a basic debugger, memory-vs-disk diffing.
 

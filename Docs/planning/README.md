@@ -12,6 +12,7 @@ when a design decision does.
 | [rebranding-plan.md](rebranding-plan.md) | *How do we stop being Code - OSS?* — identity, icons, packaging, theme scaffold |
 | [status.md](status.md) | *Where were we?* — overwritten each session |
 | [ledger.md](ledger.md) | *What exists, what's stubbed, what did we skip and why?* |
+| [mcp-complete-session-plan.md](mcp-complete-session-plan.md) | *What remains after the MCP transport works?* — inspection, proposals, semantic depth, corrections, and durable investigations |
 | [ideas/](ideas/) | Proposals not yet decided |
 
 A phase plan lives here while its phase is in progress, then moves to

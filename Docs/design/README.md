@@ -34,8 +34,8 @@ Suggested order matches [`../planning/roadmap.md`](../planning/roadmap.md):
 | Listing (disassembly) | P1 | not started |
 | Strings, imports, exports | P1 | not started |
 | Pseudocode + listing pairing | P2 | not started |
-| Findings and evidence chain | P3 | not started |
-| AI proposal review | P3 | not started |
+| Findings and evidence chain | P3 | model/storage/tool, append-only decisions, range navigation, and cited tool-call rows landed |
+| AI proposal review | P3 | unified Review tree and tool-call detail documents landed; bulk/filter polish remains |
 | Hex and memory map | P4 | not started |
 | Runtime views | P4 | not started |
 | Diff (memory vs. disk) | P4 | not started |
