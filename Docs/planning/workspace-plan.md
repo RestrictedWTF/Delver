@@ -832,7 +832,7 @@ git commit -m "feat: host upstream tree views as Delver surfaces"
 
 - `IDelverSurface` exists and is implemented by both hard cases: the 852-line listing and upstream's `TreeView`.
 - No listing action reaches its target through `instanceof`.
-- Every existing view still registers through `registerDelverView` and behaves as before. **Nothing is user-visibly different.**
+- Every existing view still registers through `registerDelverView` and behaves as before. **Nothing is user-visibly different, with one named exception:** the listing editor previously inherited `Composite.focus()`, a no-op, and now forwards to `table.domFocus()`. Focusing a listing group therefore moves DOM focus into the table where it did not before. This is an improvement and is kept, but it is recorded rather than allowed to merge as invisible. It is a no-op while `table` is undefined — during analysis, or in the "Locate the matching target" state — so focus stays wherever it was in those cases.
 - No workspace editor exists yet. That is Phase 2.
 
 ## What Phase 1 deliberately leaves out

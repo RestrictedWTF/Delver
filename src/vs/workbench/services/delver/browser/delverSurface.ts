@@ -31,8 +31,15 @@ export enum DelverZone {
 export interface IDelverSurface extends IDisposable {
 
 	/**
-	 * Attach this surface's DOM under `container`. Called exactly once, before
-	 * the first `layout`.
+	 * Attach this surface's DOM under `container`. Called exactly once, and
+	 * before the first `layout`, `setVisible`, or `focus`.
+	 *
+	 * **An implementation must be ready to render at construction time.** A host
+	 * is free to call `render` before it has ever called `setVisible`, so a
+	 * surface that builds its DOM lazily on first show has to force that work in
+	 * its constructor. This is not hypothetical: `TreeView` builds its `domNode`
+	 * inside `setVisibility`, so `DelverTreeSurface` must initialize eagerly or
+	 * `show` silently attaches nothing.
 	 */
 	render(container: HTMLElement): void;
 
@@ -46,3 +53,14 @@ export interface IDelverSurface extends IDisposable {
 
 	focus(): void;
 }
+
+/**
+ * Deliberately absent: how a surface is pointed at what it should show.
+ *
+ * `DelverListingWidget.setTarget(path, token)` is the only such method today and
+ * it sits outside this interface, because the shape a zone actually needs is not
+ * yet known — Navigator surfaces follow the session, Primary surfaces follow the
+ * focus bus, and Inspector surfaces follow the cursor. Phase 2 decides that and
+ * either adds it here or splits the contract. Until then a host that drives a
+ * specific surface downcasts, and that is a known gap rather than an oversight.
+ */
