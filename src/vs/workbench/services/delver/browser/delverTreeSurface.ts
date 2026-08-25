@@ -21,15 +21,34 @@ import { IDelverSurface } from './delverSurface.js';
  */
 export class DelverTreeSurface extends Disposable implements IDelverSurface {
 
+	private container: HTMLElement | undefined;
+
 	constructor(private readonly treeView: ITreeView) {
 		super();
-		// A disposed surface must stop responding to the focus bus. Without
-		// this, a zone that swapped segments leaves a dead tree reacting to
-		// navigation it will never render.
-		this._register(toDisposable(() => this.treeView.setVisibility(false)));
+
+		// `TreeView.domNode` is built in `create()`, which runs only from
+		// `initialize()`, which runs only from `setVisibility()`. Calling
+		// `show()` before that appends `undefined` — and because `Node.append`
+		// stringifies, it silently renders the literal text "undefined" and the
+		// real tree is never attached. `TreeViewPane` forces initialization the
+		// same way from its own constructor, before `renderBody()` reaches
+		// `show()`; this is that step, not an idle default.
+		this.treeView.setVisibility(false);
+
+		this._register(toDisposable(() => {
+			// A tree view is a singleton owned by the views registry and shared
+			// between hosts, and `show()` re-parents it. Hide it only while it
+			// is still ours: during the migration a `TreeViewPane` and a zone
+			// surface can both wrap one view, and an unguarded teardown would
+			// hide the tree the surviving host just took over.
+			if (this.container && this.treeView.container === this.container) {
+				this.treeView.setVisibility(false);
+			}
+		}));
 	}
 
 	render(container: HTMLElement): void {
+		this.container = container;
 		this.treeView.show(container);
 	}
 

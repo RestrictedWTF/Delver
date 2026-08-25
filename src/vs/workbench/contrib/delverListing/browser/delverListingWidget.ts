@@ -36,7 +36,7 @@ import { DelverListingModel, IListingRow, IListingStaticRow } from './delverList
 import { mouseHistoryDirection } from './delverListingMouseNavigation.js';
 import { isInstructionHighlighted } from './delverListingHighlights.js';
 import { listingAddressLabel, listingMetadataRow } from './delverListingMetadata.js';
-import { IDelverListingHost, setActiveListing } from './delverActiveListing.js';
+import { IDelverListingHost, setActiveListing, touchActiveListing } from './delverActiveListing.js';
 
 /** Identifies this view on the focus bus, so it can ignore its own echo. */
 const FOCUS_ORIGIN = 'delver.editor.listing';
@@ -124,6 +124,12 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 		this.message = dom.append(this.container, dom.$('.delver-listing-message'));
 		this.tableContainer = dom.append(this.container, dom.$('.delver-listing-table'));
 		this.message.textContent = localize('delverListingAnalyzing', "Analyzing…");
+
+		// Visibility alone cannot say which listing the user is looking at: two
+		// side-by-side groups are both visible at once. Focus can, and it works
+		// the same whether this widget sits in an editor tab or a workspace zone.
+		const focusTracker = this._register(dom.trackFocus(this.container));
+		this._register(focusTracker.onDidFocus(() => touchActiveListing(this)));
 	}
 
 	/**

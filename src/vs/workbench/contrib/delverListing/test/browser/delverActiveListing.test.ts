@@ -5,7 +5,7 @@
 
 import * as assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { activeListing, IDelverListingHost, setActiveListing } from '../../browser/delverActiveListing.js';
+import { activeListing, IDelverListingHost, setActiveListing, touchActiveListing } from '../../browser/delverActiveListing.js';
 
 function host(name: string): IDelverListingHost {
 	return {
@@ -49,6 +49,40 @@ suite('Delver active listing', () => {
 		assert.strictEqual(await activeListing()?.selectedFunctionRva(), 0x2000n);
 
 		secondRegistration.dispose();
+		assert.strictEqual(activeListing(), undefined);
+	});
+
+	test('focus decides which of two simultaneously visible listings wins', async () => {
+		// Two side-by-side groups are both visible at once, so registration
+		// order reflects which was *shown* last, not which is being looked at.
+		// Clicking back into the first must retarget actions to it — otherwise
+		// Follow and Generate Signature act on the other pane, silently.
+		const left = host('1000');
+		const right = host('2000');
+		const leftRegistration = setActiveListing(left);
+		const rightRegistration = setActiveListing(right);
+		assert.strictEqual(await activeListing()?.selectedFunctionRva(), 0x2000n);
+
+		touchActiveListing(left);
+		assert.strictEqual(await activeListing()?.selectedFunctionRva(), 0x1000n);
+
+		touchActiveListing(right);
+		assert.strictEqual(await activeListing()?.selectedFunctionRva(), 0x2000n);
+
+		rightRegistration.dispose();
+		leftRegistration.dispose();
+		assert.strictEqual(activeListing(), undefined);
+	});
+
+	test('focusing an unregistered host does not grant it membership', async () => {
+		const registered = host('1000');
+		const hidden = host('2000');
+		const registration = setActiveListing(registered);
+
+		touchActiveListing(hidden);
+
+		assert.strictEqual(await activeListing()?.selectedFunctionRva(), 0x1000n);
+		registration.dispose();
 		assert.strictEqual(activeListing(), undefined);
 	});
 

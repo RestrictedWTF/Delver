@@ -37,6 +37,28 @@ export function setActiveListing(host: IDelverListingHost): IDisposable {
 	});
 }
 
+/**
+ * Promotes an already-registered host to the top, on focus.
+ *
+ * Registration alone tracks *visibility*, and editor-pane visibility is
+ * per-group: two side-by-side groups showing listings are both visible at once,
+ * and nothing reorders them when the user clicks between them. Without this,
+ * `activeListing()` returns whichever listing was shown last rather than the one
+ * being looked at — so Follow, Decompile, and Generate Signature would act on
+ * the other pane, silently and with plausible-looking results. Comparing two
+ * functions side by side is the workflow this module exists for, so it is
+ * precisely the case that must be right.
+ *
+ * A no-op for an unregistered host: focus does not grant membership.
+ */
+export function touchActiveListing(host: IDelverListingHost): void {
+	const index = hosts.lastIndexOf(host);
+	if (index !== -1 && index !== hosts.length - 1) {
+		hosts.splice(index, 1);
+		hosts.push(host);
+	}
+}
+
 /** The listing that actions apply to, or `undefined` if none is focused. */
 export function activeListing(): IDelverListingHost | undefined {
 	return hosts.length ? hosts[hosts.length - 1] : undefined;
