@@ -56,6 +56,7 @@ import {
 	UndoInterpretationAction,
 } from './delverListingNavigation.js';
 import { ExportInterpretationAction, ImportInterpretationAction } from './delverInterpretationActions.js';
+import { GenerateSignatureAction } from './delverSignatureActions.js';
 
 Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
 	EditorPaneDescriptor.create(DelverListingEditor, DELVER_LISTING_EDITOR_ID, localize2('delverListingEditor', "Delver Listing").value),
@@ -446,6 +447,7 @@ registerAction2(NavigateForwardAction);
 registerAction2(TogglePinAction);
 registerAction2(FollowAction);
 registerAction2(DecompileFunctionAction);
+registerAction2(GenerateSignatureAction);
 registerAction2(ReturnAction);
 registerAction2(RenameAction);
 registerAction2(CommentAction);

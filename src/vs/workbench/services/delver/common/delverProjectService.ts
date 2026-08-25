@@ -25,10 +25,10 @@ import {
 } from '../../../../platform/delver/common/findings.js';
 import { IFingerprintedFunction, IFunctionRevisionMatch, matchFunctionRevisions } from '../../../../platform/delver/common/functionRevisionMatcher.js';
 import { delverToolCallFromWire, delverToolCallToWire, IDelverToolCallRecord } from '../../../../platform/delver/common/delverToolCall.js';
-import { delverNamedSignatureFromWire, delverNamedSignatureToWire, IDelverNamedSignature, IDelverNamedSignatureDraft } from '../../../../platform/delver/common/delverSignature.js';
-import { IDelverProjectDecompilation, IDelverProjectHandle, IDelverProjectSnapshot, IDelverProjectSnapshotUpdate, IDelverProjectStoreService } from '../../../../platform/delver/common/delverProjectStoreService.js';
-import { editToWire } from '../../../../platform/delver/common/delverInterpretationStoreService.js';
-import { EditOp, IAuthor } from '../../../../platform/delver/common/interpretation.js';
+import { DELVER_SIGNATURE_LIMITS, delverNamedSignatureFromWire, delverNamedSignatureToWire, IDelverNamedSignature, IDelverNamedSignatureDraft } from '../../../../platform/delver/common/delverSignature.js';
+import { IDelverProjectDecompilation, IDelverProjectHandle, IDelverProjectRevision, IDelverProjectSnapshot, IDelverProjectSnapshotUpdate, IDelverProjectStoreService } from '../../../../platform/delver/common/delverProjectStoreService.js';
+import { editFromWire, editToWire } from '../../../../platform/delver/common/delverInterpretationStoreService.js';
+import { Anchor, EditOp, EditValue, IAuthor, InterpretationLog } from '../../../../platform/delver/common/interpretation.js';
 import { IFunctionsResult } from '../../../../platform/delver/common/protocol.generated.js';
 import { IDialogService, IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
@@ -60,10 +60,38 @@ export interface IDelverFindingsChangeEvent {
 	readonly kind: 'reported' | 'decided';
 }
 
+export interface IDelverSignaturesChangeEvent {
+	readonly contentHash: string;
+	readonly signatureIds: readonly string[];
+}
+
+/** One saved signature and the older project revision that proved it. */
+export interface IDelverHistoricalSignature {
+	readonly revision: IDelverProjectRevision;
+	readonly signature: IDelverNamedSignature;
+}
+
+/** Durable evidence selected by a human after an earlier signature matched uniquely. */
+export interface IDelverSignatureMigrationEvidence {
+	readonly sourceRevisionId: string;
+	readonly sourceSignatureId: string;
+	readonly searchCallId: string;
+	readonly generatedCallId: string;
+	readonly targetSignatureId: string;
+}
+
+/** Interpretation effects produced while accepting a signature-backed migration. */
+export interface IDelverSignatureMigrationResult {
+	readonly transferredCount: number;
+	readonly proposedCount: number;
+	readonly unchangedCount: number;
+}
+
 /** Coordinates the active portable project and its incremental snapshots. */
 export interface IDelverProjectService {
 	readonly _serviceBrand: undefined;
 	readonly onDidChangeFindings: Event<IDelverFindingsChangeEvent>;
+	readonly onDidChangeSignatures: Event<IDelverSignaturesChangeEvent>;
 
 	/** Saves an untitled session, returning false when path selection or persistence was canceled. */
 	save(session: IDelverProjectSession): Promise<boolean>;
@@ -110,8 +138,20 @@ export interface IDelverProjectService {
 	/** Creates or replaces one named signature, preserving its stable id by case-insensitive name. */
 	saveSignature(contentHash: string, draft: IDelverNamedSignatureDraft): Promise<IDelverNamedSignature>;
 
+	/** Renames one named signature while preserving its stable id and retained proof. */
+	renameSignature(contentHash: string, signatureId: string, name: string): Promise<IDelverNamedSignature>;
+
+	/** Permanently removes one named signature from this target revision. */
+	deleteSignature(contentHash: string, signatureId: string): Promise<void>;
+
 	/** Named signatures retained for one target revision, sorted by name. */
 	signaturesFor(contentHash: string): readonly IDelverNamedSignature[];
+
+	/** Saved signatures from every older revision of the active named project, newest revision first. */
+	historicalSignaturesFor(contentHash: string): Promise<readonly IDelverHistoricalSignature[]>;
+
+	/** Accepts one proven signature match and transfers its function interpretation with conflicts proposed for review. */
+	acceptSignatureMigration(contentHash: string, evidence: IDelverSignatureMigrationEvidence): Promise<IDelverSignatureMigrationResult>;
 
 	/** Path of the named project for these bytes, when the session is no longer untitled. */
 	projectPath(contentHash: string): string | undefined;
@@ -125,6 +165,8 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 	readonly _serviceBrand: undefined;
 	private readonly _onDidChangeFindings = this._register(new Emitter<IDelverFindingsChangeEvent>());
 	readonly onDidChangeFindings = this._onDidChangeFindings.event;
+	private readonly _onDidChangeSignatures = this._register(new Emitter<IDelverSignaturesChangeEvent>());
+	readonly onDidChangeSignatures = this._onDidChangeSignatures.event;
 
 	private active: { readonly contentHash: string; readonly revisionId: string; readonly handle: IDelverProjectHandle; snapshot?: IDelverProjectSnapshot } | undefined;
 	private readonly pendingDecompilations = new Map<string, Map<string, IDelverProjectDecompilation>>();
@@ -587,21 +629,188 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 			} else {
 				retained[existingIndex] = signature;
 			}
-			retained.sort((left, right) => {
-				const leftName = left.name.toLowerCase();
-				const rightName = right.name.toLowerCase();
-				return leftName < rightName ? -1 : leftName > rightName ? 1 : left.name < right.name ? -1 : left.name > right.name ? 1 : 0;
-			});
+			retained.sort(compareSignatureNames);
 			this.signatures.set(contentHash, retained);
 			if (active?.snapshot) {
 				active.snapshot = { ...active.snapshot, signatures: retained.map(delverNamedSignatureToWire) };
 			}
+			this._onDidChangeSignatures.fire({ contentHash, signatureIds: [signature.id] });
 			return signature;
+		});
+	}
+
+	renameSignature(contentHash: string, signatureId: string, name: string): Promise<IDelverNamedSignature> {
+		return this.signatureRecords.queue(contentHash, async () => {
+			if (name.length === 0 || name.length > DELVER_SIGNATURE_LIMITS.nameCharacters || name.trim() !== name) {
+				throw new Error('Invalid signature name');
+			}
+			const retained = [...this.signaturesFor(contentHash)];
+			const existingIndex = retained.findIndex(signature => signature.id === signatureId);
+			if (existingIndex < 0) {
+				throw new Error('Signature no longer exists');
+			}
+			const conflicting = retained.find(signature => signature.id !== signatureId && signature.name.toLowerCase() === name.toLowerCase());
+			if (conflicting) {
+				throw new Error(`A signature named ${name} already exists`);
+			}
+			const renamed = delverNamedSignatureFromWire({ ...retained[existingIndex], name, updatedAt: Date.now() });
+			const active = this.active?.contentHash === contentHash ? this.active : undefined;
+			if (active) {
+				await this.storeService.upsertSignatures(active.handle.projectId, [delverNamedSignatureToWire(renamed)]);
+			}
+			retained[existingIndex] = renamed;
+			retained.sort(compareSignatureNames);
+			this.signatures.set(contentHash, retained);
+			if (active?.snapshot) {
+				active.snapshot = { ...active.snapshot, signatures: retained.map(delverNamedSignatureToWire) };
+			}
+			this._onDidChangeSignatures.fire({ contentHash, signatureIds: [signatureId] });
+			return renamed;
+		});
+	}
+
+	deleteSignature(contentHash: string, signatureId: string): Promise<void> {
+		return this.signatureRecords.queue(contentHash, async () => {
+			const retained = [...this.signaturesFor(contentHash)];
+			const existingIndex = retained.findIndex(signature => signature.id === signatureId);
+			if (existingIndex < 0) {
+				throw new Error('Signature no longer exists');
+			}
+			const active = this.active?.contentHash === contentHash ? this.active : undefined;
+			if (active && !await this.storeService.deleteSignature(active.handle.projectId, contentHash, signatureId)) {
+				throw new Error('Signature no longer exists in the project');
+			}
+			retained.splice(existingIndex, 1);
+			this.signatures.set(contentHash, retained);
+			if (active?.snapshot) {
+				active.snapshot = { ...active.snapshot, signatures: retained.map(delverNamedSignatureToWire) };
+			}
+			this._onDidChangeSignatures.fire({ contentHash, signatureIds: [signatureId] });
 		});
 	}
 
 	signaturesFor(contentHash: string): readonly IDelverNamedSignature[] {
 		return this.signatures.get(contentHash) ?? [];
+	}
+
+	async historicalSignaturesFor(contentHash: string): Promise<readonly IDelverHistoricalSignature[]> {
+		const active = this.active;
+		if (!active || active.contentHash !== contentHash) {
+			return [];
+		}
+		const revisions = (await this.storeService.listRevisions(active.handle.projectId))
+			.filter(revision => revision.contentHash !== contentHash)
+			.sort((left, right) => right.createdAt - left.createdAt
+				|| (left.revisionId < right.revisionId ? 1 : left.revisionId > right.revisionId ? -1 : 0));
+		const snapshots = await Promise.all(revisions.map(revision => this.storeService.loadSnapshot(active.handle.projectId, revision.revisionId)));
+		return revisions.flatMap((revision, index) => snapshots[index].signatures
+			.map(delverNamedSignatureFromWire)
+			.sort(compareSignatureNames)
+			.map(signature => ({ revision, signature })));
+	}
+
+	async acceptSignatureMigration(contentHash: string, evidence: IDelverSignatureMigrationEvidence): Promise<IDelverSignatureMigrationResult> {
+		const active = this.active;
+		if (!active || active.contentHash !== contentHash) {
+			throw new Error('Signature migration requires the active named project revision');
+		}
+		if (evidence.sourceRevisionId === active.revisionId) {
+			throw new Error('Signature migration source must be an earlier project revision');
+		}
+		const targetSignature = this.signaturesFor(contentHash).find(signature => signature.id === evidence.targetSignatureId);
+		if (!targetSignature || targetSignature.variant !== 'primary' || targetSignature.policy !== 'cross-revision-stable'
+			|| !targetSignature.unique || !targetSignature.matchCountExact || targetSignature.matchCount !== 1) {
+			throw new Error('Signature migration requires a saved unique cross-revision primary signature for the current revision');
+		}
+		if (targetSignature.sourceCallId !== evidence.generatedCallId) {
+			throw new Error('Signature migration target has invalid generation evidence');
+		}
+		const sourceSnapshot = await this.storeService.loadSnapshot(active.handle.projectId, evidence.sourceRevisionId);
+		const sourceSignature = sourceSnapshot.signatures
+			.map(delverNamedSignatureFromWire)
+			.find(signature => signature.id === evidence.sourceSignatureId);
+		if (!sourceSignature || sourceSignature.contentHash !== sourceSnapshot.metadata.contentHash
+			|| sourceSignature.variant !== 'primary' || !sourceSignature.unique || !sourceSignature.matchCountExact || sourceSignature.matchCount !== 1) {
+			throw new Error('Signature migration source is not a saved unique primary signature in that revision');
+		}
+		const searchCall = this.toolCall(contentHash, evidence.searchCallId);
+		if (!searchCall || searchCall.capability !== 'delver_search_bytes') {
+			throw new Error('Signature migration requires retained byte-search evidence for the current revision');
+		}
+		const generatedCall = this.toolCall(contentHash, evidence.generatedCallId);
+		if (!generatedCall || generatedCall.capability !== 'delver_make_signature') {
+			throw new Error('Signature migration requires retained generation evidence for the current revision');
+		}
+		validateSignatureSearchProof(searchCall.resultJson, sourceSignature.pattern, targetSignature.functionRva);
+		validateSignatureGenerationProof(
+			generatedCall.resultJson,
+			evidence.sourceRevisionId,
+			evidence.sourceSignatureId,
+			targetSignature.pattern,
+			targetSignature.functionRva,
+		);
+
+		await this.storeService.storeFunctionMigrationMappings(active.handle.projectId, [{
+			sourceRevisionId: evidence.sourceRevisionId,
+			sourceRva: sourceSignature.functionRva,
+			targetRevisionId: active.revisionId,
+			targetRva: targetSignature.functionRva,
+			method: 'signature',
+			confidence: Math.min(sourceSignature.qualityScore, targetSignature.qualityScore),
+			status: 'accepted',
+			provenance: JSON.stringify({
+				kind: 'named-signature',
+				sourceContentHash: sourceSignature.contentHash,
+				targetContentHash: targetSignature.contentHash,
+				sourceSignatureId: sourceSignature.id,
+				targetSignatureId: targetSignature.id,
+				searchCallId: searchCall.callId,
+				generatedCallId: generatedCall.callId,
+				pattern: sourceSignature.pattern,
+			}),
+		}]);
+
+		const sourceLog = InterpretationLog.from(sourceSnapshot.interpretations.map(editFromWire));
+		const source = sourceLog.at({ kind: 'image', contentHash: sourceSignature.contentHash, rva: BigInt(sourceSignature.functionRva) });
+		if (!source) {
+			return { transferredCount: 0, proposedCount: 0, unchangedCount: 0 };
+		}
+		const targetAnchor: Anchor = { kind: 'image', contentHash, rva: BigInt(targetSignature.functionRva) };
+		const author: IAuthor = { kind: 'import', id: `signature:${sourceSignature.id}` };
+		let transferredCount = 0;
+		let proposedCount = 0;
+		let unchangedCount = 0;
+		const transfer = async (op: EditOp, sourceValue: EditValue | undefined, targetValue: EditValue | undefined): Promise<void> => {
+			if (sourceValue === undefined) {
+				return;
+			}
+			if (targetValue === undefined) {
+				await this.interpretationService.edit(targetAnchor, op, sourceValue, author);
+				transferredCount++;
+				return;
+			}
+			if (sameEditValue(sourceValue, targetValue)) {
+				unchangedCount++;
+				return;
+			}
+			const alreadyProposed = this.interpretationService.pendingProposals(contentHash).some(proposal =>
+				proposal.anchor.rva === targetAnchor.rva
+				&& proposal.op === op
+				&& proposal.author.kind === author.kind
+				&& proposal.author.id === author.id
+				&& sameEditValue(proposal.value, sourceValue));
+			if (alreadyProposed) {
+				unchangedCount++;
+				return;
+			}
+			await this.interpretationService.propose(targetAnchor, op, sourceValue, author);
+			proposedCount++;
+		};
+		const target = this.interpretationService.at(targetAnchor);
+		await transfer(EditOp.Rename, source.name, target?.name);
+		await transfer(EditOp.Comment, source.comment, target?.comment);
+		await transfer(EditOp.Tags, source.tags, target?.tags);
+		return { transferredCount, proposedCount, unchangedCount };
 	}
 
 	projectPath(contentHash: string): string | undefined {
@@ -663,6 +872,12 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 
 registerSingleton(IDelverProjectService, DelverProjectService, InstantiationType.Delayed);
 
+function compareSignatureNames(left: IDelverNamedSignature, right: IDelverNamedSignature): number {
+	const leftName = left.name.toLowerCase();
+	const rightName = right.name.toLowerCase();
+	return leftName < rightName ? -1 : leftName > rightName ? 1 : left.name < right.name ? -1 : left.name > right.name ? 1 : 0;
+}
+
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
@@ -673,6 +888,82 @@ function normalizeProjectRva(rva: string): string {
 	} catch {
 		return rva;
 	}
+}
+
+function sameEditValue(left: EditValue, right: EditValue): boolean {
+	if (typeof left === 'string' || typeof right === 'string') {
+		return left === right;
+	}
+	return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function validateSignatureSearchProof(resultJson: string, pattern: string, targetRva: string): void {
+	const result = projectRecord(JSON.parse(resultJson));
+	const data = projectRecord(result.data);
+	const matches = data.matches;
+	if (result.completeness !== 'complete'
+		|| typeof data.pattern !== 'string'
+		|| data.pattern.toUpperCase() !== pattern.toUpperCase()
+		|| !Array.isArray(matches)
+		|| matches.length !== 1) {
+		throw new Error('Signature migration byte-search proof is not an exact unique match');
+	}
+	const match = projectRecord(matches[0]);
+	if (typeof match.rva !== 'string' || normalizeProjectRva(match.rva) !== normalizeProjectRva(targetRva)) {
+		throw new Error('Signature migration byte-search proof points to a different function');
+	}
+}
+
+function validateSignatureGenerationProof(
+	resultJson: string,
+	sourceRevisionId: string,
+	sourceSignatureId: string,
+	pattern: string,
+	targetRva: string,
+): void {
+	const result = projectRecord(JSON.parse(resultJson));
+	const data = projectRecord(result.data);
+	const target = projectRecord(data.target);
+	const proof = projectRecord(data.proof);
+	const crossRevisionProof = projectRecord(data.crossRevisionProof);
+	const selectedEvidence = projectRecord(crossRevisionProof.selectedEvidence);
+	const revisions = crossRevisionProof.revisions;
+	if (result.completeness !== 'complete'
+		|| data.policy !== 'cross-revision-stable'
+		|| typeof data.pattern !== 'string'
+		|| data.pattern.toUpperCase() !== pattern.toUpperCase()
+		|| typeof target.rva !== 'string'
+		|| normalizeProjectRva(target.rva) !== normalizeProjectRva(targetRva)
+		|| proof.unique !== true
+		|| proof.matchCountExact !== true
+		|| proof.matchCount !== 1
+		|| proof.targetMatched !== true
+		|| crossRevisionProof.method !== 'retained-exact-primary-signatures'
+		|| selectedEvidence.sourceRevisionId !== sourceRevisionId
+		|| selectedEvidence.sourceSignatureId !== sourceSignatureId
+		|| !Array.isArray(revisions)
+		|| !Number.isSafeInteger(crossRevisionProof.revisionCount)
+		|| crossRevisionProof.revisionCount !== revisions.length) {
+		throw new Error('Signature migration generation proof is not an exact bound cross-revision match');
+	}
+	const source = revisions.find(candidate => {
+		const revision = projectRecord(candidate);
+		return revision.revisionId === sourceRevisionId && revision.signatureId === sourceSignatureId;
+	});
+	if (source === undefined) {
+		throw new Error('Signature migration generation proof does not cite the selected earlier signature');
+	}
+	const sourceRecord = projectRecord(source);
+	if (typeof sourceRecord.pattern !== 'string' || sourceRecord.pattern.toUpperCase() !== pattern.toUpperCase()) {
+		throw new Error('Signature migration generation proof contains a different earlier pattern');
+	}
+}
+
+function projectRecord(value: unknown): Readonly<Record<string, unknown>> {
+	if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+		throw new Error('Signature migration evidence is malformed');
+	}
+	return value as Readonly<Record<string, unknown>>;
 }
 
 function fingerprintedFunctions(serialized: string | undefined): readonly IFingerprintedFunction[] {
