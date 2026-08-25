@@ -17,9 +17,8 @@ import { IQuickInputService, IQuickPickItem } from '../../../../platform/quickin
 import { DelverAgentCapabilityId, IDelverAgentService } from '../../../services/delver/common/delverAgentService.js';
 import { DelverAgentError, DelverAgentErrorCode, IDelverAgentResult, toWireAddress } from '../../../services/delver/common/delverAgentTypes.js';
 import { DELVER_TARGET_ATTACHED, IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
-import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { LISTING_ACTIVE } from './delverListingContext.js';
-import { DelverListingEditor } from './delverListingEditor.js';
+import { activeListing } from './delverActiveListing.js';
 
 interface IGeneratedSignatureVariant {
 	readonly variant: DelverSignatureVariant;
@@ -124,7 +123,6 @@ export class GenerateSignatureAction extends Action2 {
 	async run(accessor: ServicesAccessor, requestedRva?: unknown, suggestedName?: unknown, requestedGeneration?: unknown): Promise<IGeneratedSignatureSaveOutcome | undefined> {
 		// Service accessors are invocation-scoped. Resolve every dependency before
 		// the first await so dialogs and analysis cannot outlive the accessor.
-		const editorService = accessor.get(IEditorService);
 		const sessionService = accessor.get(IDelverSessionService);
 		const agentService = accessor.get(IDelverAgentService);
 		const quickInputService = accessor.get(IQuickInputService);
@@ -141,11 +139,11 @@ export class GenerateSignatureAction extends Action2 {
 			return;
 		}
 		if (functionRva === undefined) {
-			const pane = editorService.activeEditorPane;
-			if (!(pane instanceof DelverListingEditor)) {
+			const listing = activeListing();
+			if (!listing) {
 				return;
 			}
-			functionRva = await pane.selectedFunctionRva();
+			functionRva = await listing.selectedFunctionRva();
 		}
 		if (functionRva === undefined) {
 			notificationService.info(localize('delverNoFunctionForSignature', "The selected instruction is not inside a detected function."));

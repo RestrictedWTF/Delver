@@ -29,7 +29,7 @@ import {
 	DELVER_NAVIGATION_ORIGIN,
 	LISTING_ACTIVE,
 } from './delverListingContext.js';
-import { DelverListingEditor } from './delverListingEditor.js';
+import { activeListing } from './delverActiveListing.js';
 
 const NAVIGATION_ORIGIN = DELVER_NAVIGATION_ORIGIN;
 
@@ -253,9 +253,9 @@ export class FollowAction extends Action2 {
 	}
 
 	async run(accessor: ServicesAccessor): Promise<void> {
-		const pane = accessor.get(IEditorService).activeEditorPane;
-		if (pane instanceof DelverListingEditor) {
-			pane.followSelection();
+		const listing = activeListing();
+		if (listing) {
+			listing.followSelection();
 		}
 	}
 }
@@ -283,14 +283,14 @@ export class DecompileFunctionAction extends Action2 {
 		const editorService = accessor.get(IEditorService);
 		const focusService = accessor.get(IDelverFocusService);
 		const interpretationService = accessor.get(IDelverInterpretationService);
-		const pane = editorService.activeEditorPane;
+		const listing = activeListing();
 		const session = accessor.get(IDelverSessionService).activeSession;
 		const notifications = accessor.get(INotificationService);
-		if (!(pane instanceof DelverListingEditor) || !session) {
+		if (!listing || !session) {
 			return;
 		}
 
-		const functionRva = await pane.selectedFunctionRva();
+		const functionRva = await listing.selectedFunctionRva();
 		if (functionRva === undefined) {
 			notifications.info(localize('delverNoFunctionAtSelection', "The selected instruction is not inside a detected function."));
 			return;
@@ -541,9 +541,9 @@ export class TogglePinAction extends Action2 {
 	}
 
 	async run(accessor: ServicesAccessor): Promise<void> {
-		const pane = accessor.get(IEditorService).activeEditorPane;
-		if (pane instanceof DelverListingEditor) {
-			pane.togglePin();
+		const listing = activeListing();
+		if (listing) {
+			listing.togglePin();
 		}
 	}
 }

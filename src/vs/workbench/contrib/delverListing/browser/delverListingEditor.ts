@@ -7,7 +7,7 @@ import * as dom from '../../../../base/browser/dom.js';
 import { Dimension } from '../../../../base/browser/dom.js';
 import { ITableRenderer, ITableVirtualDelegate } from '../../../../base/browser/ui/table/table.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
-import { DisposableStore, MutableDisposable } from '../../../../base/common/lifecycle.js';
+import { DisposableStore, IDisposable, MutableDisposable } from '../../../../base/common/lifecycle.js';
 import { localize } from '../../../../nls.js';
 import { IContextKey, IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { IDelverAnalysisService } from '../../../../platform/delver/common/delverAnalysisService.js';
@@ -42,6 +42,7 @@ import { DelverListingModel, IListingRow, IListingStaticRow } from './delverList
 import { mouseHistoryDirection } from './delverListingMouseNavigation.js';
 import { isInstructionHighlighted } from './delverListingHighlights.js';
 import { listingAddressLabel, listingMetadataRow } from './delverListingMetadata.js';
+import { setActiveListing } from './delverActiveListing.js';
 
 /** Identifies this view on the focus bus, so it can ignore its own echo. */
 const FOCUS_ORIGIN = 'delver.editor.listing';
@@ -58,6 +59,7 @@ export class DelverListingEditor extends EditorPane {
 	private table: WorkbenchTable<IListingRow> | undefined;
 
 	private readonly sessionDisposables = this._register(new MutableDisposable<DisposableStore>());
+	private readonly activeRegistration = this._register(new MutableDisposable<IDisposable>());
 	private session: IDelverSession | undefined;
 	private publishedSession: IDelverSession | undefined;
 	private model: DelverListingModel | undefined;
@@ -613,6 +615,7 @@ export class DelverListingEditor extends EditorPane {
 	 */
 	protected override setEditorVisible(visible: boolean): void {
 		super.setEditorVisible(visible);
+		this.activeRegistration.value = visible ? setActiveListing(this) : undefined;
 		if (visible && this.table && this.dimension) {
 			this.layoutTable();
 			this.table.rerender();
