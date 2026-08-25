@@ -269,7 +269,7 @@ pub struct ListingRowWire {
 	pub bytes_hex: Option<String>,
 	/// Address-bearing encoded fields that a relocation-stable byte signature
 	/// should wildcard.
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde(default)]
 	pub signature_fields: Vec<SignatureFieldWire>,
 }
 
@@ -916,5 +916,23 @@ mod tests {
 		let json = serde_json::to_string(&original).unwrap();
 		let back: InitializeResult = serde_json::from_str(&json).unwrap();
 		assert_eq!(back.protocol_version, original.protocol_version);
+	}
+
+	#[test]
+	fn listing_rows_serialize_an_empty_signature_field_list() {
+		let row = ListingRowWire {
+			row: 0,
+			rva: 0x1000,
+			len: 1,
+			mnemonic: "push".to_string(),
+			operands: "edi".to_string(),
+			flow: FlowKindWire::Sequential,
+			branch_target: None,
+			bytes_hex: Some("57".to_string()),
+			signature_fields: Vec::new(),
+		};
+
+		let json = serde_json::to_value(row).unwrap();
+		assert_eq!(json.get("signature_fields"), Some(&serde_json::json!([])));
 	}
 }

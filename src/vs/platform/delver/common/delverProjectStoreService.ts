@@ -74,7 +74,7 @@ export interface IDelverProjectSnapshot extends IDelverProjectSnapshotUpdate {
 	readonly signatures: readonly IDelverNamedSignatureWire[];
 }
 
-export type DelverFunctionMigrationMethod = 'exact' | 'symbol' | 'structural' | 'manual';
+export type DelverFunctionMigrationMethod = 'exact' | 'symbol' | 'structural' | 'signature' | 'manual';
 export type DelverFunctionMigrationStatus = 'proposed' | 'accepted' | 'rejected';
 
 /** A durable relationship between functions in two target revisions. */
@@ -108,6 +108,7 @@ export interface IDelverProjectStoreService {
 	appendFindingDecisions(projectId: string, decisions: readonly IDelverFindingDecisionWire[]): Promise<void>;
 	appendToolCalls(projectId: string, calls: readonly IDelverToolCallRecordWire[]): Promise<void>;
 	upsertSignatures(projectId: string, signatures: readonly IDelverNamedSignatureWire[]): Promise<void>;
+	deleteSignature(projectId: string, contentHash: string, signatureId: string): Promise<boolean>;
 	copyInterpretations(sourceProjectId: string, destinationProjectId: string): Promise<number>;
 	close(projectId: string): Promise<void>;
 }

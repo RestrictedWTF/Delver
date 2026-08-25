@@ -715,6 +715,7 @@
           "type": "string"
         },
         "signature_fields": {
+          "default": [],
           "description": "Address-bearing encoded fields that a relocation-stable byte signature should wildcard.",
           "items": {
             "$ref": "#/definitions/SignatureFieldWire"

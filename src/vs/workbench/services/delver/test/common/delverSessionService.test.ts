@@ -24,7 +24,7 @@ import {
 	IDelverSession,
 	IDelverSessionService,
 } from '../../common/delverSessionService.js';
-import { IDelverOpenedProject, IDelverProjectService } from '../../common/delverProjectService.js';
+import { IDelverHistoricalSignature, IDelverOpenedProject, IDelverProjectService } from '../../common/delverProjectService.js';
 import { TestContextService, TestLifecycleService } from '../../../../test/common/workbenchTestServices.js';
 import { ShutdownReason } from '../../../lifecycle/common/lifecycle.js';
 
@@ -78,6 +78,7 @@ class FakeInterpretationService implements Partial<IDelverInterpretationService>
 class FakeProjectLifecycleDelegate implements IDelverProjectService {
 	declare readonly _serviceBrand: undefined;
 	readonly onDidChangeFindings = Event.None;
+	readonly onDidChangeSignatures = Event.None;
 	readonly saved: string[] = [];
 	saveResult = true;
 	addRevisionResult = true;
@@ -127,7 +128,13 @@ class FakeProjectLifecycleDelegate implements IDelverProjectService {
 	toolCallsFor(): readonly IDelverToolCallRecord[] { return []; }
 	toolCall(): IDelverToolCallRecord | undefined { return undefined; }
 	async saveSignature(_contentHash: string, _draft: IDelverNamedSignatureDraft): Promise<IDelverNamedSignature> { throw new Error('not implemented'); }
+	async renameSignature(_contentHash: string, _signatureId: string, _name: string): Promise<IDelverNamedSignature> { throw new Error('not implemented'); }
+	async deleteSignature(_contentHash: string, _signatureId: string): Promise<void> { }
 	signaturesFor(): readonly IDelverNamedSignature[] { return []; }
+	async historicalSignaturesFor(): Promise<readonly IDelverHistoricalSignature[]> { return []; }
+	async acceptSignatureMigration(): Promise<{ transferredCount: number; proposedCount: number; unchangedCount: number }> {
+		return { transferredCount: 0, proposedCount: 0, unchangedCount: 0 };
+	}
 
 	async reportFindings(_contentHash: string, _drafts: readonly IDelverFindingDraft[]): Promise<readonly IDelverFinding[]> { return []; }
 

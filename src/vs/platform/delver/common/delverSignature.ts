@@ -12,7 +12,7 @@ export const DELVER_SIGNATURE_LIMITS = {
 } as const;
 
 export type DelverSignatureScope = 'function' | 'executableSections' | 'image';
-export type DelverSignaturePolicy = 'unique-now' | 'relocation-stable';
+export type DelverSignaturePolicy = 'unique-now' | 'relocation-stable' | 'cross-revision-stable';
 export type DelverSignatureVariant = 'primary' | 'xref-site';
 export type DelverSignatureConfidence = 'low' | 'medium' | 'high';
 
@@ -156,7 +156,7 @@ function requireScope(value: unknown): DelverSignatureScope {
 }
 
 function requirePolicy(value: unknown): DelverSignaturePolicy {
-	if (value === 'unique-now' || value === 'relocation-stable') {
+	if (value === 'unique-now' || value === 'relocation-stable' || value === 'cross-revision-stable') {
 		return value;
 	}
 	throw new Error('Invalid signature policy');

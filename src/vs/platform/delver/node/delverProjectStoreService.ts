@@ -616,6 +616,11 @@ export class DelverProjectStoreService implements IDelverProjectStoreService {
 				if (!revision) {
 					throw new Error('Signature belongs to different target bytes');
 				}
+				const existingId = await dbGet(project.db,
+					'SELECT revision_id FROM named_signatures WHERE id = ?', [signature.id]);
+				if (existingId && requireString(existingId.revision_id, 'signature revision id') !== revision.revisionId) {
+					throw new Error(`Signature ${signature.id} belongs to different target bytes`);
+				}
 				const existing = await dbGet(project.db,
 					'SELECT id FROM named_signatures WHERE revision_id = ? AND name_key = ?', [revision.revisionId, signature.name.toLowerCase()]);
 				if (existing && requireString(existing.id, 'signature id') !== signature.id) {
@@ -628,8 +633,9 @@ export class DelverProjectStoreService implements IDelverProjectStoreService {
 				for (const signature of validated) {
 					await dbRun(project.db, `INSERT INTO named_signatures
 						(id, name, name_key, revision_id, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-						ON CONFLICT(revision_id, name_key) DO UPDATE SET
-							name = excluded.name, payload = excluded.payload, updated_at = excluded.updated_at`, [
+						ON CONFLICT(id) DO UPDATE SET
+							name = excluded.name, name_key = excluded.name_key,
+							payload = excluded.payload, updated_at = excluded.updated_at`, [
 						signature.id, signature.name, signature.name.toLowerCase(), revisions.get(signature.id)!.revisionId,
 						JSON.stringify(delverNamedSignatureToWire(signature)), signature.createdAt, signature.updatedAt,
 					]);
@@ -641,6 +647,31 @@ export class DelverProjectStoreService implements IDelverProjectStoreService {
 			if (signatures.length > 0) {
 				project.metadata = { ...project.metadata, updatedAt: now };
 			}
+		});
+	}
+
+	deleteSignature(projectId: string, contentHash: string, signatureId: string): Promise<boolean> {
+		return this.sequencer.queue(async () => {
+			const project = this.getProject(projectId);
+			if (signatureId.length === 0 || signatureId.length > 128) {
+				throw new Error('Invalid signature id');
+			}
+			const revision = await findRevisionByContentHash(project.db, contentHash);
+			if (!revision) {
+				throw new Error('Signature belongs to different target bytes');
+			}
+			const existing = await dbGet(project.db,
+				'SELECT id FROM named_signatures WHERE revision_id = ? AND id = ?', [revision.revisionId, signatureId]);
+			if (!existing) {
+				return false;
+			}
+			const now = Date.now();
+			await transaction(project.db, async () => {
+				await dbRun(project.db, 'DELETE FROM named_signatures WHERE revision_id = ? AND id = ?', [revision.revisionId, signatureId]);
+				await dbRun(project.db, 'UPDATE project_metadata SET updated_at = ? WHERE id = 1', [now]);
+			});
+			project.metadata = { ...project.metadata, updatedAt: now };
+			return true;
 		});
 	}
 
@@ -813,7 +844,7 @@ function validateFunctionMigrationMapping(mapping: IDelverFunctionMigrationMappi
 }
 
 function isFunctionMigrationMethod(value: unknown): value is DelverFunctionMigrationMethod {
-	return value === 'exact' || value === 'symbol' || value === 'structural' || value === 'manual';
+	return value === 'exact' || value === 'symbol' || value === 'structural' || value === 'signature' || value === 'manual';
 }
 
 function isFunctionMigrationStatus(value: unknown): value is DelverFunctionMigrationStatus {

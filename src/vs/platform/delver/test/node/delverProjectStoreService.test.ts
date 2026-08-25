@@ -276,6 +276,43 @@ suite('DelverProjectStoreService', () => {
 		await service.close(project.projectId);
 	});
 
+	test('renames and deletes named signatures without changing their stable id', async () => {
+		const path = join(testRoot, 'signature-management.delverdb');
+		const service = new DelverProjectStoreService();
+		const project = await service.create(path, target());
+		const original = signature(HASH_A, 'decrypt_config', 'signature-stable');
+		const other = signature(HASH_A, 'parse_header', 'signature-other');
+		await service.upsertSignatures(project.projectId, [original, other]);
+		const renamed = { ...original, name: 'decrypt_payload', updatedAt: original.updatedAt + 1 };
+		await service.upsertSignatures(project.projectId, [renamed]);
+		await assert.rejects(
+			() => service.upsertSignatures(project.projectId, [{ ...renamed, name: 'PARSE_HEADER' }]),
+			/conflicts with an existing id/,
+		);
+		assert.strictEqual(await service.deleteSignature(project.projectId, HASH_A, other.id), true);
+		assert.strictEqual(await service.deleteSignature(project.projectId, HASH_A, other.id), false);
+		await service.close(project.projectId);
+
+		const reopened = await service.open(path, HASH_A);
+		const signatures = (await service.loadSnapshot(reopened.projectId)).signatures;
+		await service.close(reopened.projectId);
+		assert.deepStrictEqual(signatures, [renamed]);
+	});
+
+	test('persists cross-revision signature policy evidence', async () => {
+		const path = join(testRoot, 'cross-revision-signature.delverdb');
+		const service = new DelverProjectStoreService();
+		const created = await service.create(path, target());
+		await service.upsertSignatures(created.projectId, [{ ...signature(), policy: 'cross-revision-stable' }]);
+		await service.close(created.projectId);
+
+		const reopened = await service.open(path, HASH_A);
+		const signatures = (await service.loadSnapshot(reopened.projectId)).signatures;
+		await service.close(reopened.projectId);
+
+		assert.deepStrictEqual(signatures, [{ ...signature(), policy: 'cross-revision-stable' }]);
+	});
+
 	test('retains independent snapshots for every target revision', async () => {
 		const service = new DelverProjectStoreService();
 		const project = await service.create(join(testRoot, 'revisions.delverdb'), target());
@@ -342,7 +379,7 @@ suite('DelverProjectStoreService', () => {
 		}]);
 		await service.storeFunctionMigrationMappings(project.projectId, [{
 			sourceRevisionId: HASH_A, sourceRva: '0x1000', targetRevisionId: HASH_B, targetRva: '0x2000',
-			method: 'manual', confidence: 1, status: 'accepted', provenance: '{"author":"analyst"}',
+			method: 'signature', confidence: 1, status: 'accepted', provenance: '{"signatureId":"known-routine"}',
 		}]);
 		await service.close(project.projectId);
 
@@ -351,7 +388,7 @@ suite('DelverProjectStoreService', () => {
 		await service.close(reopened.projectId);
 		assert.deepStrictEqual(mappings, [{
 			sourceRevisionId: HASH_A, sourceRva: '0x1000', targetRevisionId: HASH_B, targetRva: '0x2000',
-			method: 'manual', confidence: 1, status: 'accepted', provenance: '{"author":"analyst"}',
+			method: 'signature', confidence: 1, status: 'accepted', provenance: '{"signatureId":"known-routine"}',
 		}]);
 	});
 
