@@ -6,6 +6,7 @@
 | Doc | Covers |
 | --- | --- |
 | [principles.md](principles.md) | Delver-specific design principles — the ones that don't come free from VS Code |
+| [workspace.md](workspace.md) | The container surface — zones, surface hosting, where actions live. Read before speccing anything that lives inside it |
 
 ## Inherited design system
 
@@ -31,6 +32,7 @@ Suggested order matches [`../planning/roadmap.md`](../planning/roadmap.md):
 
 | Surface | Phase | Status |
 | --- | --- | --- |
+| [Workspace (container)](workspace.md) | P3 | specced, not built — [ADR 0007](../history/adr/0007-workspace-editor-over-sidebar-container.md) |
 | Listing (disassembly) | P1 | not started |
 | Strings, imports, exports | P1 | not started |
 | Pseudocode + listing pairing | P2 | not started |

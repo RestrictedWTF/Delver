@@ -53,3 +53,14 @@ dist
 # DELVER
 delver/target/
 resources/delver/bin/
+
+# Delver local working artefacts. Build/launch logs and scratch captures land in
+# the repo root because that is the working directory; none of them are inputs
+# to a build.
+code-launch.log
+npm-install.log
+npm-rebuild.log
+watch.log
+screenshots/
+scripts/ghidra/__pycache__/
+.superpowers/

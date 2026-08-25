@@ -41,3 +41,4 @@ for reconsideration, and let the ADR carry the *change*, not the history.
 | [0004](0004-interpretation-store-location.md) | Where authored interpretation is stored | superseded by 0005 | 2026-08-08 |
 | [0005](0005-portable-project-database.md) | Portable project database and session save lifecycle | accepted | 2026-08-11 |
 | [0006](0006-proposal-resolution-in-the-edit-log.md) | Accepting and rejecting proposals in an append-only log | accepted | 2026-08-19 |
+| [0007](0007-workspace-editor-over-sidebar-container.md) | Delver surfaces live in a workspace editor, not a sidebar container | accepted | 2026-08-26 |

@@ -46,6 +46,17 @@ are a *separate window* with a different shell. Delver's views live *inside* the
 normal workbench alongside editors and terminals, so they're contributions.
 Revisit only if Delver later grows a dedicated standalone window.
 
+> **Still true — but the container beneath it changed.**
+> [ADR 0007](../history/adr/0007-workspace-editor-over-sidebar-container.md)
+> moves Delver's surfaces out of the sidebar view container and into a
+> **workspace editor** with three fixed-role zones. That is still a
+> contribution inside the normal workbench, so the paragraph above stands; what
+> it supersedes is the assumption that each surface is a `ViewPane` in
+> `workbench.view.delver`. Surfaces are now plain widgets registered through
+> `services/delver/browser/delverSurfaceRegistry.ts`, hosted either by a zone or
+> by a thin `EditorPane` for tear-off. See
+> [`design/workspace.md`](../design/workspace.md) before adding a surface.
+
 ## 2. What to reuse — the fork dividend
 
 This is the actual reason to fork VS Code rather than start from a blank Electron
@@ -54,7 +65,7 @@ app. Each row is work you don't do.
 | VS Code subsystem | Delver use |
 | --- | --- |
 | Editor groups, tabs, splits, layout persistence | Listings, hex, pseudocode, graphs as real editors — split a listing against its decompilation, save the layout |
-| `EditorInput` + editor history | **Address navigation history.** Alt+Left / Alt+Right becomes back/forward through addresses, for free |
+| `EditorInput` + editor history | Editor tabs, splits, and layout persistence — used by the workspace editor and by torn-off surfaces. **Not** the source of address history: see the note below |
 | Quick access (`Ctrl+P`, `IQuickInputService`) | "Go to address / symbol / function / string" with prefixes. Enormous value, near-zero cost |
 | `IMarkerService` + Problems panel | Findings, YARA hits, suspicious API usage — with navigation and gutter decorations included |
 | Search viewlet patterns | Byte pattern / regex / YARA search with a results tree |
@@ -70,6 +81,18 @@ app. Each row is work you don't do.
 | Settings, profiles, keybindings, themes | Free, and analysts expect all of it |
 | `IProgressService`, `CancellationToken` | Long analysis operations behave correctly |
 | `IUtilityProcess` | Hosting provider and analysis processes |
+
+> **Correction: address history is the focus bus's, not the editor's.** This
+> table originally credited `EditorInput` history with giving address
+> back/forward "for free", and that claim was load-bearing in the argument for
+> making the listing an editor. It is no longer accurate —
+> `IDelverFocusService` owns a real history stack with proximity coalescing and
+> a `FOCUS_HISTORY_ORIGIN` (§3), so back/forward works regardless of what hosts
+> the listing. This is why
+> [ADR 0007](../history/adr/0007-workspace-editor-over-sidebar-container.md)
+> could move the listing into a workspace zone at no navigational cost. Editor
+> tabs, splits and layout persistence remain genuine dividends and are still
+> used — for the workspace editor itself and for torn-off surfaces.
 
 ## 3. The focus bus — how synchronization actually works
 
@@ -147,8 +170,12 @@ writing anything. Delver's listing is that pattern with:
   per-element delegate. Wrapped or unbounded interleaving
   still requires a custom list delegate and must be budgeted explicitly.
 
-Build it as an `EditorInput` (`DelverListingInput`, keyed by target + space +
-anchor) so it gets tabs, splits, and history automatically.
+Build the table as a plain widget implementing `IDelverSurface`, so the
+workspace's Primary zone and a tear-off `EditorPane` can both host it
+([ADR 0007](../history/adr/0007-workspace-editor-over-sidebar-container.md)).
+`DelverListingInput` — keyed by target + space + anchor — survives as the
+tear-off target, which is what gives a torn-off listing tabs, splits, and
+layout persistence.
 
 ### Pseudocode — this one *is* Monaco
 
@@ -183,8 +210,10 @@ reads that graph.
 
 ### Runtime views (processes, threads, handles, objects)
 
-Plain `WorkbenchTree`/`WorkbenchTable` in a view container in the sidebar.
-Capability-gated with `when` clauses. These are the cheapest views to build and
+Plain `WorkbenchTree`/`WorkbenchTable` wrapped as `IDelverSurface`s and
+registered into the workspace's Inspector zone
+([`design/workspace.md`](../design/workspace.md)). Capability-gated with `when`
+clauses on the surface descriptor. These are the cheapest views to build and
 among the most used — do them early.
 
 ### Findings
