@@ -72,7 +72,7 @@ import {
 	toWireAddress,
 } from './delverAgentTypes.js';
 import { IDelverInterpretationService } from './delverInterpretationService.js';
-import { IDelverProjectService } from './delverProjectService.js';
+import { IDelverHistoricalSignature, IDelverProjectService } from './delverProjectService.js';
 import { IDelverSession, IDelverSessionService } from './delverSessionService.js';
 
 export const IDelverAgentService = createDecorator<IDelverAgentService>('delverAgentService');
@@ -367,6 +367,17 @@ interface ISignatureCandidate {
 	readonly rows: readonly IListingRowWire[];
 	readonly wildcards: readonly ISignatureWildcard[];
 	readonly fixedByteCount: number;
+}
+
+interface ISignatureQuality {
+	readonly score: number;
+	readonly confidence: 'low' | 'medium' | 'high';
+	readonly reasons: readonly string[];
+}
+
+interface ICrossRevisionEvidenceSelector {
+	readonly sourceRevisionId: string;
+	readonly sourceSignatureId: string;
 }
 
 const BYTE_SEARCH_CHUNK_SIZE = 64 * 1024;
@@ -1167,14 +1178,33 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 		const session = this.requireAttached();
 		const scope = signatureScope(context.args.scope);
 		const policy = signaturePolicy(context.args.policy);
+		const evidenceSelector = crossRevisionEvidenceSelector(context.args, policy);
 		const maxBytes = signatureMaxBytes(context.args.maxBytes);
 		const functions = await this.resolvedFunctions(session);
 		const target = resolveSignatureFunction(context.args, functions);
+		const candidatePolicy: Exclude<SignaturePolicy, 'cross-revision-stable'> = policy === 'cross-revision-stable' ? 'relocation-stable' : policy;
+		let crossRevisionEvidence: readonly IDelverHistoricalSignature[] = [];
 		if (policy === 'cross-revision-stable') {
-			throw new DelverAgentError(
-				DelverAgentErrorCode.AnalysisIncomplete,
-				'Cross-revision signature generation is not available yet because portable .delverdb snapshots retain revision facts but not historical sample bytes, and the analysis service cannot attach multiple revisions. Use relocation-stable for the current binary.',
+			const historicalSignatures = await this.projectService.historicalSignaturesFor(session.contentHash);
+			this.throwIfCancelled(context.token);
+			crossRevisionEvidence = matchingCrossRevisionSignatureEvidence(
+				historicalSignatures,
+				target.name,
+				session.contentHash,
+				evidenceSelector,
 			);
+			if (crossRevisionEvidence.length === 0) {
+				throw new DelverAgentError(
+					DelverAgentErrorCode.AnalysisIncomplete,
+					`No retained exact primary signature identifies ${target.name} in an earlier project revision. Save a relocation-stable signature for this function in an earlier revision first.`,
+				);
+			}
+			if (crossRevisionEvidence.length > DELVER_AGENT_LIMITS.signatures.max) {
+				throw new DelverAgentError(
+					DelverAgentErrorCode.AnalysisIncomplete,
+					`More than ${DELVER_AGENT_LIMITS.signatures.max} earlier revisions contain matching proof for ${target.name}; the bounded cross-revision proof cannot represent all of them.`,
+				);
+			}
 		}
 		const targetIndex = functions.indexOf(target);
 		const functionEnd = target.endRva ?? functions[targetIndex + 1]?.rva;
@@ -1195,7 +1225,7 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 		}
 		const listing = await this.analysisService.listingWindow(session.sessionId, startRow, Math.min(maxBytes, 256));
 		this.throwIfCancelled(context.token);
-		const rows = signatureRows(listing.rows, target.rva, functionEnd, maxBytes, policy);
+		const rows = signatureRows(listing.rows, target.rva, functionEnd, maxBytes, candidatePolicy);
 		if (rows.length === 0) {
 			throw new DelverAgentError(DelverAgentErrorCode.AnalysisIncomplete, `No signature-capable instructions are available at ${toWireAddress(target.rva)}.`);
 		}
@@ -1207,14 +1237,17 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 			throw new DelverAgentError(DelverAgentErrorCode.AddressNotMapped, `${target.name} is not inside provider-backed section bytes.`);
 		}
 
-		const candidates = signatureCandidates(rows, policy);
+		const candidates = signatureCandidates(rows, candidatePolicy);
 		let selected: ISignatureCandidate | undefined;
 		let selectedScan: IByteSearchScanResult | undefined;
+		let selectedIsCrossRevisionStable = false;
 		for (const candidate of candidates) {
 			const scan = await this.scanBytePattern(session, segments, candidate.pattern, 0, DELVER_AGENT_LIMITS.byteSearchMatches.max, context.token);
 			selected = candidate;
 			selectedScan = scan;
-			if (signatureIsUniqueAt(scan, target.rva)) {
+			selectedIsCrossRevisionStable = policy !== 'cross-revision-stable'
+				|| crossRevisionEvidence.every(evidence => evidence.signature.pattern === candidate.pattern.canonical);
+			if (signatureIsUniqueAt(scan, target.rva) && selectedIsCrossRevisionStable) {
 				break;
 			}
 		}
@@ -1223,8 +1256,21 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 		}
 
 		const unique = signatureIsUniqueAt(selectedScan, target.rva);
+		if (policy === 'cross-revision-stable' && (!unique || !selectedIsCrossRevisionStable)) {
+			throw new DelverAgentError(
+				DelverAgentErrorCode.AnalysisIncomplete,
+				`No instruction-aligned pattern for ${target.name} is both unique in the current ${scope} scope and identical to every retained earlier-revision proof within ${maxBytes} bytes.`,
+			);
+		}
 		const matchCountExact = selectedScan.nextOffset === undefined;
-		const quality = signatureQuality(selected, unique, matchCountExact);
+		const currentQuality = signatureQuality(selected, unique, matchCountExact);
+		const quality: ISignatureQuality = policy === 'cross-revision-stable' ? {
+			...currentQuality,
+			reasons: [
+				...currentQuality.reasons,
+				`The same masked pattern has an exact one-match proof in ${crossRevisionEvidence.length} earlier project revision${crossRevisionEvidence.length === 1 ? '' : 's'}.`,
+			],
+		} : currentQuality;
 		const coveredStart = BigInt(selected.rows[0].rva);
 		const coveredEnd = BigInt(selected.rows[selected.rows.length - 1].rva) + BigInt(selected.rows[selected.rows.length - 1].len);
 		const matches = selectedScan.matches.map(match => ({
@@ -1234,7 +1280,7 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 		}));
 		let alternativeXrefSignature: Record<string, unknown> | undefined;
 		if (!unique) {
-			alternativeXrefSignature = await this.makeXrefSignature(session, target, functions, info.sections, policy, maxBytes, context.token);
+			alternativeXrefSignature = await this.makeXrefSignature(session, target, functions, info.sections, candidatePolicy, maxBytes, context.token);
 		}
 
 		return {
@@ -1271,6 +1317,27 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 					candidateCount: selectedScan.candidateCount,
 					matches,
 				},
+				...(policy === 'cross-revision-stable' ? {
+					crossRevisionProof: {
+						method: 'retained-exact-primary-signatures',
+						...(evidenceSelector === undefined ? {} : {
+							selectedEvidence: {
+								sourceRevisionId: evidenceSelector.sourceRevisionId,
+								sourceSignatureId: evidenceSelector.sourceSignatureId,
+							},
+						}),
+						revisionCount: crossRevisionEvidence.length,
+						revisions: crossRevisionEvidence.map(evidence => ({
+							revisionId: evidence.revision.revisionId,
+							contentHash: evidence.revision.contentHash,
+							displayName: evidence.revision.displayName,
+							signatureId: evidence.signature.id,
+							sourceCallId: evidence.signature.sourceCallId,
+							functionRva: evidence.signature.functionRva,
+							pattern: evidence.signature.pattern,
+						})),
+					},
+				} : {}),
 				quality,
 				...(alternativeXrefSignature === undefined ? {} : { alternativeXrefSignature }),
 			},
@@ -1280,13 +1347,22 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 			}),
 			provenance: [{
 				source: 'analysis',
-				detail: unique
+				detail: policy === 'cross-revision-stable'
+					? `Instruction-aware signature proven unique under ${scope} scope and unchanged across retained earlier-revision proofs.`
+					: unique
 					? `Instruction-aware signature proven unique under ${scope} scope.`
 					: `Instruction-aware signature generated, but uniqueness was not proven under ${scope} scope.`,
 				contentHash: session.contentHash,
 				untrusted: true,
 				ranges: [{ start: toWireAddress(coveredStart), end: toWireAddress(coveredEnd) }],
-			}],
+			}, ...crossRevisionEvidence.map(evidence => ({
+				source: 'project' as const,
+				detail: `Retained exact uniqueness proof from ${evidence.revision.displayName}.`,
+				contentHash: evidence.revision.contentHash,
+				revisionId: evidence.revision.revisionId,
+				untrusted: true,
+				addresses: [evidence.signature.functionRva],
+			}))],
 		};
 	}
 
@@ -2197,6 +2273,33 @@ function signatureMaxBytes(value: unknown): number {
 	return value as number;
 }
 
+function crossRevisionEvidenceSelector(
+	args: Readonly<Record<string, unknown>>,
+	policy: SignaturePolicy,
+): ICrossRevisionEvidenceSelector | undefined {
+	const hasSourceRevisionId = args.sourceRevisionId !== undefined;
+	const hasSourceSignatureId = args.sourceSignatureId !== undefined;
+	if (hasSourceRevisionId !== hasSourceSignatureId) {
+		throw new DelverAgentError(
+			DelverAgentErrorCode.InvalidArgument,
+			'sourceRevisionId and sourceSignatureId must be supplied together.',
+		);
+	}
+	if (!hasSourceRevisionId) {
+		return undefined;
+	}
+	if (policy !== 'cross-revision-stable') {
+		throw new DelverAgentError(
+			DelverAgentErrorCode.InvalidArgument,
+			'sourceRevisionId and sourceSignatureId are only valid with the cross-revision-stable policy.',
+		);
+	}
+	return {
+		sourceRevisionId: requiredBoundedText(args.sourceRevisionId, 128, 'sourceRevisionId'),
+		sourceSignatureId: requiredBoundedText(args.sourceSignatureId, 128, 'sourceSignatureId'),
+	};
+}
+
 function resolveSignatureFunction(args: Readonly<Record<string, unknown>>, functions: readonly IResolvedFunction[]): IResolvedFunction {
 	const hasAddress = args.address !== undefined;
 	const hasFunction = args.function !== undefined;
@@ -2350,7 +2453,7 @@ function signatureIsUniqueAt(scan: IByteSearchScanResult, targetRva: bigint): bo
 	return scan.nextOffset === undefined && scan.matches.length === 1 && scan.matches[0].rva === targetRva;
 }
 
-function signatureQuality(candidate: ISignatureCandidate, unique: boolean, matchCountExact: boolean): Record<string, unknown> {
+function signatureQuality(candidate: ISignatureCandidate, unique: boolean, matchCountExact: boolean): ISignatureQuality {
 	const fixedRatio = candidate.pattern.bytes.length === 0 ? 0 : candidate.fixedByteCount / candidate.pattern.bytes.length;
 	const lengthScore = Math.min(1, candidate.fixedByteCount / 32);
 	const score = Math.max(0, Math.min(1, fixedRatio * 0.5 + lengthScore * 0.25 + (unique ? 0.25 : 0)));
@@ -2364,6 +2467,57 @@ function signatureQuality(candidate: ISignatureCandidate, unique: boolean, match
 		confidence: unique && score >= 0.8 ? 'high' : unique && score >= 0.55 ? 'medium' : 'low',
 		reasons,
 	};
+}
+
+function matchingCrossRevisionSignatureEvidence(
+	historical: readonly IDelverHistoricalSignature[],
+	targetName: string,
+	currentContentHash: string,
+	selector: ICrossRevisionEvidenceSelector | undefined,
+): readonly IDelverHistoricalSignature[] {
+	const eligible = historical.filter(evidence => evidence.signature.variant === 'primary'
+		&& evidence.signature.unique
+		&& evidence.signature.matchCountExact
+		&& evidence.signature.matchCount === 1
+		&& evidence.signature.contentHash === evidence.revision.contentHash
+		&& evidence.revision.contentHash !== currentContentHash);
+	if (selector !== undefined) {
+		const selected = historical.find(evidence => evidence.revision.revisionId === selector.sourceRevisionId
+			&& evidence.signature.id === selector.sourceSignatureId);
+		if (selected === undefined) {
+			throw new DelverAgentError(
+				DelverAgentErrorCode.AnalysisIncomplete,
+				`No retained earlier-revision signature matches sourceRevisionId ${JSON.stringify(selector.sourceRevisionId)} and sourceSignatureId ${JSON.stringify(selector.sourceSignatureId)}.`,
+			);
+		}
+		if (!eligible.includes(selected)) {
+			throw new DelverAgentError(
+				DelverAgentErrorCode.AnalysisIncomplete,
+				'The explicitly selected evidence is not an exact unique primary signature retained for an earlier revision.',
+			);
+		}
+		return [selected];
+	}
+	const foldedTargetName = targetName.toLowerCase();
+	const matchingNames = eligible.filter(evidence => evidence.signature.name.toLowerCase() === foldedTargetName);
+	const candidates = matchingNames.length > 0
+		? matchingNames
+		: eligible.filter(evidence => evidence.signature.functionName.toLowerCase() === foldedTargetName);
+	const byRevision = new Map<string, IDelverHistoricalSignature>();
+	for (const candidate of candidates) {
+		const existing = byRevision.get(candidate.revision.revisionId);
+		if (existing === undefined) {
+			byRevision.set(candidate.revision.revisionId, candidate);
+			continue;
+		}
+		if (existing.signature.pattern !== candidate.signature.pattern) {
+			throw new DelverAgentError(
+				DelverAgentErrorCode.AnalysisIncomplete,
+				`Earlier revision ${candidate.revision.displayName} contains conflicting exact signature proofs for ${targetName}. Resolve the saved signature identity before generating a cross-revision signature.`,
+			);
+		}
+	}
+	return [...byRevision.values()];
 }
 
 function signatureVariant(value: unknown): DelverSignatureVariant {
@@ -2414,7 +2568,7 @@ function namedSignatureDraft(
 	const last = signatureRecord(covered[covered.length - 1], 'last covered instruction');
 	const wildcardValues = signatureArray(selected.wildcardedOperands, 'signature wildcards');
 	const policy = data.policy;
-	if (policy !== 'unique-now' && policy !== 'relocation-stable') {
+	if (policy !== 'unique-now' && policy !== 'relocation-stable' && policy !== 'cross-revision-stable') {
 		throw new DelverAgentError(DelverAgentErrorCode.AnalysisIncomplete, 'The retained signature has an unsupported policy.');
 	}
 	const scope = selected.scope ?? data.scope;

@@ -58,7 +58,7 @@ import {
 } from '../../common/delverDecompilerService.js';
 import { IDelverFocus, IDelverFocusService } from '../../common/delverFocusService.js';
 import { IDelverInterpretationService } from '../../common/delverInterpretationService.js';
-import { IDelverProjectService } from '../../common/delverProjectService.js';
+import { IDelverHistoricalSignature, IDelverProjectService } from '../../common/delverProjectService.js';
 import { IDelverSession, IDelverSessionService } from '../../common/delverSessionService.js';
 
 const CONTENT_HASH = 'a'.repeat(64);
@@ -323,6 +323,7 @@ class FakeProjectService implements Partial<IDelverProjectService> {
 	readonly findings: IDelverFinding[] = [];
 	readonly toolCalls: IDelverToolCallRecord[] = [];
 	readonly signatures = new Map<string, IDelverNamedSignature[]>();
+	historicalSignatures: readonly IDelverHistoricalSignature[] = [];
 
 	projectSnapshot(contentHash: string): IDelverProjectSnapshot | undefined {
 		return this.snapshot?.metadata.contentHash === contentHash ? this.snapshot : undefined;
@@ -365,6 +366,10 @@ class FakeProjectService implements Partial<IDelverProjectService> {
 
 	signaturesFor(contentHash: string): readonly IDelverNamedSignature[] {
 		return this.signatures.get(contentHash) ?? [];
+	}
+
+	async historicalSignaturesFor(): Promise<readonly IDelverHistoricalSignature[]> {
+		return this.historicalSignatures;
 	}
 
 	async reportFindings(_contentHash: string, drafts: readonly IDelverFindingDraft[]): Promise<readonly IDelverFinding[]> {
@@ -507,6 +512,7 @@ interface ISearchBytesPayload {
 }
 
 interface IMakeSignaturePayload {
+	readonly policy: 'unique-now' | 'relocation-stable' | 'cross-revision-stable';
 	readonly pattern: string;
 	readonly byteCount: number;
 	readonly fixedByteCount: number;
@@ -525,6 +531,23 @@ interface IMakeSignaturePayload {
 		readonly targetMatched: boolean;
 	};
 	readonly quality: { readonly score: number; readonly confidence: string; readonly reasons: readonly string[] };
+	readonly crossRevisionProof?: {
+		readonly method: string;
+		readonly selectedEvidence?: {
+			readonly sourceRevisionId: string;
+			readonly sourceSignatureId: string;
+		};
+		readonly revisionCount: number;
+		readonly revisions: readonly {
+			readonly revisionId: string;
+			readonly contentHash: string;
+			readonly displayName: string;
+			readonly signatureId: string;
+			readonly sourceCallId: string;
+			readonly functionRva: string;
+			readonly pattern: string;
+		}[];
+	};
 	readonly alternativeXrefSignature?: {
 		readonly available: boolean;
 		readonly kind?: string;
@@ -1223,7 +1246,7 @@ suite('DelverAgentService', () => {
 	});
 
 	test('makes and proves decoder-backed relocation-stable signatures', async () => {
-		const { service, session, analysis } = createService(store);
+		const { service, session, analysis, project } = createService(store);
 		session.activeSession = LIVE_SESSION;
 		session.functionsResult = { functions: [...FUNCTIONS] };
 		const textBytes = new Uint8Array(0x200).fill(0x90);
@@ -1256,6 +1279,10 @@ suite('DelverAgentService', () => {
 			args: { address: '0x1008', policy: 'relocation-stable', scope: 'executableSections', maxBytes: 13 },
 		}, CancellationToken.None);
 		const payload = payloadOf<IMakeSignaturePayload>(result);
+		const crossRevisionWithoutEvidence = await errorCode(service, {
+			capability: 'delver_make_signature',
+			args: { address: '0x1000', policy: 'cross-revision-stable', maxBytes: 13 },
+		});
 		const saved = await service.invoke({
 			capability: 'delver_save_signature',
 			args: { name: 'decrypt_config', sourceCallId: result.callId },
@@ -1265,6 +1292,163 @@ suite('DelverAgentService', () => {
 			args: { name: 'DECRYPT_CONFIG', sourceCallId: result.callId },
 		}, CancellationToken.None);
 		const listed = await service.invoke({ capability: 'delver_list_signatures' }, CancellationToken.None);
+		const savedSignature = (saved.data as { signature: IDelverNamedSignature }).signature;
+		const historicalSignature: IDelverHistoricalSignature = {
+			revision: {
+				revisionId: 'revision-older',
+				contentHash: OTHER_CONTENT_HASH,
+				displayName: 'sample-v1.exe',
+				createdAt: 50,
+			},
+			signature: {
+				...savedSignature,
+				id: 'signature-older',
+				contentHash: OTHER_CONTENT_HASH,
+				sourceCallId: 'call-older',
+				createdAt: 50,
+				updatedAt: 50,
+			},
+		};
+		project.historicalSignatures = [historicalSignature];
+		const selectorRefusals = {
+			missingSignatureId: await errorCode(service, {
+				capability: 'delver_make_signature',
+				args: { address: '0x1000', policy: 'cross-revision-stable', sourceRevisionId: 'revision-older', maxBytes: 13 },
+			}),
+			nonCrossPolicy: await errorCode(service, {
+				capability: 'delver_make_signature',
+				args: { address: '0x1000', policy: 'relocation-stable', sourceRevisionId: 'revision-older', sourceSignatureId: 'signature-older', maxBytes: 13 },
+			}),
+			mismatchedPair: await errorCode(service, {
+				capability: 'delver_make_signature',
+				args: { address: '0x1000', policy: 'cross-revision-stable', sourceRevisionId: 'revision-older', sourceSignatureId: 'signature-missing', maxBytes: 13 },
+			}),
+		};
+		project.historicalSignatures = [{
+			...historicalSignature,
+			signature: {
+				...historicalSignature.signature,
+				name: 'legacy_decrypt_signature',
+				functionName: 'FUN_OLD_DECRYPT',
+			},
+		}];
+		const heuristicIdentityMismatch = await errorCode(service, {
+			capability: 'delver_make_signature',
+			args: { address: '0x1000', policy: 'cross-revision-stable', maxBytes: 13 },
+		});
+		const explicitlyBound = await service.invoke({
+			capability: 'delver_make_signature',
+			args: {
+				address: '0x1000',
+				policy: 'cross-revision-stable',
+				sourceRevisionId: 'revision-older',
+				sourceSignatureId: 'signature-older',
+				maxBytes: 13,
+			},
+		}, CancellationToken.None);
+		project.historicalSignatures = [historicalSignature];
+		const crossRevision = await service.invoke({
+			capability: 'delver_make_signature',
+			args: { address: '0x1000', policy: 'cross-revision-stable', scope: 'executableSections', maxBytes: 13 },
+		}, CancellationToken.None);
+		const crossRevisionPayload = payloadOf<IMakeSignaturePayload>(crossRevision);
+		const savedCrossRevision = await service.invoke({
+			capability: 'delver_save_signature',
+			args: { name: 'decrypt_config_cross_revision', sourceCallId: crossRevision.callId },
+		}, CancellationToken.None);
+		project.historicalSignatures = [{
+			...historicalSignature,
+			signature: { ...historicalSignature.signature, pattern: '56 48 89 e5 e8 ?? ?? ?? ??' },
+		}];
+		const crossRevisionMismatch = await errorCode(service, {
+			capability: 'delver_make_signature',
+			args: { address: '0x1000', policy: 'cross-revision-stable', scope: 'executableSections', maxBytes: 13 },
+		});
+
+		assert.deepStrictEqual({
+			withoutEvidence: crossRevisionWithoutEvidence,
+			selectorRefusals,
+			heuristicIdentityMismatch,
+			explicitlyBoundProof: payloadOf<IMakeSignaturePayload>(explicitlyBound).crossRevisionProof,
+			policy: crossRevisionPayload.policy,
+			pattern: crossRevisionPayload.pattern,
+			proof: crossRevisionPayload.proof,
+			crossRevisionProof: crossRevisionPayload.crossRevisionProof,
+			qualityReasons: crossRevisionPayload.quality.reasons,
+			provenance: crossRevision.provenance,
+			savedPolicy: (savedCrossRevision.data as { signature: IDelverNamedSignature }).signature.policy,
+			mismatch: crossRevisionMismatch,
+		}, {
+			withoutEvidence: 'ANALYSIS_INCOMPLETE',
+			selectorRefusals: {
+				missingSignatureId: 'INVALID_ARGUMENT',
+				nonCrossPolicy: 'INVALID_ARGUMENT',
+				mismatchedPair: 'ANALYSIS_INCOMPLETE',
+			},
+			heuristicIdentityMismatch: 'ANALYSIS_INCOMPLETE',
+			explicitlyBoundProof: {
+				method: 'retained-exact-primary-signatures',
+				selectedEvidence: {
+					sourceRevisionId: 'revision-older',
+					sourceSignatureId: 'signature-older',
+				},
+				revisionCount: 1,
+				revisions: [{
+					revisionId: 'revision-older',
+					contentHash: OTHER_CONTENT_HASH,
+					displayName: 'sample-v1.exe',
+					signatureId: 'signature-older',
+					sourceCallId: 'call-older',
+					functionRva: '0x1000',
+					pattern: '55 48 89 e5 e8 ?? ?? ?? ??',
+				}],
+			},
+			policy: 'cross-revision-stable',
+			pattern: '55 48 89 e5 e8 ?? ?? ?? ??',
+			proof: {
+				matchCount: 1,
+				matchCountExact: true,
+				unique: true,
+				targetMatched: true,
+				searchableByteCount: 512,
+				candidateCount: 504,
+				matches: [{ rva: '0x1000', section: '.text', fileOffset: '0x400' }],
+			},
+			crossRevisionProof: {
+				method: 'retained-exact-primary-signatures',
+				revisionCount: 1,
+				revisions: [{
+					revisionId: 'revision-older',
+					contentHash: OTHER_CONTENT_HASH,
+					displayName: 'sample-v1.exe',
+					signatureId: 'signature-older',
+					sourceCallId: 'call-older',
+					functionRva: '0x1000',
+					pattern: '55 48 89 e5 e8 ?? ?? ?? ??',
+				}],
+			},
+			qualityReasons: [
+				'The selected scope contains exactly one match at the target entry.',
+				'5 of 9 bytes remain fixed after masking.',
+				'The same masked pattern has an exact one-match proof in 1 earlier project revision.',
+			],
+			provenance: [{
+				source: 'analysis',
+				detail: 'Instruction-aware signature proven unique under executableSections scope and unchanged across retained earlier-revision proofs.',
+				contentHash: CONTENT_HASH,
+				untrusted: true,
+				ranges: [{ start: '0x1000', end: '0x1009' }],
+			}, {
+				source: 'project',
+				detail: 'Retained exact uniqueness proof from sample-v1.exe.',
+				contentHash: OTHER_CONTENT_HASH,
+				revisionId: 'revision-older',
+				untrusted: true,
+				addresses: ['0x1000'],
+			}],
+			savedPolicy: 'cross-revision-stable',
+			mismatch: 'ANALYSIS_INCOMPLETE',
+		});
 
 		assert.deepStrictEqual({
 			pattern: payload.pattern,
@@ -1284,10 +1468,6 @@ suite('DelverAgentService', () => {
 			replacedExistingName: (saved.data as { replacedExistingName: boolean }).replacedExistingName,
 			replacement: (replaced.data as { signature: IDelverNamedSignature; replacedExistingName: boolean }),
 			listed: JSON.parse(JSON.stringify((listed.data as { signatures: readonly IDelverNamedSignature[] }).signatures)),
-			crossRevision: await errorCode(service, {
-				capability: 'delver_make_signature',
-				args: { address: '0x1000', policy: 'cross-revision-stable' },
-			}),
 			bothTargets: await errorCode(service, {
 				capability: 'delver_make_signature',
 				args: { address: '0x1000', function: 'SUB_1000' },
@@ -1332,7 +1512,6 @@ suite('DelverAgentService', () => {
 				wildcards: [{ instructionRva: '0x1004', instructionByteIndex: 1, length: 4, patternByteIndex: 5, reason: 'relativeBranch' }],
 				unique: true, matchCount: 1, matchCountExact: true, qualityScore: 0.567, confidence: 'medium', createdAt: 100, updatedAt: 101,
 			}],
-			crossRevision: 'ANALYSIS_INCOMPLETE',
 			bothTargets: 'INVALID_ARGUMENT',
 		});
 	});

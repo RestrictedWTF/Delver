@@ -240,7 +240,7 @@ const PRESENTATIONS = new Map<string, IDelverToolPresentation>([
 		icon: Codicon.symbolMethod,
 		displayName: localize('delverTool.makeSignature.displayName', "Delver Make Signature"),
 		userDescription: localize('delverTool.makeSignature.userDescription', "Generate and prove a masked function signature"),
-		usage: `Builds an instruction-aligned AOB signature for one detected function and proves its match count over the requested scope. Pass exactly one of \`address\` or \`function\`. The relocation-stable policy wildcards direct branch immediates, instruction-pointer-relative memory displacements, and PE base relocations using exact decoder metadata; the result explains every wildcard. The cross-revision-stable policy fails with ANALYSIS_INCOMPLETE until the project format and analysis service expose historical revision bytes, so it never substitutes same-binary uniqueness for revision stability. ${ATTACHED_NOTE} ${UNTRUSTED_NOTE}`,
+		usage: `Builds an instruction-aligned AOB signature for one detected function and proves its match count over the requested scope. Pass exactly one of \`address\` or \`function\`. The relocation-stable policy wildcards direct branch immediates, instruction-pointer-relative memory displacements, and PE base relocations using exact decoder metadata; the result explains every wildcard. For cross-revision-stable generation, pass both \`sourceRevisionId\` and \`sourceSignatureId\` to bind the proof to one retained unique primary signature from an earlier revision. Omitting both permits conservative evidence discovery; passing only one is invalid. ${ATTACHED_NOTE} ${UNTRUSTED_NOTE}`,
 		inputSchema: objectSchema({
 			address: addressProperty('Any address inside the function to sign. Pass exactly one of address or function.'),
 			function: {
@@ -263,6 +263,18 @@ const PRESENTATIONS = new Map<string, IDelverToolPresentation>([
 				minimum: 1,
 				maximum: DELVER_AGENT_LIMITS.bytePatternBytes,
 				description: 'Maximum instruction-aligned signature length. Defaults to 128 bytes.',
+			},
+			sourceRevisionId: {
+				type: 'string',
+				minLength: 1,
+				maxLength: 128,
+				description: 'Earlier project revision containing the retained proof to use. Valid only with cross-revision-stable and must be paired with sourceSignatureId.',
+			},
+			sourceSignatureId: {
+				type: 'string',
+				minLength: 1,
+				maxLength: 128,
+				description: 'Retained unique primary signature to use as the earlier-revision proof. Valid only with cross-revision-stable and must be paired with sourceRevisionId.',
 			},
 		}),
 	}],
