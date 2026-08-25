@@ -98,9 +98,22 @@ decoder and PE relocation metadata, reports every wildcard and covered RVA, and
 can return a separately proven incoming-xref-site signature when target bytes
 are ambiguous. Proven primary or xref-site results can be named through their
 retained source call and restored offline from the per-revision schema-v6
-signature table. Cross-revision selection remains fail-closed until historical
-sample bytes can be retained or attached. Instruction search and structured
-data/global reads remain.
+signature table. Adaptive selection from raw historical bytes remains
+fail-closed until those samples can be retained or attached. A conservative
+retained-evidence mode is implemented: the same relocation-masked primary
+pattern must have an exact one-match proof saved for the same function identity
+in an earlier revision and remain exactly unique in the current revision. It
+never reads a historical source path and makes no claim for revisions without
+saved proof.
+Instruction search and structured data/global reads remain.
+
+The listing and Signatures-view generator action exposes all three policies in
+a policy picker, with relocation-stable first and recommended. Cross-revision
+results name and count the retained earlier-revision proofs beside the pattern;
+the UI rejects inconsistent proof counts or patterns before offering copy/save.
+Earlier Revision Scan additionally binds regeneration to its exact source
+revision/signature ids, and migration acceptance revalidates that binding from
+the retained generation result before transferring annotations.
 
 Add bounded, batch-first operations for:
 
@@ -108,7 +121,7 @@ Add bounded, batch-first operations for:
 - string/data/global reads at an address;
 - RVA, VA, and file-offset conversion (`done`);
 - byte patterns with wildcards (`done`);
-- instruction-aware function signatures (`done` for unique-now and relocation-stable; cross-revision byte retention remains);
+- instruction-aware function signatures (`done` for unique-now, relocation-stable, and retained-proof cross-revision stability; adaptive selection from historical bytes remains);
 - instruction, immediate, constant, regex, and later YARA searches.
 
 Disassembly results should optionally include encoded bytes. Searches that exceed

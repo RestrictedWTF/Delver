@@ -8,10 +8,112 @@ something is the way it is, see [adr/](../history/adr/).
 
 ---
 
-**Last updated:** 2026-08-23
+**Last updated:** 2026-08-25
 **Current phase:** P3c/P3d — reviewed evidence plus static-analysis depth (P3b client conformance and P3a/P2b real-project smoke continue alongside)
 
 ## Just landed
+
+**Generate Signature...** now starts with an explicit policy choice:
+relocation-stable remains the recommended first item, cross-revision-stable
+uses retained earlier-revision proof, and unique-now keeps every current byte
+exact. A successful cross-revision result shows its contributing revision count
+and names alongside the IDA-style pattern before copy or save. The presentation
+parser fails closed unless the policy is recognized, the revision count is
+consistent, and every retained proof contains the exact generated primary
+pattern. Earlier Revision Scan skips that prompt and requests
+cross-revision-stable generation bound to the exact selected revision and saved
+signature ids.
+
+`delver_make_signature` now implements a conservative first
+`cross-revision-stable` policy without trusting or reopening historical source
+paths. It requires an exact, uniquely proven primary signature for the same
+function identity in at least one earlier project revision, regenerates the
+current candidate with relocation-aware masking, and accepts it only when the
+identical masked pattern is still an exact unique match at the current function
+entry. Results expose the contributing revision, signature, and source-call ids
+as a separate proof chain; missing, conflicting, changed, or currently ambiguous
+evidence fails closed with `ANALYSIS_INCOMPLETE`. Proven results can be named and
+persisted with their `cross-revision-stable` policy in schema-v6 projects.
+Optional paired `sourceRevisionId` and `sourceSignatureId` inputs bypass name
+heuristics and bind the proof to one exact retained signature; selectors are
+rejected for other policies or when only one is supplied.
+
+The **Signatures** title bar now exposes **Export IDAPython Matchers...** for
+live and offline project revisions. It writes one deterministic `.py` bundle
+containing every saved primary signature, sorted by name. Each entry is checked
+independently with the same exact-uniqueness, function-entry, and name-conflict
+guards as the single matcher, and the script finishes with applied, already
+named, preserved, missing, ambiguous, non-function, and rejected totals.
+Xref-site alternatives are excluded because their pattern identifies a caller,
+not the function entry that should receive the saved name.
+
+Saved primary signatures now offer **Copy IDAPython Matcher** from their context
+menu. The generated script uses IDA's current `find_bytes` API, scans the whole
+IDB, proves there is exactly one match, requires that address to be an existing
+function entry, and only replaces a dummy name. It preserves different authored
+or otherwise non-trivial IDA names, jumps to a successful match, and reports
+missing, ambiguous, non-function, or rejected-name outcomes without forcing a
+mutation. Xref-site alternatives do not expose the action because their match
+address is a call site rather than the identified function entry.
+
+Accepting a regenerated unique primary result from **Earlier Revision Scan** now
+persists a `signature` function-revision mapping with both retained search and
+generation call ids. Delver revalidates the complete one-match search proof at
+the project boundary, then transfers the older function's authored name,
+comment, and tags. Missing target fields are accepted append-only imports;
+different current values are preserved and emitted as proposals in **Review**.
+Repeating the operation is idempotent for interpretation state and does not
+duplicate an unresolved conflict proposal.
+
+An exact primary match in **Earlier Revision Scan** can now be regenerated for
+the current revision from its row context menu. Delver passes the matched RVA,
+historical name, source revision id, and saved signature id into the canonical
+cross-revision generator, then requires the identical masked pattern to prove
+exactly one current-revision function-entry match before it can be saved. The
+project boundary revalidates that exact binding before transferring annotations.
+Ambiguous, missing, incomplete, and xref-site scan results never offer promotion
+because they do not safely identify a current function entry.
+
+The **Signatures** view can now scan saved patterns from earlier project
+revisions against the attached current target. The cancellable scan is bounded
+to 100 saved records, deduplicates identical pattern/scope searches, and asks
+for only enough matches to distinguish an exact unique relocation from an
+ambiguous one. Results remain visible as explicit `unique`, `ambiguous`,
+`missing`, or `incomplete` evidence; unique and candidate matches navigate to
+the listing. A one-match result proves relocation into this revision only and
+is deliberately not presented as universal cross-revision stability.
+
+Saved signatures can now be renamed or permanently deleted from their row
+context menu. Renames preserve the signature's stable id and proof, reject
+case-insensitive name conflicts, and update the SQLite record atomically;
+deletion is revision-scoped, requires explicit confirmation, and refreshes the
+view immediately for both untitled and named projects.
+
+Saved signatures now expand into their retained evidence directly in the
+**Signatures** view: the copyable IDA-style pattern, source function, generation
+strategy, covered RVA range, exact uniqueness proof, quality score, and each
+wildcarded operand with its relocation reason. Function, coverage, and wildcard
+rows navigate back to the listing, so the durable claim can be inspected without
+opening another surface.
+
+The Delver sidebar now includes a **Signatures** view. Its leading search action
+accepts IDA-style full-byte and nibble wildcard patterns, pages canonical
+`delver_search_bytes` results, and opens each section-qualified match in the
+listing. Durable named signatures appear in the same view and can be searched
+against the attached image with one click; saves refresh the group immediately.
+The view also exposes the listing's **Generate Signature...** action when a
+function instruction is selected, keeping generation, reuse, and navigation in
+one evidence-focused surface.
+
+The listing editor now exposes **Generate Signature...** for the function under
+the selected instruction. It selects exact-current, relocation-stable, or
+retained-proof cross-revision policy over executable sections, shows the proven
+primary and xref-site alternatives as uppercase IDA-style byte patterns, and
+lets a human copy either pattern or save an exactly unique variant as named
+project evidence. Generation is cancellable, ambiguous patterns remain copyable
+but cannot be mislabeled as saved proof, and empty native signature-mask metadata
+is serialized explicitly so stable instructions are distinguishable from an
+outdated analysis backend.
 
 Named signatures are now durable project evidence. `delver_save_signature`
 accepts only a retained `delver_make_signature` call from the current target
@@ -31,10 +133,12 @@ the target function, all executable sections, or the raw-backed image. The
 memory displacements, and PE base-relocation fields from exact decoder/server
 metadata and explains every wildcard. Results include covered instructions and
 RVAs, match evidence, a deterministic quality score, and a separately proven
-xref-site signature when the function bytes remain ambiguous. The
-`cross-revision-stable` policy intentionally returns `ANALYSIS_INCOMPLETE`
-until historical revision bytes are retained or attached; same-binary
-uniqueness is never mislabeled as update stability.
+xref-site signature when the function bytes remain ambiguous. The conservative
+`cross-revision-stable` policy additionally requires the identical
+relocation-masked pattern to have retained exact uniqueness proofs for the same
+function identity in earlier project revisions and to remain uniquely matched
+in the current revision. It does not claim stability across revisions that lack
+saved proof, and it never follows untrusted historical source paths.
 
 S2 byte-pattern search is live. `delver_search_bytes` scans raw-backed image
 section bytes for one-to-256-byte hexadecimal patterns with full-byte and
@@ -585,7 +689,11 @@ with the OS icons, so the whole set regenerates from one master.
 
 ## Verification
 
-- Agent dispatcher and contract: 33 passing. They cover zero-analysis
+- Signature UI/migration focused run: 25 passing, covering generation policies,
+  earlier-revision classification and promotion gating, SQLite `signature`
+  mappings, retained proof validation, conflict-preserving annotation transfer,
+  idempotent Review proposals, and fail-closed single/bulk IDAPython generation
+- Agent dispatcher and contract: 32 passing. They cover zero-analysis
   discovery, per-capability missing-project handling, attachment refusal, the
   zero-backend saved pseudocode path, an address above 2⁵³, unsafe JSON
   numbers, count clamping, cursor binding to bytes/capability/filter,
@@ -594,17 +702,17 @@ with the OS icons, so the whole set regenerates from one master.
   image/file byte reads with exact little-endian integer decoding, wildcard
   scans across provider chunks, overlapping matches, revision-bound search
   cursors, complete negative scans, short-read refusal, instruction-aligned
-  relocation-stable signatures, bounded uniqueness proofs, explicit
-  cross-revision refusal, proven xref-site fallbacks, evidence-gated named
-  signature saves, and offline named-signature listing,
+  relocation-stable signatures, bounded uniqueness proofs, retained-evidence
+  cross-revision proofs and fail-closed mismatches, proven xref-site fallbacks,
+  evidence-gated named signature saves, and offline named-signature listing,
   untrusted string labelling, authored names beating placeholders,
   cancellation, envelope shape, attributed offline rename/comment/tag
   proposals, validation-atomic malformed batches, and the write commit boundary
 - Agent tool presentation: 3 focused tests cover catalog/tool identity, exact
   byte/address and signature schemas, and bounded review-only proposal schemas;
   generated discovery reports 26 tools
-- Named-signature/project focused run: 56 passing (8 SQLite store, 4 project
-  service, 33 dispatcher, 3 tool-definition, and 8 command-gateway tests),
+- Named-signature/project focused run: 57 passing (10 SQLite store, 4 project
+  service, 32 dispatcher, 3 tool-definition, and 8 command-gateway tests),
   including v1-to-v6 migration, reopen, per-revision isolation, atomic upsert,
   and case-insensitive replacement with a stable id
 - Session/decompiler regression run: 41 passing
@@ -787,7 +895,7 @@ actual backend state and phase timings. PyGhidra failure no longer silently
 starts the minute-long headless path; headless selection is explicit.
 
 Combined verification: session lifecycle 25 passing, decompiler/worker/status
-29 passing, SQLite project store 8 passing, Python worker 6 passing, client
+29 passing, SQLite project store 10 passing, Python worker 6 passing, client
 typecheck and transpilation clean.
 
 Next, visually exercise Open Project, Locate Target, saved pseudocode provenance,
