@@ -51,4 +51,23 @@ suite('Delver active listing', () => {
 		secondRegistration.dispose();
 		assert.strictEqual(activeListing(), undefined);
 	});
+
+	test('re-registering a host that is already live leaves exactly one entry', async () => {
+		// A host re-registers whenever its container is shown again, and
+		// `MutableDisposable` pushes the new registration *before* disposing the
+		// old one — so the stack transiently holds the same host twice. Nothing
+		// in this module makes that safe on its own: it works only because
+		// disposal removes the newest match. Pinning it here, because a change
+		// to either half would otherwise strand a dead host at the top of the
+		// stack and hand every listing action to a disposed widget.
+		const only = host('1000');
+		const first = setActiveListing(only);
+		const second = setActiveListing(only);
+
+		first.dispose();
+		assert.strictEqual(await activeListing()?.selectedFunctionRva(), 0x1000n);
+
+		second.dispose();
+		assert.strictEqual(activeListing(), undefined);
+	});
 });
