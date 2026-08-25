@@ -10,7 +10,8 @@
 
 ## Global Constraints
 
-- **Invariant 15 overrides the TDD skill's run-the-test steps.** `CLAUDE.md`: *"Don't run builds, typechecks, or test suites to verify your own work unless asked. The human does that."* Tests are still written **first**, but no task runs `scripts\test.bat`, `npm run compile`, or `npm run typecheck-client`. Each task ends by handing the human the exact command to run. **Do not report a task as verified.**
+- **Invariant 15 is suspended for this plan, by explicit instruction of the repository owner on 2026-08-26.** `CLAUDE.md` normally forbids agents from running builds, typechecks, or test suites to verify their own work. For this plan you **must** run them: follow a real TDD cycle (write the test, run it, watch it fail, implement, run it again, watch it pass) and report the actual command output. Do not claim a test passes without having run it. This suspension covers this plan only — it does not generalize to other work in this repository.
+- Test command: `scripts\test.bat --grep "<suite name>"`. Typecheck: `npm run typecheck-client`. Build: `npm run compile-client`. Prefer the narrowest command that covers your change; `compile-client` is slow, so run it only where a task's step calls for it.
 - **Addresses are `bigint` in TypeScript, never `number`** (invariant 2). On the wire they are `"0x…"` strings.
 - **No contrib may import another contrib's internals** (invariant 9). Shared code goes in `src/vs/workbench/services/delver/`.
 - **Do not touch `src/vs/workbench/api/**`** (invariant 10).
@@ -260,11 +261,15 @@ export function surfacesForZone(
 }
 ```
 
-- [ ] **Step 4: Hand the test to the human**
+- [ ] **Step 4: Run the test**
 
-Do not run it yourself (invariant 15). Report:
+Between Step 1 and Step 2, run it once and confirm it fails for the right reason (module not found — not a syntax error in the test):
 
-> Task 1 written. To verify: `scripts\test.bat --grep "Delver surface registry"`
+```
+scripts\test.bat --grep "Delver surface registry"
+```
+
+After Step 3, run it again. Expected: 2 passing. Paste the actual output into your report.
 
 - [ ] **Step 5: Commit**
 
@@ -496,10 +501,21 @@ and in the body of `setEditorVisible`:
 
 `MutableDisposable` and `IDisposable` are already imported at line 10; add `IDisposable` to that import if absent.
 
-- [ ] **Step 5: Hand the tests to the human**
+- [ ] **Step 5: Run the tests and typecheck**
 
-> Task 2 written. To verify: `scripts\test.bat --grep "Delver active listing"`
-> Also worth a manual check, since no test covers it: open a listing, select a function, and confirm Follow, Toggle Pin, and Generate Signature still work.
+Run the new suite after Step 2 (expected: 3 passing):
+
+```
+scripts\test.bat --grep "Delver active listing"
+```
+
+After Step 3 and Step 4, typecheck — this task edits four files and removes imports, which is exactly where a stale import or a now-unused symbol shows up:
+
+```
+npm run typecheck-client
+```
+
+Expected: no errors. If `DelverListingEditor` is reported as unused in either modified file, remove that import. Paste both outputs into your report.
 
 - [ ] **Step 6: Commit**
 
@@ -650,13 +666,20 @@ export class DelverListingEditor extends EditorPane {
 
 Match the original `setInput` options type rather than `unknown` if the original declared one; do not widen a type as part of this move.
 
-- [ ] **Step 4: Hand the verification to the human**
+- [ ] **Step 4: Typecheck and run the existing listing suite**
 
-This task changes no behavior and adds no test — its correctness claim is "the listing works exactly as before", which only the running app can confirm.
+This task adds no new test on purpose: it is a pure move, and its correctness claim is *"the listing behaves exactly as before"*. That claim is carried by the **existing** listing tests plus the typechecker, so both must actually run.
 
-> Task 3 written: `DelverListingEditor` reduced from 852 lines to a thin host, rendering moved to `DelverListingWidget`.
-> To verify: `npm run compile-client`, then open a listing and exercise scrolling, function landmarks, xref margins, follow, pin, inline rename, and Generate Signature.
-> The existing listing tests should be unaffected: `scripts\test.bat --grep "Delver listing"`
+```
+npm run typecheck-client
+scripts\test.bat --grep "Delver listing"
+```
+
+Expected: no type errors, and every existing listing test still passing. A type error here is the normal outcome of a move this size — fix it by correcting the move, never by widening a type to `any` or `unknown`.
+
+Report both outputs. Also state explicitly in your report that this task ships no new test and why, so the reviewer can judge that rather than discover it.
+
+Note for the human, to include in your report: the following need manual confirmation in the running app, as no automated test covers them — scrolling, function landmarks, xref margins, follow, pin, inline rename, Generate Signature.
 
 - [ ] **Step 5: Commit**
 
@@ -786,9 +809,15 @@ export class DelverTreeSurface extends Disposable implements IDelverSurface {
 }
 ```
 
-- [ ] **Step 3: Hand the test to the human**
+- [ ] **Step 3: Run the test**
 
-> Task 4 written. To verify: `scripts\test.bat --grep "Delver tree surface"`
+Run it after Step 1 and confirm it fails (module not found), then again after Step 2. Expected: 1 passing.
+
+```
+scripts\test.bat --grep "Delver tree surface"
+```
+
+Paste the actual output into your report.
 
 - [ ] **Step 4: Commit**
 
