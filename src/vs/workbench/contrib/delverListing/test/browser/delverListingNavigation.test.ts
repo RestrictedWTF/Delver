@@ -9,7 +9,7 @@ import { FunctionSourceWire } from '../../../../../platform/delver/common/protoc
 import { shouldFollowWhilePinned } from '../../browser/delverListingContext.js';
 import { FocusReason } from '../../../../services/delver/common/delverFocusService.js';
 import { parseAddress } from '../../browser/delverListingNavigation.js';
-import { containingFunctionRva } from '../../browser/delverListingEditor.js';
+import { containingFunctionRva } from '../../browser/delverListingWidget.js';
 
 /** Mocha cannot serialize a BigInt, so failures print nothing useful without this. */
 function show(value: bigint | undefined): string {
