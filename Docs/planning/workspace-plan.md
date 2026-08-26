@@ -892,58 +892,62 @@ by `treeView.refresh()`; Strings alone resolves lazily inside `getChildren` and
 is therefore host-independent. Reproduced with a **single** target open, so it
 is not caused by defect 1, though 1 will compound it.
 
-**Diagnosed by instrumentation, 2026-08-26.** Logging inside the Functions
-contribution answered it. The entire data path is healthy:
+**ROOT CAUSE FOUND AND FIXED, 2026-08-26.**
 
+Deleting the sidebar container also un-registered every Delver **view
+descriptor** — `registerDelverView` was replaced by `registerDelverSurface`, and
+only the latter ran. That looked harmless, because nothing rendered those views
+any more.
+
+It was not harmless. `TreeView` builds its data source like this
+(`treeView.ts:695`):
+
+```ts
+const dataSource = this.instantiationService.createInstance(TreeDataSource, this,
+    <T>(task: Promise<T>) => this.progressService.withProgress({ location: this.id }, () => task));
 ```
-contribution constructed, subscribing
-onDidChangeActiveSession fired
-update enter session=true token=1
-fetched functions=523 token=1 gen=1
-setFunctions 523
-pre-refresh refreshing=false isVisible=true hasProvider=true hasTree=true activated=true
+
+Every `getChildren` is wrapped in `withProgress({ location: <viewId> })`. And
+`ProgressService.handleStringLocation` ends with:
+
+```ts
+if (this.viewDescriptorService.getViewDescriptorById(location) !== null) { ... }
+throw new Error(`Bad progress location: ${location}`);
 ```
 
-...and then **`treeView.refresh()` never settles.** It neither resolves nor
-rejects. `TreeView.doRefresh` sets a private `refreshing` flag, awaits
-`tree.updateChildren(root)`, and only then clears the flag and fires
-`_onDidCompleteRefresh`. For a zone-hosted tree that `updateChildren` never
-settles, so the flag stays set and every later `refresh()` blocks forever on
-`await Event.toPromise(this._onDidCompleteRefresh.event)`.
+So for an unregistered view id it **throws** — inside `TreeDataSource`'s
+batching callback, where the throw is swallowed and the returned promise never
+settles. The tree hung forever waiting on children it had already computed.
 
-That explains the whole pattern exactly: **Strings is the one Navigator surface
-that never calls `refresh()`** — it resolves lazily inside `getChildren` — and it
-is the one that works.
+Measured against a live workbench: the wrapped provider resolved in 3s with 2
+items, while both `tree.setInput(root)` and `tree.updateChildren(root)` hung
+indefinitely. That isolated the fault to the progress wrapper, not the data.
 
-Two fixes were tried against a running workbench and **both failed**, so neither
-is in the tree:
+**The fix:** `registerDelverTreeSurface` keeps the view descriptor registered in
+the `ViewsRegistry` with `when: ContextKeyExpr.false()`. Nothing renders — the
+container's view model filters it out — but the progress location resolves.
+`DELVER_VIEW_CONTAINER` moved back to `services/delver/browser/` so the registry
+call does not make a service import a contribution (invariant 9).
 
-- *Refresh on becoming visible.* Made it worse: measured `refreshing === true`
-  with it, `false` without. It was the call creating the latch. Removed, with the
-  reason recorded at the call site.
-- *Defer creating and attaching the tree until first show* (what a `ViewPane`
-  does, since `create()` fires `setInput(root)` unawaited). `refresh()` still
-  never settled.
+**Verified live:** Functions 55, Strings 53, Imports 50, Sections 8, Exports 0
+(correct — `notepad.exe` has no export table). Selecting a function drives
+References to 7 rows and the Listing to 43, and Pseudocode decompiles through
+ghidra-pyghidra in ~11ms.
 
-**Where to go next, in order.** Do not attempt a third variation of the adapter
-without evidence; that approach has now failed twice.
+**The lesson, and it is the same one as every other defect in this work:** a
+path that assumed the old host. Here the assumption was not even in Delver's
+code — it was upstream's, latent in `TreeView`, and it surfaced only because the
+container went away. Removing a registration is not free just because nothing
+visibly depends on it.
 
-1. Instrument *inside* `updateChildren` — or breakpoint it via `dap-cli` on the
-   renderer — to find which await never settles. That is the one unknown left.
-2. If the cause is that `ITreeView` genuinely requires a `ViewPane` host,
-   consider hosting a real `TreeViewPane` inside the zone instead of adapting
-   raw `ITreeView`. The pane is what upstream keeps working; `DelverTreeSurface`
-   reimplements it and is evidently missing something.
-3. Failing both, give the four broken providers the shape Strings already has —
-   resolve lazily in `getChildren` and stop calling `refresh()` — which is known
-   to work in a zone today.
+## Still open
 
-**3 — Navigator segment labels are illegible.**
-At the default 240px they truncate to `Fu… S… I… E… S…`, and two are
-indistinguishable. Collapsing five surfaces into segments only pays off if the
-segments can be read; this needs icons, a shorter zone title, or overflow.
+**Cross-target contamination.** Two open workspaces show the same data: the
+workspace is per-target, but `IDelverSessionService` has a single
+`activeSession`. Predates the redesign; the redesign made it reachable. Needs an
+ADR — either the session service becomes multi-session and surfaces resolve
+theirs from the workspace context, or the workspace stops being per-target.
 
-**4 — Tear-off unverified.**
-A synthetic `contextmenu` event on a segment tab did not open the menu. That
-does not distinguish "not wired" from "synthetic event insufficient" — it needs
-a real right-click before being called either way.
+**Tear-off unverified.** A synthetic `contextmenu` on a segment tab did not open
+the menu, which does not distinguish "not wired" from "synthetic event
+insufficient". Needs a real right-click.

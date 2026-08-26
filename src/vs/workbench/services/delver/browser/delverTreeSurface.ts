@@ -10,9 +10,12 @@ import { onUnexpectedError } from '../../../../base/common/errors.js';
 import { Event } from '../../../../base/common/event.js';
 import { Disposable, IDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
 import { localize } from '../../../../nls.js';
+import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
+import { Registry } from '../../../../platform/registry/common/platform.js';
 import { ITreeView } from '../../../common/views.js';
-import { ITreeViewDescriptor } from '../../../common/views.js';
+import { Extensions as ViewExtensions, ITreeViewDescriptor, IViewsRegistry } from '../../../common/views.js';
+import { DELVER_VIEW_CONTAINER } from './delverViewContainer.js';
 import { delverTreeFilterProvider } from './delverFilterableTreeViewPane.js';
 import { DelverZone, IDelverSurface } from './delverSurface.js';
 import { registerDelverSurface } from './delverSurfaceRegistry.js';
@@ -120,6 +123,24 @@ export function registerDelverTreeSurface(
 	descriptor: ITreeViewDescriptor,
 	badge?: Event<number | undefined>,
 ): IDisposable {
+	// The view descriptor stays in the ViewsRegistry, permanently hidden.
+	//
+	// Not decoration: `TreeView`'s data source wraps every `getChildren` in
+	// `progressService.withProgress({ location: <viewId> })`, and that call
+	// *throws* `Bad progress location` for an id the registry does not know —
+	// inside a batching callback, where the throw is swallowed and the tree's
+	// promise simply never settles. Dropping these registrations when the
+	// sidebar container went away is what left every tree surface blank: the
+	// data arrived, and the tree hung waiting on a progress location that no
+	// longer existed.
+	//
+	// `when: false` keeps it out of the container's view model, so nothing is
+	// rendered; only the lookup survives.
+	Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViews([{
+		...descriptor,
+		when: ContextKeyExpr.false(),
+	}], DELVER_VIEW_CONTAINER);
+
 	return registerDelverSurface({
 		id,
 		title: descriptor.name,
