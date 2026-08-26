@@ -66,8 +66,8 @@ editor area — divided into three zones with fixed roles.
 
 | Zone | Default width | Surfaces | Presentation |
 | --- | --- | --- | --- |
-| **Navigator** | 240px | Functions, Strings, Imports, Exports, Sections | segmented — one at a time, full height |
-| **Primary** | flex | Overview (default), Listing, Pseudocode | splittable side by side |
+| **Navigator** | 280px | Overview, Functions, Sections | segmented — one at a time, full height |
+| **Primary** | flex | Listing (Pseudocode beside it), Strings, Imports, Exports | segmented; Listing shows two panes |
 | **Inspector** | 280px | Xrefs, Signatures, Review | segmented, badged |
 
 The zones are named for the question each answers. **Navigator: what exists in
@@ -82,17 +82,28 @@ sashes between zones move.** No two surfaces share a height budget, so no
 surface can shrink another. That single property is the fix for §1's first
 consequence, and it is the reason the zone model was chosen over a dock canvas.
 
-Five navigator surfaces become five *segments of one zone* rather than five
-panes: one full-height list, four tabs. Segment switching does not resize
-anything.
+Navigator surfaces become *segments of one zone* rather than stacked panes: one
+full-height list, the rest as tabs. Segment switching does not resize anything.
 
-### Overview is the Primary zone's default
+### Overview is a Navigator segment
 
-Overview is target-level summary, not a list to navigate, so it is what Primary
-shows before anything is selected — the target's home. A home affordance in the
-header returns to it. Making it a sixth Navigator segment would have filed a
-summary among the indexes and cost a segment slot to something never consulted
-mid-task.
+Overview answers *what is this binary* — the Navigator's question — so that is
+where it lives. It was briefly Primary's default with a "home" affordance in the
+header, which produced two controls doing one thing and filed a summary in the
+zone reserved for what is being read.
+
+Strings, Imports and Exports moved the other way, into Primary. They look like
+indexes but they are **read**, not scanned past on the way somewhere else: an
+analyst works through a string table the way they work through a function, and
+at Navigator width their rows truncate.
+
+### Listing and Pseudocode are one segment
+
+They are always shown together — selecting either displayed both — so two tabs
+advertised a choice that did not exist. Pseudocode is registered as a
+**companion** of Listing: no tab of its own, never selectable alone, appearing
+and disappearing with its host. The mechanism is general; the descriptor field
+is `companions`.
 
 ## 3. Surfaces are widgets, hosted twice
 
@@ -185,6 +196,14 @@ registry replaces.
 
 ## 5. Actions bind to selection, not to containers
 
+The zone name carries the product accent (`delver.zone.title`), the same hue as
+the listing's function landmark. Zones are the frame an analyst orients by
+before reading anything — like the landmark, not a kind of content but the
+boundary between content (`principles.md` §3). Where width is tight the **zone
+name yields before the segment names do**: a truncated segment is unusable,
+because "S…" could be Strings or Sections, while a truncated zone name costs
+nothing.
+
 **Rule: a zone header may contain only view state — `pin` and `sync`. Nothing
 else, ever.** This is enforceable and is meant to be enforced; it is the rule
 whose absence produced §1's third consequence.
@@ -258,6 +277,14 @@ is a claim about what question it answers.
 Delver inherits VS Code's tokens and component vocabulary. This surface is
 custom in *layout*, not in look. Density inside data views resolves toward
 [`principles.md`](principles.md) §2; workbench chrome stays as upstream draws it.
+
+### Decompiler provenance belongs in the status bar
+
+`principles.md` §1 requires provenance to stay visible, but a floating badge over
+the pseudocode sat on the first lines of the function — the part most often
+read. It is a status-bar entry instead: still always visible, never over the
+code. It clears when the pane hides, so the analyst never reads provenance for
+something they are no longer looking at.
 
 ## 8. Uncertainty
 

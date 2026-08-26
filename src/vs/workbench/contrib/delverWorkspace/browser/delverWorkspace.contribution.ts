@@ -9,6 +9,7 @@ import { Registry } from '../../../../platform/registry/common/platform.js';
 import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../browser/editor.js';
 import { EditorExtensions, IEditorFactoryRegistry } from '../../../common/editor.js';
 import { DELVER_WORKSPACE_EDITOR_ID, DelverWorkspaceInput, DelverWorkspaceInputSerializer } from '../../../services/delver/browser/delverWorkspaceInput.js';
+import './delverWorkspaceColors.js';
 import { registerDelverTargetLauncher } from './delverTargetLauncher.js';
 import { DelverWorkspaceEditor } from './delverWorkspaceEditor.js';
 

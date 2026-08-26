@@ -56,7 +56,8 @@
 
 .delver-target-launcher .delver-launcher-open {
 	flex: 0 0 auto;
-	margin: 8px 12px;
+	/* First child now: sits above the list rather than below the fold. */
+	margin: 8px 12px 6px;
 	padding: 4px 10px;
 	border: 1px solid var(--vscode-button-border, transparent);
 	border-radius: 2px;

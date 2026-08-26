@@ -6,22 +6,20 @@
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { DelverSurfaceId } from './delverSurface.js';
 
-export type DelverPrimaryMode = 'overview' | 'reading';
-
 export interface IDelverWorkspaceState {
 	readonly navigatorWidth: number;
 	readonly inspectorWidth: number;
 	readonly navigatorSurfaceId: string;
 	readonly inspectorSurfaceId: string;
-	readonly primaryMode: DelverPrimaryMode;
+	readonly primarySurfaceId: string;
 }
 
 export const DEFAULT_DELVER_WORKSPACE_STATE: IDelverWorkspaceState = {
-	navigatorWidth: 240,
+	navigatorWidth: 280,
 	inspectorWidth: 280,
 	navigatorSurfaceId: DelverSurfaceId.Functions,
 	inspectorSurfaceId: DelverSurfaceId.Xrefs,
-	primaryMode: 'overview',
+	primarySurfaceId: DelverSurfaceId.Listing,
 };
 
 const STORAGE_PREFIX = 'delver.workspace.layout.';
@@ -82,7 +80,7 @@ export function normalizeDelverWorkspaceState(value: Partial<IDelverWorkspaceSta
 		inspectorWidth: validWidth(value.inspectorWidth, DEFAULT_DELVER_WORKSPACE_STATE.inspectorWidth),
 		navigatorSurfaceId: validId(value.navigatorSurfaceId, DEFAULT_DELVER_WORKSPACE_STATE.navigatorSurfaceId),
 		inspectorSurfaceId: validId(value.inspectorSurfaceId, DEFAULT_DELVER_WORKSPACE_STATE.inspectorSurfaceId),
-		primaryMode: value.primaryMode === 'reading' ? 'reading' : 'overview',
+		primarySurfaceId: validId(value.primarySurfaceId, DEFAULT_DELVER_WORKSPACE_STATE.primarySurfaceId),
 	};
 }
 

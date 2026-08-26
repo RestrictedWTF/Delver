@@ -27,13 +27,13 @@ suite('Delver workspace state', () => {
 			inspectorWidth: 360,
 			navigatorSurfaceId: DelverSurfaceId.Strings,
 			inspectorSurfaceId: DelverSurfaceId.Review,
-			primaryMode: 'reading',
+			primarySurfaceId: DelverSurfaceId.Imports,
 		}), {
 			navigatorWidth: 320,
 			inspectorWidth: 360,
 			navigatorSurfaceId: DelverSurfaceId.Strings,
 			inspectorSurfaceId: DelverSurfaceId.Review,
-			primaryMode: 'reading',
+			primarySurfaceId: DelverSurfaceId.Imports,
 		});
 
 		assert.deepStrictEqual(normalizeDelverWorkspaceState({
@@ -41,13 +41,13 @@ suite('Delver workspace state', () => {
 			inspectorWidth: 40,
 			navigatorSurfaceId: '',
 			inspectorSurfaceId: 'x'.repeat(201),
-			primaryMode: 'broken' as never,
+			primarySurfaceId: '',
 		}), {
-			navigatorWidth: 240,
+			navigatorWidth: 280,
 			inspectorWidth: 280,
 			navigatorSurfaceId: DelverSurfaceId.Functions,
 			inspectorSurfaceId: DelverSurfaceId.Xrefs,
-			primaryMode: 'overview',
+			primarySurfaceId: DelverSurfaceId.Listing,
 		});
 	});
 

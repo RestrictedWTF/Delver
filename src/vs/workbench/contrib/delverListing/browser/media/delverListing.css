@@ -24,11 +24,26 @@
 	color: var(--vscode-descriptionForeground);
 }
 
+/*
+ * The address gutter is ruled off from the code.
+ *
+ * Addresses and mnemonics are both monospace and both left-aligned, so without
+ * a rule the eye has nothing to run down and the two columns blur into one
+ * (`principles.md` §2). Structural, so it is drawn in the neutral widget border
+ * rather than spending any of the semantic palette.
+ */
 .delver-listing-address {
 	color: var(--vscode-editorLineNumber-foreground);
 	font-family: var(--monaco-monospace-font);
 	font-size: 12px;
 	white-space: pre;
+	border-right: 1px solid var(--vscode-editorWidget-border);
+}
+
+/* The metadata preamble is not code; rule it off from the instructions. */
+.delver-listing-instruction.delver-listing-metadata-row,
+.delver-listing-address.delver-listing-metadata-row {
+	border-bottom: 1px solid var(--vscode-editorWidget-border);
 }
 
 .delver-listing-instruction {
@@ -78,6 +93,11 @@
 	outline-offset: -1px;
 }
 
+/*
+ * Left neutral and on the instruction column only. The landmark already carries
+ * the product accent in the function *name*; accenting the rule as well would
+ * spend the signal twice, and the class is not applied to the address cell.
+ */
 .delver-listing-instruction.delver-listing-function-start {
 	border-top: 1px solid var(--vscode-editorWidget-border);
 }

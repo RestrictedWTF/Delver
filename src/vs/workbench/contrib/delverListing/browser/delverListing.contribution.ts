@@ -359,8 +359,11 @@ registerDelverSurface({
 	id: DelverSurfaceId.Listing,
 	title: localize2('delverListingSurface', "Listing"),
 	zone: DelverZone.Primary,
-	order: 20,
+	order: 10,
 	ctor: new SyncDescriptor(DelverListingWidget),
+	// Pseudocode rides this tab. The two were always read together — selecting
+	// either showed both — so two tabs advertised a choice that did not exist.
+	companions: [DelverSurfaceId.Pseudocode],
 	contextKey: context => context.targetPath,
 	setContext: (surface, context, token) => surface.setTarget(context.targetPath, token),
 	tearOff: context => new DelverListingInput(context.targetPath),

@@ -38,6 +38,16 @@ export interface IDelverSurfaceDescriptor<T extends IDelverSurface = IDelverSurf
 	readonly ctor: SyncDescriptor<T>;
 
 	/**
+	 * Surfaces shown beside this one, under this one's tab.
+	 *
+	 * Listing and Pseudocode are always read together — selecting either showed
+	 * both — so presenting them as two tabs claimed a choice the analyst does not
+	 * actually have. A companion gets no tab of its own and is never selectable
+	 * alone; it appears and disappears with its host.
+	 */
+	readonly companions?: readonly string[];
+
+	/**
 	 * Contribution-owned binding from workspace state to this surface.
 	 *
 	 * The workspace deliberately does not downcast widgets or assume that a
@@ -132,4 +142,15 @@ export function surfacesForZone(
 	return all
 		.filter(surface => surface.zone === zone && (!surface.when || matches(surface.when)))
 		.sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
+}
+
+/** Ids that appear under another surface's tab rather than owning one. */
+export function companionSurfaceIds(all: readonly IDelverSurfaceDescriptor[]): ReadonlySet<string> {
+	const companions = new Set<string>();
+	for (const surface of all) {
+		for (const id of surface.companions ?? []) {
+			companions.add(id);
+		}
+	}
+	return companions;
 }

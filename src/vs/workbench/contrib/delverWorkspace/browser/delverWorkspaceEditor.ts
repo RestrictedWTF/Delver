@@ -29,7 +29,7 @@ import { SyncDescriptor0 } from '../../../../platform/instantiation/common/descr
 import { DelverSurfaceId, DelverZone, IDelverSurface, MenuDelverPrimaryChrome } from '../../../services/delver/browser/delverSurface.js';
 import { allDelverSurfaces, IDelverSurfaceContext, IDelverSurfaceDescriptor, onDidChangeDelverSurfaces, surfacesForZone } from '../../../services/delver/browser/delverSurfaceRegistry.js';
 import { DELVER_WORKSPACE_EDITOR_ID, DelverWorkspaceInput } from '../../../services/delver/browser/delverWorkspaceInput.js';
-import { DelverPrimaryMode, DelverRecentTargetsStore, DelverWorkspaceStateStore, IDelverWorkspaceState } from '../../../services/delver/browser/delverWorkspaceState.js';
+import { DelverRecentTargetsStore, DelverWorkspaceStateStore, IDelverWorkspaceState } from '../../../services/delver/browser/delverWorkspaceState.js';
 import { IDelverFocusService } from '../../../services/delver/common/delverFocusService.js';
 import { containingFunctionRva } from '../../../services/delver/common/delverFunctions.js';
 import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
@@ -38,6 +38,8 @@ import { IDelverWorkspaceService } from '../../../services/delver/common/delverW
 import { DelverWorkspaceZone } from './delverWorkspaceZone.js';
 
 const NAVIGATOR_MINIMUM_WIDTH = 180;
+/** Fits the zone name plus its three segment labels without clipping either. */
+const NAVIGATOR_DEFAULT_WIDTH = 280;
 const PRIMARY_MINIMUM_WIDTH = 360;
 const INSPECTOR_MINIMUM_WIDTH = 220;
 const HEADER_HEIGHT_FALLBACK = 32;
@@ -93,12 +95,6 @@ export class DelverWorkspaceEditor extends EditorPane {
 		const header = dom.append(this.root, dom.$('.delver-workspace-header'));
 		this.targetLabel = dom.append(header, dom.$('.delver-workspace-target'));
 		this.targetMetadata = dom.append(header, dom.$('.delver-workspace-metadata'));
-		const home = dom.append(header, dom.$('button.delver-workspace-segment')) as HTMLButtonElement;
-		home.type = 'button';
-		home.textContent = localize('delverWorkspaceHome', "Overview");
-		home.title = localize('delverWorkspaceHomeTitle', "Show Target Overview");
-		this._register(dom.addDisposableListener(home, dom.EventType.CLICK, () => this.setPrimaryMode('overview')));
-
 		this.splitContainer = dom.append(this.root, dom.$('.delver-workspace-split'));
 		// `createInstance`'s descriptor overload is typed for `SyncDescriptor0`,
 		// so a `SyncDescriptor<T>` carrying static arguments — which
@@ -121,7 +117,7 @@ export class DelverWorkspaceEditor extends EditorPane {
 			localize('delverWorkspacePrimary', "Primary"),
 			PRIMARY_MINIMUM_WIDTH,
 			createSurface,
-			id => this.setPrimaryMode(id === DelverSurfaceId.Overview ? 'overview' : 'reading'),
+			id => this.selectPrimary(id),
 			container => this.instantiationService.createInstance(MenuWorkbenchToolBar, container, MenuDelverPrimaryChrome, {
 				// State toggles only, so an overflow menu would be hiding two
 				// controls that `principles.md` §5 requires to stay visible.
@@ -143,7 +139,7 @@ export class DelverWorkspaceEditor extends EditorPane {
 			orientation: Orientation.HORIZONTAL,
 			proportionalLayout: false,
 		}));
-		this.splitView.addView(this.navigator, 240);
+		this.splitView.addView(this.navigator, NAVIGATOR_DEFAULT_WIDTH);
 		this.splitView.addView(this.primary, 600);
 		this.splitView.addView(this.inspector, 280);
 		this._register(this.splitView.onDidSashChange(() => this.saveWidths()));
@@ -203,14 +199,14 @@ export class DelverWorkspaceEditor extends EditorPane {
 		// A hidden workspace must not act on global events. Its listeners stay
 		// live for as long as an input is set, so with two targets open an
 		// address focus in one would flip the other's primary mode — and
-		// `setPrimaryMode` persists, silently rewriting the hidden target's
+		// `selectPrimary` persists, silently rewriting the hidden target's
 		// saved state. `setEditorVisible` resyncs context on the way back in.
 		store.add(this.focusService.onDidChangeFocus(event => {
 			if (!this.editorVisible) {
 				return;
 			}
 			if (event.focus.location?.space === 'Image') {
-				this.setPrimaryMode('reading');
+				this.selectPrimary(DelverSurfaceId.Listing);
 			}
 			this.updateSurfaceContext();
 		}));
@@ -360,9 +356,7 @@ export class DelverWorkspaceEditor extends EditorPane {
 		}
 		this.navigator.show([state.navigatorSurfaceId]);
 		this.inspector.show([state.inspectorSurfaceId]);
-		this.primary.show(state.primaryMode === 'overview'
-			? [DelverSurfaceId.Overview]
-			: [DelverSurfaceId.Listing, DelverSurfaceId.Pseudocode]);
+		this.primary.show([state.primarySurfaceId]);
 		this.navigator.setZoneVisible(this.editorVisible);
 		this.primary.setZoneVisible(this.editorVisible);
 		this.inspector.setZoneVisible(this.editorVisible);
@@ -387,25 +381,22 @@ export class DelverWorkspaceEditor extends EditorPane {
 	}
 
 	private showRequestedSurface(id: string): void {
-		if (id === DelverSurfaceId.Overview) {
-			this.setPrimaryMode('overview');
-		} else if (id === DelverSurfaceId.Listing || id === DelverSurfaceId.Pseudocode) {
-			this.setPrimaryMode('reading');
-		} else if (surfacesForZone(allDelverSurfaces(), DelverZone.Navigator).some(surface => surface.id === id)) {
+		const all = allDelverSurfaces();
+		if (surfacesForZone(all, DelverZone.Navigator).some(surface => surface.id === id)) {
 			this.selectNavigator(id);
-		} else if (surfacesForZone(allDelverSurfaces(), DelverZone.Inspector).some(surface => surface.id === id)) {
+		} else if (surfacesForZone(all, DelverZone.Inspector).some(surface => surface.id === id)) {
 			this.selectInspector(id);
+		} else if (surfacesForZone(all, DelverZone.Primary).some(surface => surface.id === id)) {
+			this.selectPrimary(id);
 		}
 	}
 
-	private setPrimaryMode(mode: DelverPrimaryMode): void {
+	private selectPrimary(id: string): void {
 		if (!this.state) {
 			return;
 		}
-		this.state = { ...this.state, primaryMode: mode };
-		this.primary.show(mode === 'overview'
-			? [DelverSurfaceId.Overview]
-			: [DelverSurfaceId.Listing, DelverSurfaceId.Pseudocode]);
+		this.state = { ...this.state, primarySurfaceId: id };
+		this.primary.show([id]);
 		this.updateSurfaceContext();
 		this.persistWorkspaceState();
 	}

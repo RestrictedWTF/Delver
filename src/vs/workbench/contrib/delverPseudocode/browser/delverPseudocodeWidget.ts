@@ -22,6 +22,7 @@ import { IDelverSurface } from '../../../services/delver/browser/delverSurface.j
 import { IDelverDecompilerService, IDecompiledFunction, rangesForDecompilerLine } from '../../../services/delver/common/delverDecompilerService.js';
 import { FocusReason, IDelverFocusService } from '../../../services/delver/common/delverFocusService.js';
 import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
+import { IStatusbarEntryAccessor, IStatusbarService, StatusbarAlignment } from '../../../services/statusbar/browser/statusbar.js';
 import { DelverPseudocodeInput } from './delverPseudocodeInput.js';
 import { focusForPseudocodeLine, pseudocodeLineForRva } from './delverPseudocodeModel.js';
 
@@ -33,7 +34,14 @@ export class DelverPseudocodeWidget extends Disposable implements IDelverSurface
 	private readonly modelKey = generateUuid();
 	private message!: HTMLTextAreaElement;
 	private actions!: HTMLElement;
-	private provenance!: HTMLElement;
+	/**
+	 * Decompiler provenance lives in the status bar, not over the code.
+	 *
+	 * `principles.md` §1 requires it to stay visible — an analyst must always be
+	 * able to ask "how much should I trust this?" — but a floating badge sat on
+	 * top of the first lines of the function, which is the part most often read.
+	 */
+	private readonly provenanceEntry = this._register(new MutableDisposable<IStatusbarEntryAccessor>());
 	private editorContainer!: HTMLElement;
 	private editor!: CodeEditorWidget;
 	private dimension: Dimension | undefined;
@@ -53,6 +61,7 @@ export class DelverPseudocodeWidget extends Disposable implements IDelverSurface
 		@IDelverDecompilerService private readonly decompilerService: IDelverDecompilerService,
 		@IDelverSessionService private readonly sessionService: IDelverSessionService,
 		@IDelverFocusService private readonly focusService: IDelverFocusService,
+		@IStatusbarService private readonly statusbarService: IStatusbarService,
 	) {
 		super();
 	}
@@ -71,8 +80,6 @@ export class DelverPseudocodeWidget extends Disposable implements IDelverSurface
 		restartButton.label = localize('delverPseudocodeRestart', "Restart Decompiler");
 		this._register(restartButton.onDidClick(() => void this.recover(true)));
 		this.actions.style.display = 'none';
-		this.provenance = dom.append(container, dom.$('.delver-pseudocode-provenance'));
-		this.provenance.style.display = 'none';
 		this.editorContainer = dom.append(container, dom.$('.delver-pseudocode-editor'));
 
 		const options: IEditorConstructionOptions = {
@@ -172,17 +179,7 @@ export class DelverPseudocodeWidget extends Disposable implements IDelverSurface
 		this.message.style.display = 'none';
 		this.actions.style.display = 'none';
 		this.editorContainer.style.display = '';
-		if (result.provenance === 'saved') {
-			this.provenance.textContent = localize('delverPseudocodeSavedProvenance', "Saved · {0} {1}", result.backendId, result.backendVersion ?? '');
-		} else {
-			const requestMs = result.timings
-				? result.timings.targetOpenMs + result.timings.functionRecoveryMs + result.timings.decompilationMs + result.timings.serializationMs
-				: undefined;
-			this.provenance.textContent = requestMs === undefined
-				? localize('delverPseudocodeLiveProvenance', "Live · {0} {1}", result.backendId, result.backendVersion ?? '')
-				: localize('delverPseudocodeLiveTimedProvenance', "Live · {0} {1} · {2}", result.backendId, result.backendVersion ?? '', formatDuration(requestMs));
-		}
-		this.provenance.style.display = '';
+		this.showProvenance(result);
 
 		const modelResource = input.resource.with({ query: `surface=${this.modelKey}` });
 		this.inputDisposables.clear();
@@ -250,9 +247,35 @@ export class DelverPseudocodeWidget extends Disposable implements IDelverSurface
 		}
 	}
 
+	/** Publishes decompiler provenance to the status bar. */
+	private showProvenance(result: IDecompiledFunction): void {
+		let text: string;
+		if (result.provenance === 'saved') {
+			text = localize('delverPseudocodeSavedProvenance', "Saved · {0} {1}", result.backendId, result.backendVersion ?? '');
+		} else {
+			const requestMs = result.timings
+				? result.timings.targetOpenMs + result.timings.functionRecoveryMs + result.timings.decompilationMs + result.timings.serializationMs
+				: undefined;
+			text = requestMs === undefined
+				? localize('delverPseudocodeLiveProvenance', "Live · {0} {1}", result.backendId, result.backendVersion ?? '')
+				: localize('delverPseudocodeLiveTimedProvenance', "Live · {0} {1} · {2}", result.backendId, result.backendVersion ?? '', formatDuration(requestMs));
+		}
+		const name = localize('delverPseudocodeProvenanceName', "Delver Decompiler");
+		if (this.provenanceEntry.value) {
+			this.provenanceEntry.value.update({ name, text, ariaLabel: text });
+		} else {
+			this.provenanceEntry.value = this.statusbarService.addEntry(
+				{ name, text, ariaLabel: text },
+				'delver.pseudocode.provenance',
+				StatusbarAlignment.RIGHT,
+				100,
+			);
+		}
+	}
+
 	private showMessage(message: string, recoverable = false): void {
 		this.result = undefined;
-		this.provenance.style.display = 'none';
+		this.provenanceEntry.clear();
 		this.message.value = message;
 		this.message.style.display = '';
 		this.actions.style.display = recoverable ? '' : 'none';
@@ -269,6 +292,14 @@ export class DelverPseudocodeWidget extends Disposable implements IDelverSurface
 		if (visible && this.dimension) {
 			this.editor.layout(this.dimension);
 			this.applyFocus();
+		}
+		if (!visible) {
+			// The status bar is global. A hidden pseudocode pane must not keep
+			// claiming it, or the analyst reads provenance for something they
+			// are no longer looking at — the exact confusion §1 warns about.
+			this.provenanceEntry.clear();
+		} else if (this.result) {
+			this.showProvenance(this.result);
 		}
 	}
 

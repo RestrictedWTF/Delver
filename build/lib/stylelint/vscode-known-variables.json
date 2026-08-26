@@ -146,6 +146,7 @@
 		"--vscode-debugView-stateLabelForeground",
 		"--vscode-debugView-valueChangedHighlight",
 		"--vscode-delver-listing-functionName",
+		"--vscode-delver-zone-title",
 		"--vscode-descriptionForeground",
 		"--vscode-diffEditor-border",
 		"--vscode-diffEditor-diagonalFill",

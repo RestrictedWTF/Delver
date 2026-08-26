@@ -103,7 +103,7 @@ class DelverExportsViewContribution {
 			collapsed: true,
 			order: 40,
 		};
-		registerDelverTreeSurface(DelverSurfaceId.Exports, DelverZone.Navigator, viewDescriptor);
+		registerDelverTreeSurface(DelverSurfaceId.Exports, DelverZone.Primary, viewDescriptor);
 
 		Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViewWelcomeContent(
 			DELVER_EXPORTS_VIEW_ID,

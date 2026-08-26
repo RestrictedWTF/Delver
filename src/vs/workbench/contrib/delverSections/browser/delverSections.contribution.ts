@@ -57,7 +57,7 @@ class DelverSectionsViewContribution {
 			// not read on open. Collapsed keeps the panes that answer "what is
 			// this" above the fold.
 			collapsed: true,
-			order: 60,
+			order: 30,
 		};
 		registerDelverTreeSurface(DelverSurfaceId.Sections, DelverZone.Navigator, viewDescriptor);
 

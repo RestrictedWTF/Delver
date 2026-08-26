@@ -50,7 +50,7 @@ class DelverOverviewViewContribution {
 			collapsed: false,
 			order: 10,
 		};
-		registerDelverTreeSurface(DelverSurfaceId.Overview, DelverZone.Primary, viewDescriptor);
+		registerDelverTreeSurface(DelverSurfaceId.Overview, DelverZone.Navigator, viewDescriptor);
 
 		Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViewWelcomeContent(
 			DELVER_OVERVIEW_VIEW_ID,

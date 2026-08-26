@@ -41,7 +41,7 @@ registerDelverSurface({
 	id: DelverSurfaceId.Pseudocode,
 	title: localize2('delverPseudocodeSurface', "Pseudocode"),
 	zone: DelverZone.Primary,
-	order: 30,
+	order: 11,
 	ctor: new SyncDescriptor(DelverPseudocodeWidget),
 	contextKey: context => `${context.targetPath}:${context.functionRva?.toString(16) ?? 'none'}`,
 	setContext: (surface, context, token) => surface.setTarget(context.targetPath, context.functionRva, context.functionName, token),

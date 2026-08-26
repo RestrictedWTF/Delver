@@ -38,9 +38,21 @@
 .delver-workspace-zone-header {
 	display: flex;
 	align-items: center;
+	border-bottom: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border));
 	gap: var(--vscode-spacing-size80);
 	min-height: 32px;
 	padding: 0 var(--vscode-spacing-size80);
+}
+
+/*
+ * Zones are separated by a real rule, drawn at the zone boundary.
+ *
+ * Without one, the only visible vertical line was the seam between two surfaces
+ * sharing a zone, which reads as a zone divider in the wrong place. The rule
+ * belongs on the boundary the sash actually moves.
+ */
+.split-view-view:not(:first-child) > .delver-workspace-zone {
+	border-left: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border));
 }
 
 /*
@@ -56,7 +68,7 @@
 	white-space: nowrap;
 	font-size: var(--vscode-fontSize-label2);
 	font-weight: var(--vscode-fontWeight-semiBold);
-	color: var(--vscode-descriptionForeground);
+	color: var(--vscode-delver-zone-title);
 	text-transform: uppercase;
 }
 
@@ -87,6 +99,15 @@
 	text-overflow: ellipsis;
 	white-space: nowrap;
 	cursor: pointer;
+}
+
+/*
+ * A companion has no tab of its own: it rides its host's. Pseudocode always
+ * appears beside Listing, so offering it a tab advertised a choice the analyst
+ * does not have.
+ */
+.delver-workspace-segment.companion {
+	display: none;
 }
 
 .delver-workspace-segment:hover {
@@ -121,6 +142,15 @@
 
 .delver-workspace-surface.active {
 	display: block;
+}
+
+/*
+ * A surface sharing its zone with the one before it — Pseudocode beside
+ * Listing. Marked by the zone rather than by CSS sibling selectors, because the
+ * inactive surfaces between them are still in the DOM.
+ */
+.delver-workspace-surface.side-by-side {
+	border-left: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border));
 }
 
 .delver-workspace-zone-chrome {

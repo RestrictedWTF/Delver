@@ -63,14 +63,17 @@ export class DelverTargetLauncherView extends ViewPane {
 	protected override renderBody(container: HTMLElement): void {
 		super.renderBody(container);
 		container.classList.add('delver-target-launcher');
-		this.list = dom.append(container, dom.$('.delver-launcher-list'));
-
+		// The button comes first. It is the one thing an analyst needs on an empty
+		// workspace, and at the bottom of a long recents list it was below the
+		// fold exactly when it mattered most.
 		const open = dom.append(container, dom.$('button.delver-launcher-open')) as HTMLButtonElement;
 		open.type = 'button';
 		open.textContent = localize('delverLauncherOpen', "Open Target…");
 		this._register(dom.addDisposableListener(open, dom.EventType.CLICK, () => {
 			void this.commandService.executeCommand('delver.target.open');
 		}));
+
+		this.list = dom.append(container, dom.$('.delver-launcher-list'));
 
 		this._register(this.editorService.onDidEditorsChange(() => this.refresh()));
 		this.refresh();

@@ -60,7 +60,7 @@ class DelverImportsViewContribution {
 			collapsed: false,
 			order: 30,
 		};
-		registerDelverTreeSurface(DelverSurfaceId.Imports, DelverZone.Navigator, viewDescriptor);
+		registerDelverTreeSurface(DelverSurfaceId.Imports, DelverZone.Primary, viewDescriptor);
 
 		Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViewWelcomeContent(
 			DELVER_IMPORTS_VIEW_ID,

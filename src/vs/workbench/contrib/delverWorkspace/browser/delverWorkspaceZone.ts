@@ -11,7 +11,7 @@ import { onUnexpectedError } from '../../../../base/common/errors.js';
 import { Event } from '../../../../base/common/event.js';
 import { Disposable, DisposableStore, IDisposable, MutableDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
 import { IDelverSurface } from '../../../services/delver/browser/delverSurface.js';
-import { IDelverSurfaceContext, IDelverSurfaceDescriptor } from '../../../services/delver/browser/delverSurfaceRegistry.js';
+import { companionSurfaceIds, IDelverSurfaceContext, IDelverSurfaceDescriptor } from '../../../services/delver/browser/delverSurfaceRegistry.js';
 
 const HEADER_HEIGHT_FALLBACK = 32;
 
@@ -37,6 +37,8 @@ export class DelverWorkspaceZone extends Disposable implements IView<number> {
 	private readonly body: HTMLElement;
 	private readonly hosted = new Map<string, IHostedSurface>();
 	private visibleIds: readonly string[] = [];
+	private companions: ReadonlySet<string> = new Set();
+	private readonly companionsOf = new Map<string, readonly string[]>();
 	private context: IDelverSurfaceContext | undefined;
 	private zoneVisible = true;
 	private width = 0;
@@ -75,6 +77,13 @@ export class DelverWorkspaceZone extends Disposable implements IView<number> {
 	}
 
 	setDescriptors(descriptors: readonly IDelverSurfaceDescriptor[]): void {
+		this.companions = companionSurfaceIds(descriptors);
+		this.companionsOf.clear();
+		for (const descriptor of descriptors) {
+			if (descriptor.companions?.length) {
+				this.companionsOf.set(descriptor.id, descriptor.companions);
+			}
+		}
 		const nextIds = new Set(descriptors.map(descriptor => descriptor.id));
 		for (const [id, hosted] of this.hosted) {
 			if (!nextIds.has(id) || descriptors.find(descriptor => descriptor.id === id) !== hosted.descriptor) {
@@ -97,6 +106,8 @@ export class DelverWorkspaceZone extends Disposable implements IView<number> {
 			tab.type = 'button';
 			tab.setAttribute('role', 'tab');
 			tab.title = descriptor.title.value;
+			// A companion rides its host's tab, so it must not offer one.
+			tab.classList.toggle('companion', this.companions.has(descriptor.id));
 			const contextOperation = disposables.add(new MutableDisposable<IDisposable>());
 			const hosted: IHostedSurface = { descriptor, surface, container, tab, disposables, contextOperation, lastContextKey: undefined };
 			this.hosted.set(descriptor.id, hosted);
@@ -121,16 +132,24 @@ export class DelverWorkspaceZone extends Disposable implements IView<number> {
 			}
 		}
 
-		const retained = this.visibleIds.filter(id => this.hosted.has(id));
-		this.show(retained.length > 0 ? retained : descriptors[0] ? [descriptors[0].id] : []);
+		const selectable = descriptors.filter(descriptor => !this.companions.has(descriptor.id));
+		const retained = this.visibleIds.filter(id => this.hosted.has(id) && !this.companions.has(id));
+		this.show(retained.length > 0 ? retained : selectable[0] ? [selectable[0].id] : []);
 	}
 
 	show(ids: readonly string[]): void {
-		const next = ids.filter((id, index) => this.hosted.has(id) && ids.indexOf(id) === index);
+		const expanded: string[] = [];
+		for (const id of ids) {
+			expanded.push(id, ...(this.companionsOf.get(id) ?? []));
+		}
+		const next = expanded.filter((id, index) => this.hosted.has(id) && expanded.indexOf(id) === index);
 		this.visibleIds = next;
 		for (const [id, hosted] of this.hosted) {
 			const visible = this.zoneVisible && next.includes(id);
 			hosted.container.classList.toggle('active', visible);
+			// Anything after the first visible surface sits beside a sibling and
+			// needs a rule between them.
+			hosted.container.classList.toggle('side-by-side', visible && next.indexOf(id) > 0);
 			hosted.tab.classList.toggle('active', visible);
 			hosted.tab.setAttribute('aria-selected', String(visible));
 			hosted.surface.setVisible(visible);

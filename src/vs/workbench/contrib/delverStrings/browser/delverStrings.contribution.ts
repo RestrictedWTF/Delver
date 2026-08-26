@@ -43,7 +43,7 @@ Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane
 registerDelverSurface({
 	id: DelverSurfaceId.Strings,
 	title: localize2('delverStringsSurface', "Strings"),
-	zone: DelverZone.Navigator,
+	zone: DelverZone.Primary,
 	order: 20,
 	ctor: new SyncDescriptor(DelverStringsWidget),
 	contextKey: context => context.targetPath,
