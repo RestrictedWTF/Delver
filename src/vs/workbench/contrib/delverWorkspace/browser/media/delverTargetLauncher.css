@@ -1,0 +1,70 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+.delver-target-launcher {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+}
+
+.delver-target-launcher .delver-launcher-list {
+	flex: 1 1 auto;
+	overflow-y: auto;
+	min-height: 0;
+}
+
+.delver-target-launcher .delver-launcher-heading {
+	padding: 6px 12px 2px;
+	font-size: 11px;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	opacity: 0.7;
+}
+
+/* Rows are compact: this is a list to scan, not a settings page. */
+.delver-target-launcher .delver-launcher-row {
+	display: block;
+	width: 100%;
+	padding: 3px 12px;
+	border: none;
+	background: none;
+	color: inherit;
+	font-size: 13px;
+	text-align: left;
+	cursor: pointer;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.delver-target-launcher .delver-launcher-row:hover {
+	background-color: var(--vscode-list-hoverBackground);
+}
+
+.delver-target-launcher .delver-launcher-row:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
+.delver-target-launcher .delver-launcher-empty {
+	padding: 8px 12px;
+	opacity: 0.7;
+	font-size: 12px;
+}
+
+.delver-target-launcher .delver-launcher-open {
+	flex: 0 0 auto;
+	margin: 8px 12px;
+	padding: 4px 10px;
+	border: 1px solid var(--vscode-button-border, transparent);
+	border-radius: 2px;
+	background-color: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	cursor: pointer;
+}
+
+.delver-target-launcher .delver-launcher-open:hover {
+	background-color: var(--vscode-button-hoverBackground);
+}

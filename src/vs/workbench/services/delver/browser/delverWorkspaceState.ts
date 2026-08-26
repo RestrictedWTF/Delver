@@ -45,6 +45,37 @@ export class DelverWorkspaceStateStore {
 	}
 }
 
+const RECENTS_KEY = 'delver.workspace.recentTargets';
+const RECENTS_LIMIT = 10;
+
+/**
+ * Recently opened targets, most recent first.
+ *
+ * Application-scoped rather than workspace-scoped: an analyst opens the same
+ * sample from several folders, and a recents list that resets per window is a
+ * list nobody uses. Kept separate from layout state, which is genuinely
+ * per-target and per-workspace.
+ */
+export class DelverRecentTargetsStore {
+
+	constructor(private readonly storageService: IStorageService) { }
+
+	list(): readonly string[] {
+		const stored = this.storageService.getObject<string[]>(RECENTS_KEY, StorageScope.APPLICATION, []);
+		if (!Array.isArray(stored)) {
+			return [];
+		}
+		// Stored data is not trusted to still match this shape — a downgrade or a
+		// hand-edited storage file would otherwise render `undefined` as a row.
+		return stored.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0).slice(0, RECENTS_LIMIT);
+	}
+
+	add(targetPath: string): void {
+		const next = [targetPath, ...this.list().filter(entry => entry !== targetPath)].slice(0, RECENTS_LIMIT);
+		this.storageService.store(RECENTS_KEY, next, StorageScope.APPLICATION, StorageTarget.MACHINE);
+	}
+}
+
 export function normalizeDelverWorkspaceState(value: Partial<IDelverWorkspaceState>): IDelverWorkspaceState {
 	return {
 		navigatorWidth: validWidth(value.navigatorWidth, DEFAULT_DELVER_WORKSPACE_STATE.navigatorWidth),

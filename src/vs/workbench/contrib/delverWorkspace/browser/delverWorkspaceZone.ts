@@ -9,7 +9,7 @@ import { IView } from '../../../../base/browser/ui/splitview/splitview.js';
 import { CancellationTokenSource } from '../../../../base/common/cancellation.js';
 import { onUnexpectedError } from '../../../../base/common/errors.js';
 import { Event } from '../../../../base/common/event.js';
-import { Disposable, DisposableStore, MutableDisposable } from '../../../../base/common/lifecycle.js';
+import { Disposable, DisposableStore, IDisposable, MutableDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
 import { IDelverSurface } from '../../../services/delver/browser/delverSurface.js';
 import { IDelverSurfaceContext, IDelverSurfaceDescriptor } from '../../../services/delver/browser/delverSurfaceRegistry.js';
 
@@ -21,7 +21,7 @@ interface IHostedSurface {
 	readonly container: HTMLElement;
 	readonly tab: HTMLButtonElement;
 	readonly disposables: DisposableStore;
-	readonly contextOperation: MutableDisposable<CancellationTokenSource>;
+	readonly contextOperation: MutableDisposable<IDisposable>;
 	lastContextKey: string | undefined;
 }
 
@@ -82,7 +82,7 @@ export class DelverWorkspaceZone extends Disposable implements IView<number> {
 			tab.type = 'button';
 			tab.setAttribute('role', 'tab');
 			tab.title = descriptor.title.value;
-			const contextOperation = disposables.add(new MutableDisposable<CancellationTokenSource>());
+			const contextOperation = disposables.add(new MutableDisposable<IDisposable>());
 			const hosted: IHostedSurface = { descriptor, surface, container, tab, disposables, contextOperation, lastContextKey: undefined };
 			this.hosted.set(descriptor.id, hosted);
 			this.updateTabLabel(hosted, undefined);
@@ -133,7 +133,15 @@ export class DelverWorkspaceZone extends Disposable implements IView<number> {
 	}
 
 	setContext(context: IDelverSurfaceContext): void {
+		// Recorded even while hidden, so `show()` can bind the current context on
+		// the way back in — but no binding is issued now. `visibleIds` names the
+		// *selected* segments, which stay selected while the zone itself is
+		// hidden; binding off that alone would send analysis requests for a
+		// workspace nobody is looking at.
 		this.context = context;
+		if (!this.zoneVisible) {
+			return;
+		}
 		for (const id of this.visibleIds) {
 			const hosted = this.hosted.get(id);
 			if (hosted) {
@@ -162,11 +170,28 @@ export class DelverWorkspaceZone extends Disposable implements IView<number> {
 		if (contextKey !== undefined && contextKey === hosted.lastContextKey) {
 			return;
 		}
-		hosted.contextOperation.value?.cancel();
 		hosted.lastContextKey = contextKey;
 		const source = new CancellationTokenSource();
-		hosted.contextOperation.value = source;
-		Promise.resolve(setContext(hosted.surface, context, source.token)).catch(error => {
+		let settled = false;
+		// Held as a disposable that *cancels*. `CancellationTokenSource.dispose()`
+		// defaults to `cancel: false`, so storing the source directly would let
+		// `contextOperation.clear()` — which is how hiding a segment tears this
+		// down — drop the source without cancelling, and the in-flight binding
+		// would still land in a surface the analyst can no longer see.
+		hosted.contextOperation.value = toDisposable(() => {
+			source.dispose(true);
+			// Torn down before it finished: the surface never received this
+			// context, so the memo must not claim it did. Leaving it set would
+			// make the next `show()` skip the rebind and strand the segment
+			// showing whatever it held before.
+			if (!settled) {
+				hosted.lastContextKey = undefined;
+			}
+		});
+		Promise.resolve(setContext(hosted.surface, context, source.token)).then(() => {
+			settled = true;
+		}, error => {
+			settled = true;
 			if (!source.token.isCancellationRequested) {
 				onUnexpectedError(error);
 			}

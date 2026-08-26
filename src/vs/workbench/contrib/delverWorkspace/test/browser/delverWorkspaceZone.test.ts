@@ -9,7 +9,8 @@ import { Disposable } from '../../../../../base/common/lifecycle.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { SyncDescriptor } from '../../../../../platform/instantiation/common/descriptors.js';
 import { DelverZone, IDelverSurface } from '../../../../services/delver/browser/delverSurface.js';
-import { IDelverSurfaceDescriptor } from '../../../../services/delver/browser/delverSurfaceRegistry.js';
+import { IDelverSurfaceContext, IDelverSurfaceDescriptor } from '../../../../services/delver/browser/delverSurfaceRegistry.js';
+import { IDelverFocus } from '../../../../services/delver/common/delverFocusService.js';
 import { DelverWorkspaceZone } from '../../browser/delverWorkspaceZone.js';
 
 class RecordingSurface extends Disposable implements IDelverSurface {
@@ -20,6 +21,10 @@ class RecordingSurface extends Disposable implements IDelverSurface {
 	layout(dimension: Dimension): void { this.layouts.push(dimension); }
 	setVisible(visible: boolean): void { this.visibility.push(visible); }
 	focus(): void { }
+}
+
+function surfaceContext(targetPath: string): IDelverSurfaceContext {
+	return { targetPath, focus: { moment: { kind: 'file' } } as unknown as IDelverFocus };
 }
 
 function descriptor(id: string, zone: DelverZone): IDelverSurfaceDescriptor {
@@ -65,5 +70,83 @@ suite('Delver workspace zone', () => {
 			inspectorLayoutsAfterSwitch: 1,
 			inspectorLastLayout: new Dimension(280, 568),
 		});
+	});
+
+	test('a hidden zone binds no context, and cancels a binding still in flight', () => {
+		const bindings: { key: string; cancelled: () => boolean }[] = [];
+		const contextual: IDelverSurfaceDescriptor = {
+			...descriptor('listing', DelverZone.Primary),
+			contextKey: context => context.targetPath,
+			setContext: (_surface, context, token) => {
+				bindings.push({ key: context.targetPath, cancelled: () => token.isCancellationRequested });
+				// Never settles: a real binding is an async analysis request, and
+				// the point here is what happens to it when the zone hides.
+				return new Promise<void>(() => { });
+			},
+		};
+		const zone = disposables.add(new DelverWorkspaceZone('Primary', 360, () => new RecordingSurface(), () => { }));
+		zone.setDescriptors([contextual]);
+
+		zone.setZoneVisible(false);
+		zone.setContext(surfaceContext('a.exe'));
+		const boundWhileHidden = bindings.length;
+
+		zone.setZoneVisible(true);
+		const boundWhenShown = bindings.length;
+
+		zone.setZoneVisible(false);
+
+		assert.deepStrictEqual({
+			boundWhileHidden,
+			boundWhenShown,
+			inFlightCancelledOnHide: bindings.at(-1)?.cancelled(),
+		}, {
+			// Hidden zones must not issue analysis requests for a workspace
+			// nobody is looking at, and a request already running must not land
+			// into a surface that has since been hidden.
+			boundWhileHidden: 0,
+			boundWhenShown: 1,
+			inFlightCancelledOnHide: true,
+		});
+	});
+
+	test('a binding cancelled mid-flight is re-issued when the zone comes back', () => {
+		let bindCount = 0;
+		const contextual: IDelverSurfaceDescriptor = {
+			...descriptor('listing', DelverZone.Primary),
+			contextKey: context => context.targetPath,
+			setContext: () => { bindCount++; return new Promise<void>(() => { }); },
+		};
+		const zone = disposables.add(new DelverWorkspaceZone('Primary', 360, () => new RecordingSurface(), () => { }));
+		zone.setDescriptors([contextual]);
+		zone.setZoneVisible(true);
+		zone.setContext(surfaceContext('a.exe'));
+
+		// Hidden while the binding is still running, then shown again with the
+		// same context. The surface never received it, so it must be re-issued —
+		// the memo that suppresses redundant binds must not outlive a cancel.
+		zone.setZoneVisible(false);
+		zone.setZoneVisible(true);
+
+		assert.strictEqual(bindCount, 2);
+	});
+
+	test('re-showing with unchanged context does not re-issue the binding', () => {
+		let bindCount = 0;
+		const contextual: IDelverSurfaceDescriptor = {
+			...descriptor('listing', DelverZone.Primary),
+			contextKey: context => context.targetPath,
+			setContext: () => { bindCount++; },
+		};
+		const zone = disposables.add(new DelverWorkspaceZone('Primary', 360, () => new RecordingSurface(), () => { }));
+		zone.setDescriptors([contextual]);
+		zone.setZoneVisible(true);
+
+		zone.setContext(surfaceContext('a.exe'));
+		zone.setContext(surfaceContext('a.exe'));
+		const afterSameContext = bindCount;
+		zone.setContext(surfaceContext('b.exe'));
+
+		assert.deepStrictEqual({ afterSameContext, afterNewContext: bindCount }, { afterSameContext: 1, afterNewContext: 2 });
 	});
 });

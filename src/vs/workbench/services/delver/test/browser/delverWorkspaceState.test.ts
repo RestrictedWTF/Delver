@@ -5,8 +5,18 @@
 
 import * as assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
+import { IStorageService, StorageScope } from '../../../../../platform/storage/common/storage.js';
 import { DelverSurfaceId } from '../../browser/delverSurface.js';
-import { normalizeDelverWorkspaceState } from '../../browser/delverWorkspaceState.js';
+import { DelverRecentTargetsStore, normalizeDelverWorkspaceState } from '../../browser/delverWorkspaceState.js';
+
+/** Minimal object-store stand-in; only the two methods the store calls. */
+function memoryStorage(seed?: unknown): IStorageService {
+	let value = seed;
+	return {
+		getObject: (_key: string, _scope: StorageScope, fallback: object) => value ?? fallback,
+		store: (_key: string, next: unknown) => { value = next; },
+	} as unknown as IStorageService;
+}
 
 suite('Delver workspace state', () => {
 	ensureNoDisposablesAreLeakedInTestSuite();
@@ -39,5 +49,37 @@ suite('Delver workspace state', () => {
 			inspectorSurfaceId: DelverSurfaceId.Xrefs,
 			primaryMode: 'overview',
 		});
+	});
+
+	test('recent targets are most-recent-first, deduplicated, and capped', () => {
+		const store = new DelverRecentTargetsStore(memoryStorage());
+
+		store.add('a.exe');
+		store.add('b.exe');
+		store.add('a.exe');
+		const afterRepeat = store.list();
+
+		for (let i = 0; i < 12; i++) {
+			store.add(`sample${i}.exe`);
+		}
+
+		assert.deepStrictEqual({
+			afterRepeat: [...afterRepeat],
+			capped: store.list().length,
+			newestFirst: store.list()[0],
+		}, {
+			// Re-opening a target promotes it rather than listing it twice.
+			afterRepeat: ['a.exe', 'b.exe'],
+			capped: 10,
+			newestFirst: 'sample11.exe',
+		});
+	});
+
+	test('hostile or downgraded stored data never reaches the launcher', () => {
+		assert.deepStrictEqual(
+			[...new DelverRecentTargetsStore(memoryStorage([null, 'a.exe', 42, '', { path: 'b.exe' }])).list()],
+			['a.exe'],
+		);
+		assert.deepStrictEqual([...new DelverRecentTargetsStore(memoryStorage('not-an-array')).list()], []);
 	});
 });

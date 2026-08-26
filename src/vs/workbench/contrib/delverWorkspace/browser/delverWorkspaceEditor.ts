@@ -8,7 +8,7 @@ import './media/delverWorkspace.css';
 import * as dom from '../../../../base/browser/dom.js';
 import { Dimension } from '../../../../base/browser/dom.js';
 import { Orientation, SplitView } from '../../../../base/browser/ui/splitview/splitview.js';
-import { CancellationToken } from '../../../../base/common/cancellation.js';
+import { CancellationToken, CancellationTokenSource } from '../../../../base/common/cancellation.js';
 import { isCancellationError, onUnexpectedError } from '../../../../base/common/errors.js';
 import { DisposableStore, MutableDisposable } from '../../../../base/common/lifecycle.js';
 import { localize } from '../../../../nls.js';
@@ -25,7 +25,7 @@ import { SyncDescriptor0 } from '../../../../platform/instantiation/common/descr
 import { DelverSurfaceId, DelverZone, IDelverSurface } from '../../../services/delver/browser/delverSurface.js';
 import { allDelverSurfaces, IDelverSurfaceContext, IDelverSurfaceDescriptor, onDidChangeDelverSurfaces, surfacesForZone } from '../../../services/delver/browser/delverSurfaceRegistry.js';
 import { DELVER_WORKSPACE_EDITOR_ID, DelverWorkspaceInput } from '../../../services/delver/browser/delverWorkspaceInput.js';
-import { DelverPrimaryMode, DelverWorkspaceStateStore, IDelverWorkspaceState } from '../../../services/delver/browser/delverWorkspaceState.js';
+import { DelverPrimaryMode, DelverRecentTargetsStore, DelverWorkspaceStateStore, IDelverWorkspaceState } from '../../../services/delver/browser/delverWorkspaceState.js';
 import { IDelverFocusService } from '../../../services/delver/common/delverFocusService.js';
 import { containingFunctionRva } from '../../../services/delver/common/delverFunctions.js';
 import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
@@ -60,7 +60,10 @@ export class DelverWorkspaceEditor extends EditorPane {
 	private restoreWidths = false;
 
 	private readonly inputDisposables = this._register(new MutableDisposable<DisposableStore>());
+	/** Cancels a superseded function refresh so a slow one cannot land last. */
+	private readonly functionsRefresh = this._register(new MutableDisposable<CancellationTokenSource>());
 	private readonly stateStore: DelverWorkspaceStateStore;
+	private readonly recentTargets: DelverRecentTargetsStore;
 
 	constructor(
 		group: IEditorGroup,
@@ -76,6 +79,7 @@ export class DelverWorkspaceEditor extends EditorPane {
 	) {
 		super(DelverWorkspaceEditor.ID, group, telemetryService, themeService, storageService);
 		this.stateStore = new DelverWorkspaceStateStore(storageService);
+		this.recentTargets = new DelverRecentTargetsStore(storageService);
 	}
 
 	protected createEditor(parent: HTMLElement): void {
@@ -137,6 +141,7 @@ export class DelverWorkspaceEditor extends EditorPane {
 		await super.setInput(input, options as never, context, token);
 		this.inputDisposables.clear();
 		this.targetPath = input.targetPath;
+		this.recentTargets.add(input.targetPath);
 		this.state = this.stateStore.load(input.targetPath);
 		this.restoreWidths = true;
 		this.targetLabel.textContent = input.getName();
@@ -177,19 +182,36 @@ export class DelverWorkspaceEditor extends EditorPane {
 			this.applyVisibleState();
 			this.updateSurfaceContext();
 		}));
+		// A hidden workspace must not act on global events. Its listeners stay
+		// live for as long as an input is set, so with two targets open an
+		// address focus in one would flip the other's primary mode — and
+		// `setPrimaryMode` persists, silently rewriting the hidden target's
+		// saved state. `setEditorVisible` resyncs context on the way back in.
 		store.add(this.focusService.onDidChangeFocus(event => {
+			if (!this.editorVisible) {
+				return;
+			}
 			if (event.focus.location?.space === 'Image') {
 				this.setPrimaryMode('reading');
 			}
 			this.updateSurfaceContext();
 		}));
-		store.add(this.workspaceService.onDidRequestSurface(id => this.showRequestedSurface(id)));
+		store.add(this.workspaceService.onDidRequestSurface(id => {
+			if (this.editorVisible) {
+				this.showRequestedSurface(id);
+			}
+		}));
 		store.add(this.sessionService.onDidChangeActiveSession(changed => {
 			if (!changed) {
 				return;
 			}
 			this.session = changed;
-			void this.refreshFunctions(CancellationToken.None).then(() => {
+			const source = new CancellationTokenSource();
+			this.functionsRefresh.value = source;
+			void this.refreshFunctions(source.token).then(() => {
+				if (source.token.isCancellationRequested || this.input !== input) {
+					return;
+				}
 				this.updateHeader();
 				this.updateSurfaceContext();
 			}).catch(onUnexpectedError);
@@ -220,6 +242,15 @@ export class DelverWorkspaceEditor extends EditorPane {
 		this.inspector.setZoneVisible(visible);
 		if (visible && this.dimension) {
 			this.layout(this.dimension);
+			// Focus moved while this workspace was hidden and it deliberately
+			// ignored those events, so its surfaces hold the context from
+			// whenever it was last shown. Push the current one.
+			//
+			// Context only — not the primary mode. Mode is the analyst's last
+			// explicit choice for *this* target and is persisted; retroactively
+			// flipping it to reading on the way back in would change a view
+			// while they were not looking, which `principles.md` §5 forbids.
+			this.updateSurfaceContext();
 		}
 	}
 
@@ -229,6 +260,7 @@ export class DelverWorkspaceEditor extends EditorPane {
 
 	override clearInput(): void {
 		this.inputDisposables.clear();
+		this.functionsRefresh.clear();
 		this.targetPath = undefined;
 		this.session = undefined;
 		this.functions = [];
@@ -310,7 +342,12 @@ export class DelverWorkspaceEditor extends EditorPane {
 				this.functions = result.functions;
 			}
 		} catch {
-			this.functions = [];
+			// A superseded refresh must not clear a good list. `functions` feeds
+			// `containingFunctionRva`, so emptying it here would silently tell
+			// Pseudocode that no function contains the cursor.
+			if (!token.isCancellationRequested) {
+				this.functions = [];
+			}
 		}
 	}
 

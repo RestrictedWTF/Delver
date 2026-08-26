@@ -486,7 +486,6 @@ import './services/delver/common/delverInterpretationService.js';
 import './services/delver/common/delverDecompilerService.js';
 import './services/delver/common/delverAgentService.js';
 import './services/delver/common/delverWorkspaceService.js';
-import './services/delver/browser/delverViewContainer.js';
 import './contrib/delverOverview/browser/delverOverview.contribution.js';
 import './contrib/delverPseudocode/browser/delverPseudocode.contribution.js';
 import './contrib/delverFunctions/browser/delverFunctions.contribution.js';
