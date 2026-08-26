@@ -283,17 +283,32 @@ failure §1 of the principles exists to prevent.
 
 ## 10. Migration
 
-Staged so the build is never broken:
+Staged so the build is never broken. All six landed:
 
-1. Extract surface widgets out of the existing `ViewPane`s, behavior-preserving.
-   Views keep working.
-2. Add the surface registry alongside `registerDelverView`.
-3. Build the workspace editor and zones; register surfaces into it.
-4. Move actions to selection-scoped menus; delete the `MenuId.ViewTitle` and
+1. ✅ Extract surface widgets out of the existing `ViewPane`s,
+   behavior-preserving. Views kept working throughout.
+2. ✅ Add the surface registry alongside `registerDelverView`.
+3. ✅ Build the workspace editor and zones; register surfaces into it.
+4. ✅ Move actions to selection-scoped menus; delete the `MenuId.ViewTitle` and
    `MenuId.ViewContainerTitle` contributions.
-5. Reduce the view container to the target launcher; delete `registerDelverView`.
-6. Records: ADR 0007, `ide-architecture.md` §1/§2/§4, the
-   `workbench.common.main.ts` row in `patch-surface.md`, `ledger.md`, `status.md`.
+5. ✅ Reduce the view container to the target launcher; delete
+   `registerDelverView` and `delverViewContainer.ts`.
+6. ✅ Records: ADR 0007, `ide-architecture.md` §1/§2/§4, the
+   `workbench.common.main.ts` row in `patch-surface.md`, `ledger.md`,
+   `status.md`.
+
+### What the migration taught, worth keeping
+
+Three defects had the same shape and none were caught by a type error: **a
+gate that assumed one host.** Actions resolved their listing with
+`instanceof DelverListingEditor`; `LISTING_ACTIVE` compared the active editor's
+id; and the zone bound context off its selected segments without asking whether
+the zone was visible. Each was silent — the feature simply did nothing, or did
+it for a workspace nobody was looking at.
+
+When adding anything that acts on "the current listing", state which host it
+means. If the answer is "either", it must not be phrased as a question about
+editors.
 
 ## 11. What must be tested
 

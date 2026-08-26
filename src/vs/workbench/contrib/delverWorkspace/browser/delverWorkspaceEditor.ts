@@ -9,11 +9,13 @@ import * as dom from '../../../../base/browser/dom.js';
 import { Dimension } from '../../../../base/browser/dom.js';
 import { Orientation, SplitView } from '../../../../base/browser/ui/splitview/splitview.js';
 import { CancellationToken, CancellationTokenSource } from '../../../../base/common/cancellation.js';
+import { toAction } from '../../../../base/common/actions.js';
 import { isCancellationError, onUnexpectedError } from '../../../../base/common/errors.js';
 import { DisposableStore, MutableDisposable } from '../../../../base/common/lifecycle.js';
 import { localize } from '../../../../nls.js';
 import { HiddenItemStrategy, MenuWorkbenchToolBar } from '../../../../platform/actions/browser/toolbar.js';
 import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
+import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
 import { IFunctionWire } from '../../../../platform/delver/common/protocol.generated.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { IStorageService } from '../../../../platform/storage/common/storage.js';
@@ -22,6 +24,7 @@ import { IThemeService } from '../../../../platform/theme/common/themeService.js
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
+import { IEditorService, SIDE_GROUP } from '../../../services/editor/common/editorService.js';
 import { SyncDescriptor0 } from '../../../../platform/instantiation/common/descriptors.js';
 import { DelverSurfaceId, DelverZone, IDelverSurface, MenuDelverPrimaryChrome } from '../../../services/delver/browser/delverSurface.js';
 import { allDelverSurfaces, IDelverSurfaceContext, IDelverSurfaceDescriptor, onDidChangeDelverSurfaces, surfacesForZone } from '../../../services/delver/browser/delverSurfaceRegistry.js';
@@ -77,6 +80,8 @@ export class DelverWorkspaceEditor extends EditorPane {
 		@IDelverFocusService private readonly focusService: IDelverFocusService,
 		@IDelverInterpretationService private readonly interpretationService: IDelverInterpretationService,
 		@IDelverWorkspaceService private readonly workspaceService: IDelverWorkspaceService,
+		@IContextMenuService private readonly contextMenuService: IContextMenuService,
+		@IEditorService private readonly editorService: IEditorService,
 	) {
 		super(DelverWorkspaceEditor.ID, group, telemetryService, themeService, storageService);
 		this.stateStore = new DelverWorkspaceStateStore(storageService);
@@ -109,6 +114,8 @@ export class DelverWorkspaceEditor extends EditorPane {
 			NAVIGATOR_MINIMUM_WIDTH,
 			createSurface,
 			id => this.selectNavigator(id),
+			undefined,
+			(id, anchor) => this.showSegmentContextMenu(id, anchor),
 		));
 		this.primary = this._register(new DelverWorkspaceZone(
 			localize('delverWorkspacePrimary', "Primary"),
@@ -121,12 +128,15 @@ export class DelverWorkspaceEditor extends EditorPane {
 				hiddenItemStrategy: HiddenItemStrategy.NoHide,
 				toolbarOptions: { primaryGroup: 'navigation' },
 			}),
+			(id, anchor) => this.showSegmentContextMenu(id, anchor),
 		));
 		this.inspector = this._register(new DelverWorkspaceZone(
 			localize('delverWorkspaceInspector', "Inspector"),
 			INSPECTOR_MINIMUM_WIDTH,
 			createSurface,
 			id => this.selectInspector(id),
+			undefined,
+			(id, anchor) => this.showSegmentContextMenu(id, anchor),
 		));
 
 		this.splitView = this._register(new SplitView<number>(this.splitContainer, {
@@ -277,6 +287,56 @@ export class DelverWorkspaceEditor extends EditorPane {
 		super.clearInput();
 	}
 
+	/**
+	 * Offers to open a segment as its own editor tab.
+	 *
+	 * Tear-off is what makes comparison work — freeze one function in a tab,
+	 * keep navigating in the workspace (`principles.md` §5) — but a capability
+	 * with no affordance is a capability nobody uses, and right-click on the
+	 * thing itself is where an analyst looks first. Only surfaces that declare
+	 * `tearOff` and can produce an input for the current context offer it.
+	 */
+	private showSegmentContextMenu(id: string, anchor: HTMLElement): void {
+		const descriptor = allDelverSurfaces().find(surface => surface.id === id);
+		const context = this.surfaceContext();
+		if (!descriptor?.tearOff || !context) {
+			return;
+		}
+		const input = descriptor.tearOff(context);
+		if (!input) {
+			return;
+		}
+		this.contextMenuService.showContextMenu({
+			getAnchor: () => anchor,
+			getActions: () => [toAction({
+				id: 'delver.workspace.tearOffSurface',
+				label: localize('delverTearOffSurface', "Open in Editor"),
+				run: () => {
+					void this.editorService.openEditor(input, { pinned: true }, SIDE_GROUP);
+				},
+			})],
+		});
+	}
+
+	private surfaceContext(): IDelverSurfaceContext | undefined {
+		const targetPath = this.targetPath;
+		const session = this.session;
+		if (!targetPath || !session) {
+			return undefined;
+		}
+		const focus = this.focusService.focus;
+		const location = focus.location;
+		const functionRva = location?.space === 'Image'
+			? containingFunctionRva(this.functions, location.address)
+			: undefined;
+		const functionName = functionRva === undefined ? undefined : this.interpretationService.nameAt({
+			kind: 'image',
+			contentHash: session.contentHash,
+			rva: functionRva,
+		});
+		return { targetPath, focus, functionRva, functionName };
+	}
+
 	private refreshDescriptors(): void {
 		const all = allDelverSurfaces();
 		const matches = (expression: Parameters<IContextKeyService['contextMatchesRules']>[0]) => this.contextKeyService.contextMatchesRules(expression);
@@ -359,22 +419,10 @@ export class DelverWorkspaceEditor extends EditorPane {
 	}
 
 	private updateSurfaceContext(): void {
-		const targetPath = this.targetPath;
-		const session = this.session;
-		if (!targetPath || !session) {
+		const surfaceContext = this.surfaceContext();
+		if (!surfaceContext) {
 			return;
 		}
-		const focus = this.focusService.focus;
-		const location = focus.location;
-		const functionRva = location?.space === 'Image'
-			? containingFunctionRva(this.functions, location.address)
-			: undefined;
-		const functionName = functionRva === undefined ? undefined : this.interpretationService.nameAt({
-			kind: 'image',
-			contentHash: session.contentHash,
-			rva: functionRva,
-		});
-		const surfaceContext: IDelverSurfaceContext = { targetPath, focus, functionRva, functionName };
 		this.navigator.setContext(surfaceContext);
 		this.primary.setContext(surfaceContext);
 		this.inspector.setContext(surfaceContext);

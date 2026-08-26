@@ -53,6 +53,12 @@ export class DelverWorkspaceZone extends Disposable implements IView<number> {
 		 * stays constructible in a test.
 		 */
 		renderChrome?: (container: HTMLElement) => IDisposable,
+		/**
+		 * Right-click on a segment tab. The host decides what to offer, because
+		 * tearing a surface off means opening an `EditorInput` and the zone has
+		 * no editor service of its own.
+		 */
+		private readonly onSegmentContextMenu?: (id: string, anchor: HTMLElement) => void,
 	) {
 		super();
 		this.minimumSize = minimumSize;
@@ -96,6 +102,10 @@ export class DelverWorkspaceZone extends Disposable implements IView<number> {
 			this.hosted.set(descriptor.id, hosted);
 			this.updateTabLabel(hosted, undefined);
 			disposables.add(dom.addDisposableListener(tab, dom.EventType.CLICK, () => this.selectSurface(descriptor.id)));
+			disposables.add(dom.addDisposableListener(tab, dom.EventType.CONTEXT_MENU, event => {
+				event.preventDefault();
+				this.onSegmentContextMenu?.(descriptor.id, tab);
+			}));
 			if (descriptor.badge) {
 				disposables.add(descriptor.badge(count => this.updateTabLabel(hosted, count)));
 			}

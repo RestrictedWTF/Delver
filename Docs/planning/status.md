@@ -13,6 +13,41 @@ something is the way it is, see [adr/](../history/adr/).
 
 ## Just landed
 
+The workspace redesign is structurally complete. Delver's eleven analysis
+surfaces no longer live as `ViewPane`s in one sidebar container; they are
+segments of a three-zone workspace editor, one editor per target. Navigator
+answers *what exists in this binary*, Primary *what am I reading*, Inspector
+*what does the cursor touch*. Each zone is an independent column with its own
+scroll, so no surface can shrink another — the property the container could not
+provide, and the reason opening any pane used to resize every other one.
+
+The sidebar container survives with a single view, a target launcher listing
+open and recent targets. It exists only because an activity-bar entry *is* a
+view container upstream; keeping the icon without one would mean patching
+`activitybarPart.ts`. Its one view earns its place rather than being a stub.
+
+Actions no longer bind to containers. `delverSelectionKind` and
+`delverSelectionAddress` carry what is selected, and object-scoped actions
+contribute to one `MenuDelverSelectionContext` — so "Generate Signature" cannot
+appear while a section is selected, because it is not an action on sections.
+Four dead `MenuId.ViewTitle` contributions are gone. A zone header now carries
+only view state: pin, per `principles.md` §5.
+
+**The lesson worth carrying forward:** every serious defect found in this work
+had one shape — *a gate that assumed a single host*, failing silently. Actions
+resolved the listing with `instanceof DelverListingEditor`. `LISTING_ACTIVE`
+compared the active editor's id, which disabled every listing action inside the
+workspace. A zone bound context off its selected segments without asking whether
+it was visible, so hidden workspaces issued analysis requests and rewrote each
+other's persisted state. None produced a type error.
+
+**Not yet done:** the workbench has never been launched against this. Typecheck
+is clean and 262 Delver browser tests pass, but no one has opened a target and
+watched the zones behave. That is the next thing, and it is the only remaining
+claim in this work that rests on reasoning rather than evidence.
+
+### Earlier this phase
+
 **Generate Signature...** now starts with an explicit policy choice:
 relocation-stable remains the recommended first item, cross-revision-stable
 uses retained earlier-revision proof, and unique-now keeps every current byte
