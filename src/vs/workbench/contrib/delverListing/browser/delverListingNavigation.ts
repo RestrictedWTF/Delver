@@ -206,8 +206,15 @@ export class NavigateBackAction extends Action2 {
 			}],
 			keybinding: {
 				when: LISTING_ACTIVE,
+				// Above `WorkbenchContrib` deliberately. Upstream's
+				// `workbench.action.navigateBack` claims Alt+Left at that weight with
+				// no `when` clause, so at `EditorContrib` this binding never fired and
+				// the key switched editor tabs instead of moving the address history.
+				// Upstream also claims `BrowserBack` — the Mouse4 key event — there,
+				// which is why the buttons are additionally handled as raw mouse
+				// events rather than left to the keybinding layer.
+				weight: KeybindingWeight.WorkbenchContrib + 1,
 				primary: KeyMod.Alt | KeyCode.LeftArrow,
-				weight: KeybindingWeight.EditorContrib,
 			},
 		});
 	}
@@ -233,8 +240,9 @@ export class NavigateForwardAction extends Action2 {
 			}],
 			keybinding: {
 				when: LISTING_ACTIVE,
+				// See Navigate Back: upstream owns Alt+Right at `WorkbenchContrib`.
+				weight: KeybindingWeight.WorkbenchContrib + 1,
 				primary: KeyMod.Alt | KeyCode.RightArrow,
-				weight: KeybindingWeight.EditorContrib,
 			},
 		});
 	}

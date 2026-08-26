@@ -229,6 +229,10 @@ export class DelverPseudocodeWidget extends Disposable implements IDelverSurface
 			location: { space: 'Image', address: focus.address },
 			selection: focus.selection,
 			selections: rangesForDecompilerLine(result, line).map(range => ({ start: range.startRva, end: range.endRva })),
+			// A caret walking down the decompilation fires once per line. This is
+			// the one publisher whose updates are a continuous movement rather
+			// than a jump, so it is the one that asks to be coalesced.
+			continuous: true,
 		}, FOCUS_ORIGIN, FocusReason.User);
 	}
 

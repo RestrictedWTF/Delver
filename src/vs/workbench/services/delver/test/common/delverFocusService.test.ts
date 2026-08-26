@@ -105,15 +105,31 @@ suite('DelverFocusService', () => {
 		assert.strictEqual(service.focus.selections, undefined);
 	});
 
-	test('nearby positions coalesce into one history entry', () => {
+	test('nearby positions of a continuous cursor coalesce into one history entry', () => {
 		const { service } = createService();
 
-		// Scrolling a few instructions is not a navigation.
+		// A caret walking down decompiled C is not three navigations.
+		service.setFocus({ location: at(0x1000n), continuous: true }, 'pseudocode', FocusReason.User);
+		service.setFocus({ location: at(0x1003n), continuous: true }, 'pseudocode', FocusReason.User);
+		service.setFocus({ location: at(0x1007n), continuous: true }, 'pseudocode', FocusReason.User);
+
+		assert.strictEqual(service.canGoBack, false, 'a moving caret must not fill the back stack');
+	});
+
+	test('nearby positions still record when they are separate navigations', () => {
+		const { service } = createService();
+
+		// Clicking one instruction after another inside a function is a few
+		// bytes apart and is exactly the movement back/forward exists for.
 		service.setFocus({ location: at(0x1000n) }, 'listing', FocusReason.User);
 		service.setFocus({ location: at(0x1003n) }, 'listing', FocusReason.User);
 		service.setFocus({ location: at(0x1007n) }, 'listing', FocusReason.User);
 
-		assert.strictEqual(service.canGoBack, false, 'scrolling must not fill the back stack');
+		service.back();
+		assert.strictEqual(hex(service.focus.location?.address), hex(0x1003n));
+		service.back();
+		assert.strictEqual(hex(service.focus.location?.address), hex(0x1000n));
+		assert.strictEqual(service.canGoBack, false);
 	});
 
 	test('distant positions create separate history entries', () => {
@@ -181,8 +197,8 @@ suite('DelverFocusService', () => {
 	test('the same address in a different space is a real navigation', () => {
 		const { service } = createService();
 
-		service.setFocus({ location: { space: 'Image', address: 0x1000n } }, 'listing', FocusReason.User);
-		service.setFocus({ location: { space: 'File', address: 0x1000n } }, 'hex', FocusReason.User);
+		service.setFocus({ location: { space: 'Image', address: 0x1000n }, continuous: true }, 'listing', FocusReason.User);
+		service.setFocus({ location: { space: 'File', address: 0x1000n }, continuous: true }, 'hex', FocusReason.User);
 
 		assert.strictEqual(service.canGoBack, true, 'coalescing must not span address spaces');
 	});

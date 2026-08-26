@@ -63,6 +63,24 @@ export interface IFocusUpdate {
 	readonly location?: ILocation | null;
 	readonly selection?: IRange | null;
 	readonly selections?: readonly IRange[] | null;
+
+	/**
+	 * Whether this update is one step of a *continuously moving cursor* rather
+	 * than a jump to somewhere new.
+	 *
+	 * Only continuous updates are proximity-coalesced into the previous history
+	 * entry. A caret walking down decompiled C emits one update per line, and
+	 * without this the back button walks an instruction at a time and becomes
+	 * useless — which is how it behaves in several tools that shipped without
+	 * it.
+	 *
+	 * It must stay opt-in. Distance cannot tell the two apart: clicking one
+	 * instruction after another inside a function is a handful of bytes and is
+	 * unmistakably navigation, so inferring "not a navigation" from proximity
+	 * silently drops exactly the movement an analyst does most while reading a
+	 * single function.
+	 */
+	readonly continuous?: boolean;
 }
 
 /**
@@ -92,11 +110,7 @@ export interface IDelverFocusService {
 
 /**
  * Addresses within this distance of the previous entry do not create a new
- * history entry.
- *
- * Scrolling three instructions is not a navigation. Without coalescing, the
- * back button walks one instruction at a time and becomes useless — which is
- * how it behaves in several tools that shipped without it.
+ * history entry, for continuous updates only (`IFocusUpdate.continuous`).
  */
 const HISTORY_COALESCE_BYTES = 0x40n;
 
@@ -159,7 +173,7 @@ export class DelverFocusService extends Disposable implements IDelverFocusServic
 
 		this._focus = next;
 		if (!this.navigating) {
-			this.record(next);
+			this.record(next, update.continuous === true);
 		}
 
 		this._onDidChangeFocus.fire({ focus: next, previous, origin, reason });
@@ -192,13 +206,14 @@ export class DelverFocusService extends Disposable implements IDelverFocusServic
 	}
 
 	/**
-	 * Appends to history, coalescing nearby positions and dropping any forward
-	 * entries — a new navigation from the middle of history truncates the rest,
-	 * matching how every back/forward stack behaves.
+	 * Appends to history, coalescing nearby positions of a continuously moving
+	 * cursor and dropping any forward entries — a new navigation from the middle
+	 * of history truncates the rest, matching how every back/forward stack
+	 * behaves.
 	 */
-	private record(focus: IDelverFocus): void {
+	private record(focus: IDelverFocus, continuous: boolean): void {
 		const current = this.index >= 0 ? this.history[this.index] : undefined;
-		if (current && isNearby(current, focus)) {
+		if (continuous && current && isNearby(current, focus)) {
 			this.history[this.index] = focus;
 			return;
 		}
@@ -247,7 +262,7 @@ function sameRanges(a: readonly IRange[] | undefined, b: readonly IRange[] | und
 registerSingleton(IDelverFocusService, DelverFocusService, InstantiationType.Delayed);
 
 /**
- * Whether `next` is close enough to `current` to be the same navigation.
+ * Whether `next` is close enough to `current` to be the same cursor movement.
  */
 function isNearby(current: IDelverFocus, next: IDelverFocus): boolean {
 	if (!current.location || !next.location) {
