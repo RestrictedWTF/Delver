@@ -30,6 +30,7 @@ import {
 import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
 import { DELVER_SELECTION_NONE, IDelverSelectionService, MenuDelverSelectionContext } from '../../../services/delver/common/delverSelection.js';
 import {
+	DELVER_LISTING_FOCUSED,
 	DELVER_LISTING_PINNED,
 	DELVER_NAVIGATION_ORIGIN,
 	shouldFollowWhilePinned,
@@ -39,7 +40,7 @@ import { DelverListingModel, IListingRow, IListingStaticRow } from './delverList
 import { mouseHistoryDirection } from './delverListingMouseNavigation.js';
 import { isInstructionHighlighted } from './delverListingHighlights.js';
 import { listingAddressLabel, listingMetadataRow } from './delverListingMetadata.js';
-import { IDelverListingHost, setActiveListing, touchActiveListing } from './delverActiveListing.js';
+import { activeListing, IDelverListingHost, setActiveListing, touchActiveListing } from './delverActiveListing.js';
 
 /** Identifies this view on the focus bus, so it can ignore its own echo. */
 const FOCUS_ORIGIN = 'delver.editor.listing';
@@ -76,6 +77,7 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 
 	private _pinned = false;
 	private readonly pinnedContext: IContextKey<boolean>;
+	private readonly listingFocusedContext: IContextKey<boolean>;
 
 	/**
 	 * Function entry addresses, in the `"0x..."` form rows carry.
@@ -107,6 +109,7 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 	) {
 		super();
 		this.pinnedContext = DELVER_LISTING_PINNED.bindTo(contextKeyService);
+		this.listingFocusedContext = DELVER_LISTING_FOCUSED.bindTo(contextKeyService);
 	}
 
 	get pinned(): boolean {
@@ -134,7 +137,10 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 		// side-by-side groups are both visible at once. Focus can, and it works
 		// the same whether this widget sits in an editor tab or a workspace zone.
 		const focusTracker = this._register(dom.trackFocus(this.container));
-		this._register(focusTracker.onDidFocus(() => touchActiveListing(this)));
+		this._register(focusTracker.onDidFocus(() => {
+			touchActiveListing(this);
+			this.syncListingActiveContext();
+		}));
 	}
 
 	/**
@@ -525,6 +531,20 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 
 	/** Broadcasts the selected row's address to the rest of the workbench. */
 	/**
+	 * Mirrors "is any listing live" into a context key.
+	 *
+	 * Derived from the shared active-listing stack rather than from this
+	 * widget's own focus, so two listings agree: whichever widget updates the
+	 * key last computes the same answer. Deliberately not driven by blur —
+	 * clicking a toolbar button or opening the context menu moves DOM focus out
+	 * of the table, and disabling every action at that moment would make them
+	 * unusable by mouse.
+	 */
+	private syncListingActiveContext(): void {
+		this.listingFocusedContext.set(activeListing() !== undefined);
+	}
+
+	/**
 	 * Reports what kind of object the selected row is.
 	 *
 	 * A listing row is an instruction unless it is a function's entry — the
@@ -667,6 +687,7 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 	 */
 	setVisible(visible: boolean): void {
 		this.activeRegistration.value = visible ? setActiveListing(this) : undefined;
+		this.syncListingActiveContext();
 		if (visible && this.table && this.dimension) {
 			this.layoutTable();
 			this.table.rerender();

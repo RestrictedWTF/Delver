@@ -47,6 +47,12 @@ export class DelverWorkspaceZone extends Disposable implements IView<number> {
 		minimumSize: number,
 		private readonly createSurface: (descriptor: IDelverSurfaceDescriptor) => IDelverSurface,
 		private readonly selectSurface: (id: string) => void,
+		/**
+		 * Fills the header's state slot — pin and sync only, never actions.
+		 * Passed as a callback so the zone needs no services of its own and
+		 * stays constructible in a test.
+		 */
+		renderChrome?: (container: HTMLElement) => IDisposable,
 	) {
 		super();
 		this.minimumSize = minimumSize;
@@ -56,6 +62,9 @@ export class DelverWorkspaceZone extends Disposable implements IView<number> {
 		heading.textContent = title;
 		this.tabs = dom.append(header, dom.$('.delver-workspace-segments'));
 		this.tabs.setAttribute('role', 'tablist');
+		if (renderChrome) {
+			this._register(renderChrome(dom.append(header, dom.$('.delver-workspace-zone-chrome'))));
+		}
 		this.body = dom.append(this.element, dom.$('.delver-workspace-zone-body'));
 	}
 

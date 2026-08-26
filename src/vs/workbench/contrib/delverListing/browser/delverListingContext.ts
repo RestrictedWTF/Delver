@@ -15,8 +15,21 @@ import { DELVER_LISTING_EDITOR_ID } from './delverListingInput.js';
  * these without importing each other.
  */
 
-/** True while a listing is the active editor. */
-export const LISTING_ACTIVE = ContextKeyExpr.equals(ActiveEditorContext.key, DELVER_LISTING_EDITOR_ID);
+/**
+ * True while a listing is focused in a workspace zone.
+ *
+ * A zone-hosted listing is not the active *editor* — the workspace is — so the
+ * editor-id test below cannot see it. Without this key every listing action
+ * would be disabled inside the workspace, which is where listings normally
+ * live.
+ */
+export const DELVER_LISTING_FOCUSED = new RawContextKey<boolean>('delverListingFocused', false);
+
+/** True while a listing is active, in either host. */
+export const LISTING_ACTIVE = ContextKeyExpr.or(
+	ContextKeyExpr.equals(ActiveEditorContext.key, DELVER_LISTING_EDITOR_ID),
+	DELVER_LISTING_FOCUSED,
+)!;
 
 /** True while the active listing is pinned. Drives the toolbar toggle. */
 export const DELVER_LISTING_PINNED = new RawContextKey<boolean>('delverListingPinned', false);

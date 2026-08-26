@@ -5,6 +5,7 @@
 
 import { Dimension } from '../../../../base/browser/dom.js';
 import { IDisposable } from '../../../../base/common/lifecycle.js';
+import { MenuId } from '../../../../platform/actions/common/actions.js';
 
 /**
  * Which question a surface answers, and therefore where it lives.
@@ -18,6 +19,18 @@ export enum DelverZone {
 	Primary = 'primary',
 	Inspector = 'inspector',
 }
+
+/**
+ * The Primary zone's chrome toolbar.
+ *
+ * A zone header may hold **only view state** — pin and sync — and nothing else,
+ * ever. That rule is the fix for actions accumulating in container chrome
+ * (`Docs/design/workspace.md` §5), and `principles.md` §5 requires pin to be
+ * visible without hovering, so it cannot simply live in the context menu.
+ *
+ * Only Primary has one today, because only Primary hosts a surface with a pin.
+ */
+export const MenuDelverPrimaryChrome = new MenuId('DelverPrimaryChrome');
 
 /** Stable ids shared by surface owners and the host without contrib imports. */
 export const DelverSurfaceId = {

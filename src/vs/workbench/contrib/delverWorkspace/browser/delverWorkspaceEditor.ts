@@ -12,6 +12,7 @@ import { CancellationToken, CancellationTokenSource } from '../../../../base/com
 import { isCancellationError, onUnexpectedError } from '../../../../base/common/errors.js';
 import { DisposableStore, MutableDisposable } from '../../../../base/common/lifecycle.js';
 import { localize } from '../../../../nls.js';
+import { HiddenItemStrategy, MenuWorkbenchToolBar } from '../../../../platform/actions/browser/toolbar.js';
 import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { IFunctionWire } from '../../../../platform/delver/common/protocol.generated.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
@@ -22,7 +23,7 @@ import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
 import { SyncDescriptor0 } from '../../../../platform/instantiation/common/descriptors.js';
-import { DelverSurfaceId, DelverZone, IDelverSurface } from '../../../services/delver/browser/delverSurface.js';
+import { DelverSurfaceId, DelverZone, IDelverSurface, MenuDelverPrimaryChrome } from '../../../services/delver/browser/delverSurface.js';
 import { allDelverSurfaces, IDelverSurfaceContext, IDelverSurfaceDescriptor, onDidChangeDelverSurfaces, surfacesForZone } from '../../../services/delver/browser/delverSurfaceRegistry.js';
 import { DELVER_WORKSPACE_EDITOR_ID, DelverWorkspaceInput } from '../../../services/delver/browser/delverWorkspaceInput.js';
 import { DelverPrimaryMode, DelverRecentTargetsStore, DelverWorkspaceStateStore, IDelverWorkspaceState } from '../../../services/delver/browser/delverWorkspaceState.js';
@@ -114,6 +115,12 @@ export class DelverWorkspaceEditor extends EditorPane {
 			PRIMARY_MINIMUM_WIDTH,
 			createSurface,
 			id => this.setPrimaryMode(id === DelverSurfaceId.Overview ? 'overview' : 'reading'),
+			container => this.instantiationService.createInstance(MenuWorkbenchToolBar, container, MenuDelverPrimaryChrome, {
+				// State toggles only, so an overflow menu would be hiding two
+				// controls that `principles.md` §5 requires to stay visible.
+				hiddenItemStrategy: HiddenItemStrategy.NoHide,
+				toolbarOptions: { primaryGroup: 'navigation' },
+			}),
 		));
 		this.inspector = this._register(new DelverWorkspaceZone(
 			localize('delverWorkspaceInspector', "Inspector"),

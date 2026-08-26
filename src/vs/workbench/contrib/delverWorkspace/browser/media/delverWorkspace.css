@@ -107,3 +107,10 @@
 .delver-workspace-surface.active {
 	display: block;
 }
+
+.delver-workspace-zone-chrome {
+	margin-left: auto;
+	display: flex;
+	align-items: center;
+	flex: 0 0 auto;
+}

@@ -29,6 +29,7 @@ import {
 	DELVER_NAVIGATION_ORIGIN,
 	LISTING_ACTIVE,
 } from './delverListingContext.js';
+import { MenuDelverPrimaryChrome } from '../../../services/delver/browser/delverSurface.js';
 import { activeListing } from './delverActiveListing.js';
 
 const NAVIGATION_ORIGIN = DELVER_NAVIGATION_ORIGIN;
@@ -531,12 +532,24 @@ export class TogglePinAction extends Action2 {
 				icon: Codicon.pinned,
 				title: localize('delverUnpinListing', "Unpin Listing"),
 			},
-			menu: [{
-				id: MenuId.EditorTitle,
-				when: LISTING_ACTIVE,
-				group: 'navigation',
-				order: 1,
-			}],
+			menu: [
+				{
+					id: MenuId.EditorTitle,
+					when: LISTING_ACTIVE,
+					group: 'navigation',
+					order: 1,
+				},
+				{
+					// Pin is view *state*, so it is one of the only two things a
+					// zone header may carry, and `principles.md` §5 requires it
+					// to be visible without hovering — comparing two functions
+					// depends on being able to freeze one side.
+					id: MenuDelverPrimaryChrome,
+					when: LISTING_ACTIVE,
+					group: 'navigation',
+					order: 1,
+				},
+			],
 		});
 	}
 
