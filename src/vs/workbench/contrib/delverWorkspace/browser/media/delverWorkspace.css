@@ -152,6 +152,8 @@
 	flex: 1;
 	min-height: 0;
 	overflow: hidden;
+	/* The companion sash is absolutely positioned against this. */
+	position: relative;
 }
 
 .delver-workspace-surface {

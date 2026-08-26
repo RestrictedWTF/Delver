@@ -20,13 +20,18 @@ import { RawContextKey } from '../../../../platform/contextkey/common/contextkey
  * analyst who turns it off means it for the pair — including a torn-off
  * pseudocode tab, where per-widget state would be most confusing.
  *
+ * Off by default. The caret in decompiled C moves constantly while reading, and
+ * having the disassembly chase it costs the analyst the instruction they were
+ * holding — so the quiet state is the one that does not move anything, and
+ * following is what they turn on.
+ *
  * Only the pseudocode → listing direction is affected. Selecting an address in
  * the listing still moves pseudocode, because that is navigation the analyst
  * just performed; pin is what stops that (§5's "reason, not origin" rule).
  */
-export const DELVER_PSEUDOCODE_SYNC = new RawContextKey<boolean>('delverPseudocodeSync', true);
+export const DELVER_PSEUDOCODE_SYNC = new RawContextKey<boolean>('delverPseudocodeSync', false);
 
-let enabled = true;
+let enabled = false;
 
 const onDidChange = new Emitter<boolean>();
 

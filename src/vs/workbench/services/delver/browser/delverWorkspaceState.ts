@@ -16,6 +16,12 @@ export interface IDelverWorkspaceState {
 	readonly navigatorVisible: boolean;
 	readonly primaryVisible: boolean;
 	readonly inspectorVisible: boolean;
+	/**
+	 * Fraction of the Primary zone given to Listing when Pseudocode sits beside
+	 * it. How much disassembly versus C an analyst wants depends on what they
+	 * are reading, so it is theirs to set and worth remembering per target.
+	 */
+	readonly primarySplitRatio: number;
 }
 
 export const DEFAULT_DELVER_WORKSPACE_STATE: IDelverWorkspaceState = {
@@ -27,6 +33,7 @@ export const DEFAULT_DELVER_WORKSPACE_STATE: IDelverWorkspaceState = {
 	navigatorVisible: true,
 	primaryVisible: true,
 	inspectorVisible: true,
+	primarySplitRatio: 0.5,
 };
 
 const STORAGE_PREFIX = 'delver.workspace.layout.';
@@ -91,6 +98,7 @@ export function normalizeDelverWorkspaceState(value: Partial<IDelverWorkspaceSta
 		// Hiding every zone would leave an empty editor with no way back, so a
 		// state that says so is treated as corrupt rather than obeyed.
 		...visibleZones(value),
+		primarySplitRatio: validRatio(value.primarySplitRatio, DEFAULT_DELVER_WORKSPACE_STATE.primarySplitRatio),
 	};
 }
 
@@ -101,6 +109,16 @@ function visibleZones(value: Partial<IDelverWorkspaceState>): Pick<IDelverWorksp
 	return navigatorVisible || primaryVisible || inspectorVisible
 		? { navigatorVisible, primaryVisible, inspectorVisible }
 		: { navigatorVisible: true, primaryVisible: true, inspectorVisible: true };
+}
+
+/**
+ * A split fraction, or the fallback.
+ *
+ * Bounded away from both edges: a stored 0 or 1 would restore a zone with one
+ * pane collapsed to nothing and no visible sash to drag back.
+ */
+function validRatio(value: number | undefined, fallback: number): number {
+	return typeof value === 'number' && Number.isFinite(value) && value >= 0.05 && value <= 0.95 ? value : fallback;
 }
 
 function validWidth(value: number | undefined, fallback: number): number {

@@ -5,6 +5,7 @@
 
 import * as dom from '../../../../base/browser/dom.js';
 import { Dimension } from '../../../../base/browser/dom.js';
+import { Orientation, Sash, SashState } from '../../../../base/browser/ui/sash/sash.js';
 import { IView } from '../../../../base/browser/ui/splitview/splitview.js';
 import { CancellationTokenSource } from '../../../../base/common/cancellation.js';
 import { onUnexpectedError } from '../../../../base/common/errors.js';
@@ -14,6 +15,14 @@ import { IDelverSurface } from '../../../services/delver/browser/delverSurface.j
 import { companionSurfaceIds, IDelverSurfaceContext, IDelverSurfaceDescriptor } from '../../../services/delver/browser/delverSurfaceRegistry.js';
 
 const HEADER_HEIGHT_FALLBACK = 32;
+
+/**
+ * Narrowest either side of the companion split may become, in pixels.
+ *
+ * A pane dragged to nothing cannot be dragged back — the sash lands on top of
+ * the zone edge and there is no visible handle left to grab.
+ */
+const MINIMUM_COMPANION_WIDTH = 120;
 
 interface IHostedSurface {
 	readonly descriptor: IDelverSurfaceDescriptor;
@@ -43,6 +52,10 @@ export class DelverWorkspaceZone extends Disposable implements IView<number> {
 	private zoneVisible = true;
 	private width = 0;
 	private height = 0;
+	private readonly sash: Sash;
+	/** Fraction of the zone's width given to the first of two visible surfaces. */
+	private splitRatio = 0.5;
+	private sashStartWidth = 0;
 
 	constructor(
 		title: string,
@@ -61,6 +74,8 @@ export class DelverWorkspaceZone extends Disposable implements IView<number> {
 		 * no editor service of its own.
 		 */
 		private readonly onSegmentContextMenu?: (id: string, anchor: HTMLElement) => void,
+		/** Persists the companion split when the analyst drags it. */
+		private readonly onDidChangeSplitRatio?: (ratio: number) => void,
 	) {
 		super();
 		this.minimumSize = minimumSize;
@@ -74,6 +89,54 @@ export class DelverWorkspaceZone extends Disposable implements IView<number> {
 			this._register(renderChrome(dom.append(header, dom.$('.delver-workspace-zone-chrome'))));
 		}
 		this.body = dom.append(this.element, dom.$('.delver-workspace-zone-body'));
+
+		// Listing and Pseudocode share this zone, and how much of it each
+		// deserves depends on what is being read — a dense loop wants the
+		// disassembly wide, a long function wants the C. The even split is only a
+		// starting point, so the boundary is draggable.
+		this.sash = this._register(new Sash(this.body, {
+			getVerticalSashLeft: () => this.firstSurfaceWidth(),
+			getVerticalSashHeight: () => Math.max(0, this.height - this.headerHeight()),
+		}, { orientation: Orientation.VERTICAL }));
+		this._register(this.sash.onDidStart(() => {
+			this.sashStartWidth = this.firstSurfaceWidth();
+		}));
+		this._register(this.sash.onDidChange(event => {
+			if (this.width <= 0) {
+				return;
+			}
+			const limit = Math.min(MINIMUM_COMPANION_WIDTH, this.width / 2);
+			const width = Math.max(limit, Math.min(this.width - limit, this.sashStartWidth + event.currentX - event.startX));
+			this.splitRatio = width / this.width;
+			this.layoutVisibleSurfaces();
+		}));
+		this._register(this.sash.onDidEnd(() => this.onDidChangeSplitRatio?.(this.splitRatio)));
+		// Double-click restores the even split, which is the only way back to it
+		// once dragged and the conventional gesture for exactly that.
+		this._register(this.sash.onDidReset(() => {
+			this.splitRatio = 0.5;
+			this.layoutVisibleSurfaces();
+			this.onDidChangeSplitRatio?.(this.splitRatio);
+		}));
+		this.sash.state = SashState.Disabled;
+	}
+
+	/** Restores a persisted companion split. */
+	setSplitRatio(ratio: number): void {
+		if (!Number.isFinite(ratio) || ratio <= 0 || ratio >= 1) {
+			return;
+		}
+		this.splitRatio = ratio;
+		this.layoutVisibleSurfaces();
+	}
+
+	private headerHeight(): number {
+		return this.tabs.parentElement?.offsetHeight || HEADER_HEIGHT_FALLBACK;
+	}
+
+	/** Width of the first surface when two share the zone. */
+	private firstSurfaceWidth(): number {
+		return Math.round(this.width * this.splitRatio);
 	}
 
 	setDescriptors(descriptors: readonly IDelverSurfaceDescriptor[]): void {
@@ -261,11 +324,27 @@ export class DelverWorkspaceZone extends Disposable implements IView<number> {
 		if (this.width <= 0 || this.height <= 0) {
 			return;
 		}
-		const headerHeight = this.tabs.parentElement?.offsetHeight || HEADER_HEIGHT_FALLBACK;
-		const visibleWidth = this.visibleIds.length > 0 ? this.width / this.visibleIds.length : this.width;
-		for (const id of this.visibleIds) {
-			this.hosted.get(id)?.surface.layout(new Dimension(visibleWidth, Math.max(0, this.height - headerHeight)));
+		const height = Math.max(0, this.height - this.headerHeight());
+		// The sash only makes sense for exactly two surfaces. Three would need a
+		// sash each and a policy for which one a drag steals from; nothing in the
+		// design puts three in a zone, so this stays an even split rather than
+		// guessing.
+		const split = this.visibleIds.length === 2;
+		this.sash.state = split ? SashState.Enabled : SashState.Disabled;
+		const first = split ? this.firstSurfaceWidth() : 0;
+		for (const [index, id] of this.visibleIds.entries()) {
+			const hosted = this.hosted.get(id);
+			if (!hosted) {
+				continue;
+			}
+			const width = split
+				? (index === 0 ? first : this.width - first)
+				: this.width / Math.max(1, this.visibleIds.length);
+			// `flex` alone would re-divide the zone evenly and undo the drag.
+			hosted.container.style.flex = `0 0 ${width}px`;
+			hosted.surface.layout(new Dimension(width, height));
 		}
+		this.sash.layout();
 	}
 
 	private updateTabLabel(hosted: IHostedSurface, count: number | undefined): void {

@@ -166,6 +166,7 @@ export class DelverWorkspaceEditor extends EditorPane {
 				toolbarOptions: { primaryGroup: 'navigation' },
 			}),
 			(id, anchor) => this.showSegmentContextMenu(id, anchor),
+			ratio => this.savePrimarySplitRatio(ratio),
 		));
 		this.inspector = this._register(new DelverWorkspaceZone(
 			localize('delverWorkspaceInspector', "Inspector"),
@@ -286,6 +287,7 @@ export class DelverWorkspaceEditor extends EditorPane {
 			this.restoreWidths = false;
 			this.splitView.resizeView(0, this.state.navigatorWidth);
 			this.splitView.resizeView(2, this.state.inspectorWidth);
+			this.primary.setSplitRatio(this.state.primarySplitRatio);
 		}
 	}
 
@@ -539,6 +541,14 @@ export class DelverWorkspaceEditor extends EditorPane {
 			navigatorWidth: this.splitView.getViewSize(0),
 			inspectorWidth: this.splitView.getViewSize(2),
 		};
+		this.persistWorkspaceState();
+	}
+
+	private savePrimarySplitRatio(ratio: number): void {
+		if (!this.state || !this.targetPath) {
+			return;
+		}
+		this.state = { ...this.state, primarySplitRatio: ratio };
 		this.persistWorkspaceState();
 	}
 

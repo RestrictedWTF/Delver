@@ -29,6 +29,7 @@ suite('Delver workspace state', () => {
 			inspectorSurfaceId: DelverSurfaceId.Review,
 			primarySurfaceId: DelverSurfaceId.Imports,
 			navigatorVisible: false,
+			primarySplitRatio: 0.7,
 		}), {
 			navigatorWidth: 320,
 			inspectorWidth: 360,
@@ -38,6 +39,7 @@ suite('Delver workspace state', () => {
 			navigatorVisible: false,
 			primaryVisible: true,
 			inspectorVisible: true,
+			primarySplitRatio: 0.7,
 		});
 
 		assert.deepStrictEqual(normalizeDelverWorkspaceState({
@@ -49,6 +51,7 @@ suite('Delver workspace state', () => {
 			navigatorVisible: false,
 			primaryVisible: false,
 			inspectorVisible: false,
+			primarySplitRatio: 0,
 		}), {
 			navigatorWidth: 280,
 			inspectorWidth: 280,
@@ -60,6 +63,8 @@ suite('Delver workspace state', () => {
 			navigatorVisible: true,
 			primaryVisible: true,
 			inspectorVisible: true,
+			// A pane collapsed to nothing leaves no sash to drag it back.
+			primarySplitRatio: 0.5,
 		});
 	});
 
