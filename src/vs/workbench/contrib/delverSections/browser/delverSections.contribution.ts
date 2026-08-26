@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { toErrorMessage } from '../../../../base/common/errorMessage.js';
 import { onUnexpectedError } from '../../../../base/common/errors.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
@@ -12,7 +13,8 @@ import { Registry } from '../../../../platform/registry/common/platform.js';
 import { TreeView, TreeViewPane } from '../../../browser/parts/views/treeView.js';
 import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { Extensions as ViewExtensions, ITreeViewDescriptor, IViewsRegistry } from '../../../common/views.js';
-import { registerDelverView } from '../../../services/delver/browser/delverViewContainer.js';
+import { DelverSurfaceId, DelverZone } from '../../../services/delver/browser/delverSurface.js';
+import { registerDelverTreeSurface } from '../../../services/delver/browser/delverTreeSurface.js';
 import {
 	FocusReason,
 	IDelverFocusService,
@@ -57,7 +59,7 @@ class DelverSectionsViewContribution {
 			collapsed: true,
 			order: 60,
 		};
-		registerDelverView(viewDescriptor);
+		registerDelverTreeSurface(DelverSurfaceId.Sections, DelverZone.Navigator, viewDescriptor);
 
 		// Without this the container opens onto empty trees and reads as broken
 		// rather than as waiting for a target.
@@ -77,6 +79,7 @@ class DelverSectionsViewContribution {
 			const token = ++generation;
 
 			if (!session) {
+				treeView.message = undefined;
 				dataProvider.setImageInfo(undefined);
 			} else {
 				try {
@@ -84,15 +87,25 @@ class DelverSectionsViewContribution {
 					if (token !== generation) {
 						return;
 					}
+					treeView.message = undefined;
 					dataProvider.setImageInfo(info);
 				} catch (error) {
 					if (token !== generation) {
 						return;
 					}
-					// Leave the previous contents alone rather than blanking the
-					// view: a failed refresh is not evidence the image changed.
+					// Holding the previous contents would be right for a retry
+					// *within* one session — a failed refresh is not evidence the
+					// image changed. This path is not that: it only runs when the
+					// active session changed, so those rows describe a different
+					// binary, and every one of them navigates into this one. Show
+					// nothing and say why.
+					dataProvider.setImageInfo(undefined);
+					treeView.message = localize(
+						'delverSectionsFailed',
+						"Could not load the sections: {0}",
+						toErrorMessage(error),
+					);
 					onUnexpectedError(error);
-					return;
 				}
 			}
 			treeView.refresh().catch(onUnexpectedError);

@@ -19,6 +19,21 @@ export enum DelverZone {
 	Inspector = 'inspector',
 }
 
+/** Stable ids shared by surface owners and the host without contrib imports. */
+export const DelverSurfaceId = {
+	Functions: 'delver.surface.functions',
+	Strings: 'delver.surface.strings',
+	Imports: 'delver.surface.imports',
+	Exports: 'delver.surface.exports',
+	Sections: 'delver.surface.sections',
+	Overview: 'delver.surface.overview',
+	Listing: 'delver.surface.listing',
+	Pseudocode: 'delver.surface.pseudocode',
+	Xrefs: 'delver.surface.xrefs',
+	Signatures: 'delver.surface.signatures',
+	Review: 'delver.surface.review',
+} as const;
+
 /**
  * A Delver surface: a plain widget, deliberately neither a `ViewPane` nor an
  * `EditorPane`, so that a workspace zone and a tear-off editor can host the

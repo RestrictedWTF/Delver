@@ -14,7 +14,8 @@ import { Registry } from '../../../../platform/registry/common/platform.js';
 import { TreeView, TreeViewPane } from '../../../browser/parts/views/treeView.js';
 import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { Extensions as ViewExtensions, ITreeViewDescriptor, IViewsRegistry } from '../../../common/views.js';
-import { registerDelverView } from '../../../services/delver/browser/delverViewContainer.js';
+import { DelverSurfaceId, DelverZone } from '../../../services/delver/browser/delverSurface.js';
+import { registerDelverTreeSurface } from '../../../services/delver/browser/delverTreeSurface.js';
 import { IDelverProjectService } from '../../../services/delver/common/delverProjectService.js';
 import { DELVER_TARGET_ATTACHED, DELVER_TARGET_OPEN, IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 import { CopyIdaPythonMatcherAction, CopySignaturePatternAction, DeleteSavedSignatureAction, ExportIdaPythonMatchersAction, GoToSignatureMatchAction, RegenerateRevisionSignatureAction, RenameSavedSignatureAction, ScanEarlierSignaturesAction, SearchBytePatternAction } from './delverSignaturesActions.js';
@@ -45,7 +46,7 @@ class DelverSignaturesViewContribution extends Disposable {
 			collapsed: false,
 			order: 75,
 		};
-		registerDelverView(viewDescriptor);
+		registerDelverTreeSurface(DelverSurfaceId.Signatures, DelverZone.Inspector, viewDescriptor);
 
 		const viewsRegistry = Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry);
 		viewsRegistry.registerViewWelcomeContent(DELVER_SIGNATURES_VIEW_ID, {

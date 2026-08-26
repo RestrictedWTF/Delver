@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { toErrorMessage } from '../../../../base/common/errorMessage.js';
 import { onUnexpectedError } from '../../../../base/common/errors.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
@@ -12,7 +13,8 @@ import { Registry } from '../../../../platform/registry/common/platform.js';
 import { TreeView } from '../../../browser/parts/views/treeView.js';
 import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { Extensions as ViewExtensions, ITreeViewDescriptor, IViewsRegistry } from '../../../common/views.js';
-import { registerDelverView } from '../../../services/delver/browser/delverViewContainer.js';
+import { DelverSurfaceId, DelverZone } from '../../../services/delver/browser/delverSurface.js';
+import { registerDelverTreeSurface } from '../../../services/delver/browser/delverTreeSurface.js';
 import { DelverFilterableTreeViewPane, registerDelverTreeFilterProvider } from '../../../services/delver/browser/delverFilterableTreeViewPane.js';
 import { registerInterpretationViewActions } from '../../../services/delver/browser/delverInterpretationEditing.js';
 import {
@@ -58,7 +60,7 @@ class DelverImportsViewContribution {
 			collapsed: false,
 			order: 30,
 		};
-		registerDelverView(viewDescriptor);
+		registerDelverTreeSurface(DelverSurfaceId.Imports, DelverZone.Navigator, viewDescriptor);
 
 		Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViewWelcomeContent(
 			DELVER_IMPORTS_VIEW_ID,
@@ -89,6 +91,7 @@ class DelverImportsViewContribution {
 			const token = ++generation;
 
 			if (!session) {
+				treeView.message = undefined;
 				dataProvider.setImports(undefined);
 			} else {
 				try {
@@ -96,13 +99,24 @@ class DelverImportsViewContribution {
 					if (token !== generation) {
 						return;
 					}
+					treeView.message = undefined;
 					dataProvider.setImports(result);
 				} catch (error) {
 					if (token !== generation) {
 						return;
 					}
+					// The session has already changed, so the modules on screen are
+					// the previous target's. Left up they would read as this image's
+					// imports — the single highest-signal claim this pane makes —
+					// and the "imports nothing" welcome would be just as false. Both
+					// are avoided by showing the reason instead.
+					dataProvider.setImports(undefined);
+					treeView.message = localize(
+						'delverImportsFailed',
+						"Could not load the imports: {0}",
+						toErrorMessage(error),
+					);
 					onUnexpectedError(error);
-					return;
 				}
 			}
 			treeView.refresh().catch(onUnexpectedError);

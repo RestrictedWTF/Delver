@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Codicon } from '../../../../base/common/codicons.js';
+import { toErrorMessage } from '../../../../base/common/errorMessage.js';
 import { onUnexpectedError } from '../../../../base/common/errors.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { localize, localize2 } from '../../../../nls.js';
@@ -22,7 +23,8 @@ import {
 	IViewsRegistry,
 	TreeItemCollapsibleState,
 } from '../../../common/views.js';
-import { registerDelverView } from '../../../services/delver/browser/delverViewContainer.js';
+import { DelverSurfaceId, DelverZone } from '../../../services/delver/browser/delverSurface.js';
+import { registerDelverTreeSurface } from '../../../services/delver/browser/delverTreeSurface.js';
 import { registerInterpretationViewActions } from '../../../services/delver/browser/delverInterpretationEditing.js';
 import {
 	FocusReason,
@@ -101,7 +103,7 @@ class DelverExportsViewContribution {
 			collapsed: true,
 			order: 40,
 		};
-		registerDelverView(viewDescriptor);
+		registerDelverTreeSurface(DelverSurfaceId.Exports, DelverZone.Navigator, viewDescriptor);
 
 		Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViewWelcomeContent(
 			DELVER_EXPORTS_VIEW_ID,
@@ -133,6 +135,7 @@ class DelverExportsViewContribution {
 			const token = ++generation;
 
 			if (!session) {
+				treeView.message = undefined;
 				dataProvider.setExports(undefined);
 			} else {
 				try {
@@ -140,13 +143,24 @@ class DelverExportsViewContribution {
 					if (token !== generation) {
 						return;
 					}
+					treeView.message = undefined;
 					dataProvider.setExports(exports);
 				} catch (error) {
 					if (token !== generation) {
 						return;
 					}
+					// This runs on a session change: the symbols on screen belong to
+					// the previous target, and each one navigates to its RVA in the
+					// new one. Falling back to the "exports nothing" welcome would be
+					// no better — that is a real answer about this image, and this is
+					// not an answer at all.
+					dataProvider.setExports(undefined);
+					treeView.message = localize(
+						'delverExportsFailed',
+						"Could not load the exports: {0}",
+						toErrorMessage(error),
+					);
 					onUnexpectedError(error);
-					return;
 				}
 			}
 			treeView.refresh().catch(onUnexpectedError);

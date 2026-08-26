@@ -100,12 +100,41 @@ A surface is a plain widget, not a `ViewPane` and not an `EditorPane`:
 
 ```ts
 interface IDelverSurface extends IDisposable {
-	readonly element: HTMLElement;
+	render(container: HTMLElement): void;
 	layout(dimension: Dimension): void;
 	setVisible(visible: boolean): void;
 	focus(): void;
 }
 ```
+
+### Context binding belongs to the descriptor
+
+The lifecycle contract above deliberately stays host-only. A surface descriptor
+may additionally provide a typed `setContext(surface, context, token)` binding.
+The workspace supplies the target path, current focus, and containing function;
+the contribution that owns the surface decides which of those are meaningful.
+Listing and Strings bind to the target, Pseudocode binds to the containing
+function, and the tree-backed Navigator and Inspector surfaces continue to
+follow the session and focus services directly.
+
+This is the answer to the contract gap found after Phase 1. Adding a mandatory
+`setTarget` to `IDelverSurface` would pretend that all three zones have the same
+ownership model. Downcasting inside the workspace would instead make the host
+depend on surface implementations. Descriptor-owned binding keeps the lifecycle
+contract honest and preserves the contrib boundary: the host invokes an opaque
+binding without knowing which widget it received.
+
+Context updates are cancellable and latest-wins. Disposing a zone cancels its
+binding before disposing the surface.
+
+### Primary transition
+
+Primary opens on Overview at full width. The first image-address focus switches
+it to the reading layout: Listing and Pseudocode side by side, each with its own
+height and scroll budget. Returning Home restores Overview. If the focused
+address is not owned by a detected function, Listing still follows it and
+Pseudocode says that no containing function is available; it never leaves stale
+output from the previous function on screen.
 
 Two hosts instantiate the same widget: the workspace zone, and a thin
 `EditorPane` for **tear-off**. Tearing a surface off opens it as a real editor
@@ -135,10 +164,18 @@ interface IDelverSurfaceDescriptor {
 	readonly order: number;
 	readonly when?: ContextKeyExpression;
 	readonly ctor: SyncDescriptor<IDelverSurface>;
+	readonly setContext?: (surface: IDelverSurface, context: IDelverSurfaceContext, token: CancellationToken) => Promise<void> | void;
+	readonly contextKey?: (context: IDelverSurfaceContext) => string;
 	readonly badge?: Event<number | undefined>;
-	readonly tearOff?: (focus: IFocus) => EditorInput;
+	readonly tearOff?: (context: IDelverSurfaceContext) => EditorInput | undefined;
 }
 ```
+
+Registration ids are unique. A second descriptor with the same id is rejected
+immediately, at registration, because allowing both to survive would render two
+indistinguishable segment tabs and move the failure away from its cause. The
+registry exposes registration as a disposable operation so tests and dynamic
+capability contributions do not leak module-global state.
 
 This is required by invariant 9 — the workspace hosts surfaces owned by
 `delverFunctions`, `delverXrefs` and the rest, and may not import any of them.

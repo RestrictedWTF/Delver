@@ -21,7 +21,8 @@ import {
 } from '../../../services/delver/common/delverFocusService.js';
 import { DELVER_TARGET_OPEN, IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
-import { registerDelverView } from '../../../services/delver/browser/delverViewContainer.js';
+import { DelverSurfaceId, DelverZone } from '../../../services/delver/browser/delverSurface.js';
+import { registerDelverTreeSurface } from '../../../services/delver/browser/delverTreeSurface.js';
 import { registerInterpretationViewActions } from '../../../services/delver/browser/delverInterpretationEditing.js';
 import {
 	DELVER_XREFS_OPEN_COMMAND,
@@ -64,7 +65,7 @@ class DelverXrefsViewContribution {
 			collapsed: false,
 			order: 70,
 		};
-		registerDelverView(viewDescriptor);
+		registerDelverTreeSurface(DelverSurfaceId.Xrefs, DelverZone.Inspector, viewDescriptor);
 
 		viewsRegistry.registerViewWelcomeContent(DELVER_XREFS_VIEW_ID, {
 			content: localize(

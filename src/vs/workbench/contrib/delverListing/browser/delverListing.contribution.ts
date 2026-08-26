@@ -11,10 +11,13 @@ import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { isCancellationError, onUnexpectedError } from '../../../../base/common/errors.js';
 import { localize2 } from '../../../../nls.js';
-import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
+import { Action2, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
 import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
 import { DELVER_TARGET_ATTACHED, DELVER_TARGET_OPEN, IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
+import { IDelverWorkspaceService } from '../../../services/delver/common/delverWorkspaceService.js';
+import { DelverSurfaceId, DelverZone } from '../../../services/delver/browser/delverSurface.js';
+import { registerDelverSurface } from '../../../services/delver/browser/delverSurfaceRegistry.js';
 import { IDialogService, IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
@@ -23,23 +26,13 @@ import { IWorkspaceContextService } from '../../../../platform/workspace/common/
 import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../browser/editor.js';
 import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { EditorExtensions, EditorsOrder } from '../../../common/editor.js';
+import { EditorInput } from '../../../common/editor/editorInput.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
-import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { ISearchService, QueryType } from '../../../services/search/common/search.js';
-import {
-	DELVER_VIEW_CONTAINER,
-	DELVER_VIEW_CONTAINER_ID,
-	delverViewIds,
-} from '../../../services/delver/browser/delverViewContainer.js';
-import {
-	IViewDescriptor,
-	IViewDescriptorService,
-	ViewVisibilityState,
-} from '../../../common/views.js';
+import { DelverWorkspaceInput } from '../../../services/delver/browser/delverWorkspaceInput.js';
 import { DelverListingEditor } from './delverListingEditor.js';
 import { DELVER_LISTING_EDITOR_ID, DelverListingInput } from './delverListingInput.js';
-import { DelverPseudocodeInput } from '../../delverPseudocode/browser/delverPseudocodeInput.js';
-import { DelverStringsInput } from '../../delverStrings/browser/delverStringsInput.js';
+import { DelverListingWidget } from './delverListingWidget.js';
 import {
 	CommentAction,
 	DecompileFunctionAction,
@@ -80,15 +73,6 @@ class OpenTargetAction extends Action2 {
 			category: localize2('delverCategory', 'Delver'),
 			f1: true,
 			icon: Codicon.folderOpened,
-			// On the container's title bar, not just in the palette: this is the
-			// one thing every session starts with, and a workspace whose primary
-			// action is only reachable by typing its name is not discoverable.
-			menu: [{
-				id: MenuId.ViewContainerTitle,
-				when: ContextKeyExpr.equals('viewContainer', DELVER_VIEW_CONTAINER_ID),
-				group: 'navigation',
-				order: 1,
-			}],
 		});
 	}
 
@@ -96,9 +80,8 @@ class OpenTargetAction extends Action2 {
 		const fileDialogService = accessor.get(IFileDialogService);
 		const dialogService = accessor.get(IDialogService);
 		const editorService = accessor.get(IEditorService);
-		const viewsService = accessor.get(IViewsService);
 		const sessionService = accessor.get(IDelverSessionService);
-		const projectOpenServices = { dialogService, editorService, viewsService, sessionService };
+		const projectOpenServices = { dialogService, editorService, sessionService };
 
 		const result = await fileDialogService.showOpenDialog({
 			canSelectFiles: true,
@@ -115,8 +98,6 @@ class OpenTargetAction extends Action2 {
 		//
 		// The container only: a view the user hid stays hidden, because that was
 		// their choice. `Delver: Reset Views` is the way back from it.
-		await viewsService.openViewContainer(DELVER_VIEW_CONTAINER_ID, false);
-
 		const targetPath = result[0].fsPath;
 		if (targetPath.toLowerCase().endsWith('.delverdb')) {
 			await openDelverProject(projectOpenServices, targetPath);
@@ -135,9 +116,9 @@ class OpenTargetAction extends Action2 {
 			}
 		}
 
-		const pane = await editorService.openEditor(new DelverListingInput(targetPath), { pinned: true, forceReload });
+		const pane = await editorService.openEditor(new DelverWorkspaceInput(targetPath), { pinned: true, forceReload });
 		if (pane) {
-			await closeDelverEditors(editorService, editor => editor !== pane.input && targetPathForDelverEditor(editor) !== targetPath);
+			await closeDelverEditors(editorService, editor => editor !== pane.input && editor.resource?.path !== targetPath);
 		}
 	}
 }
@@ -151,12 +132,6 @@ class OpenProjectAction extends Action2 {
 			category: localize2('delverCategory', 'Delver'),
 			f1: true,
 			icon: Codicon.database,
-			menu: [{
-				id: MenuId.ViewContainerTitle,
-				when: ContextKeyExpr.equals('viewContainer', DELVER_VIEW_CONTAINER_ID),
-				group: 'navigation',
-				order: 2,
-			}],
 		});
 	}
 
@@ -165,7 +140,6 @@ class OpenProjectAction extends Action2 {
 		const services: IDelverProjectOpenServices = {
 			dialogService: accessor.get(IDialogService),
 			editorService: accessor.get(IEditorService),
-			viewsService: accessor.get(IViewsService),
 			sessionService: accessor.get(IDelverSessionService),
 		};
 		const result = await fileDialogService.showOpenDialog({
@@ -186,15 +160,16 @@ class OpenProjectAction extends Action2 {
 interface IDelverProjectOpenServices {
 	readonly dialogService: IDialogService;
 	readonly editorService: IEditorService;
-	readonly viewsService: IViewsService;
 	readonly sessionService: IDelverSessionService;
 }
 
 async function openDelverProject(services: IDelverProjectOpenServices, projectPath: string): Promise<void> {
 	try {
 		await services.sessionService.openProject(projectPath);
-		await closeDelverEditors(services.editorService, () => true);
-		await services.viewsService.openViewContainer(DELVER_VIEW_CONTAINER_ID, false);
+		const pane = await services.editorService.openEditor(new DelverWorkspaceInput(projectPath), { pinned: true });
+		if (pane) {
+			await closeDelverEditors(services.editorService, editor => editor !== pane.input);
+		}
 	} catch (error) {
 		if (!isCancellationError(error)) {
 			await services.dialogService.error(
@@ -215,15 +190,6 @@ class SaveProjectAction extends Action2 {
 			f1: true,
 			icon: Codicon.save,
 			precondition: DELVER_TARGET_OPEN,
-			menu: [{
-				id: MenuId.ViewContainerTitle,
-				when: ContextKeyExpr.and(
-					ContextKeyExpr.equals('viewContainer', DELVER_VIEW_CONTAINER_ID),
-					DELVER_TARGET_OPEN,
-				),
-				group: 'navigation',
-				order: 3,
-			}],
 		});
 	}
 
@@ -242,16 +208,6 @@ class LocateTargetAction extends Action2 {
 			f1: true,
 			icon: Codicon.fileBinary,
 			precondition: ContextKeyExpr.and(DELVER_TARGET_OPEN, DELVER_TARGET_ATTACHED.toNegated()),
-			menu: [{
-				id: MenuId.ViewContainerTitle,
-				when: ContextKeyExpr.and(
-					ContextKeyExpr.equals('viewContainer', DELVER_VIEW_CONTAINER_ID),
-					DELVER_TARGET_OPEN,
-					DELVER_TARGET_ATTACHED.toNegated(),
-				),
-				group: 'navigation',
-				order: 4,
-			}],
 		});
 	}
 
@@ -290,15 +246,6 @@ class CloseProjectAction extends Action2 {
 			f1: true,
 			icon: Codicon.close,
 			precondition: DELVER_TARGET_OPEN,
-			menu: [{
-				id: MenuId.ViewContainerTitle,
-				when: ContextKeyExpr.and(
-					ContextKeyExpr.equals('viewContainer', DELVER_VIEW_CONTAINER_ID),
-					DELVER_TARGET_OPEN,
-				),
-				group: 'navigation',
-				order: 5,
-			}],
 		});
 	}
 
@@ -312,68 +259,13 @@ class CloseProjectAction extends Action2 {
 	}
 }
 
-function targetPathForDelverEditor(editor: DelverListingInput | DelverPseudocodeInput | DelverStringsInput): string {
-	return editor.targetPath;
-}
-
-async function closeDelverEditors(editorService: IEditorService, predicate: (editor: DelverListingInput | DelverPseudocodeInput | DelverStringsInput) => boolean): Promise<void> {
+async function closeDelverEditors(editorService: IEditorService, predicate: (editor: EditorInput) => boolean): Promise<void> {
 	const editors = editorService.getEditors(EditorsOrder.SEQUENTIAL).filter(identifier => {
 		const editor = identifier.editor;
-		return (editor instanceof DelverListingInput || editor instanceof DelverPseudocodeInput || editor instanceof DelverStringsInput)
-			&& predicate(editor);
+		return editor.typeId.startsWith('delver.input.') && predicate(editor);
 	});
 	if (editors.length > 0) {
 		await editorService.closeEditors(editors, { preserveFocus: true });
-	}
-}
-
-/**
- * Brings back every Delver view.
- *
- * Hiding a view persists and nothing un-hides it, so one stray click on "Hide"
- * silently removes part of the workspace for good — and re-opening a target does
- * not bring it back, which reads as a bug rather than as a setting.
- */
-class ResetViewsAction extends Action2 {
-	constructor() {
-		super({
-			id: 'delver.views.reset',
-			title: localize2('delverResetViews', 'Reset Views'),
-			category: localize2('delverCategory', 'Delver'),
-			f1: true,
-			icon: Codicon.refresh,
-			menu: [{
-				id: MenuId.ViewContainerTitle,
-				when: ContextKeyExpr.equals('viewContainer', DELVER_VIEW_CONTAINER_ID),
-				group: 'navigation',
-				order: 6,
-			}],
-		});
-	}
-
-	async run(accessor: ServicesAccessor): Promise<void> {
-		const viewsService = accessor.get(IViewsService);
-		const viewDescriptorService = accessor.get(IViewDescriptorService);
-
-		// A view's container is remembered per user, not taken from wherever the
-		// code last registered it. A view that has ever lived somewhere else —
-		// Sections was in the Explorer before Delver had its own container, and
-		// a user can drag any view anywhere — stays there, and re-registering it
-		// has no effect. So put them back before showing them.
-		const strays = delverViewIds()
-			.filter(id => viewDescriptorService.getViewContainerByViewId(id) !== DELVER_VIEW_CONTAINER)
-			.map(id => viewDescriptorService.getViewDescriptorById(id))
-			.filter((descriptor): descriptor is IViewDescriptor => !!descriptor);
-
-		if (strays.length > 0) {
-			viewDescriptorService.moveViewsToContainer(strays, DELVER_VIEW_CONTAINER, ViewVisibilityState.Expand);
-		}
-
-		await viewsService.openViewContainer(DELVER_VIEW_CONTAINER_ID, false);
-		for (const id of delverViewIds()) {
-			// `openView` un-hides as well as reveals, which is the point here.
-			await viewsService.openView(id, false);
-		}
 	}
 }
 
@@ -384,13 +276,11 @@ class DelverProjectAutoOpenContribution {
 		@ISearchService searchService: ISearchService,
 		@IDialogService dialogService: IDialogService,
 		@IEditorService editorService: IEditorService,
-		@IViewsService viewsService: IViewsService,
 		@IDelverSessionService sessionService: IDelverSessionService,
 	) {
 		void this.autoOpen(workspaceContextService, searchService, {
 			dialogService,
 			editorService,
-			viewsService,
 			sessionService,
 		}).catch(onUnexpectedError);
 	}
@@ -430,7 +320,8 @@ class DelverProjectAutoOpenContribution {
 CommandsRegistry.registerCommand('delver.listing.openCurrent', async (accessor: ServicesAccessor) => {
 	const session = accessor.get(IDelverSessionService).activeSession;
 	if (session) {
-		await accessor.get(IEditorService).openEditor(new DelverListingInput(session.targetPath), { pinned: true });
+		await accessor.get(IEditorService).openEditor(new DelverWorkspaceInput(session.projectPath ?? session.targetPath), { pinned: true });
+		accessor.get(IDelverWorkspaceService).showSurface(DelverSurfaceId.Listing);
 	}
 });
 
@@ -439,7 +330,6 @@ registerAction2(OpenProjectAction);
 registerAction2(SaveProjectAction);
 registerAction2(LocateTargetAction);
 registerAction2(CloseProjectAction);
-registerAction2(ResetViewsAction);
 registerAction2(GoToAddressAction);
 registerAction2(GoToFunctionAction);
 registerAction2(NavigateBackAction);
@@ -462,3 +352,14 @@ registerWorkbenchContribution2(
 	DelverProjectAutoOpenContribution,
 	WorkbenchPhase.AfterRestored,
 );
+
+registerDelverSurface({
+	id: DelverSurfaceId.Listing,
+	title: localize2('delverListingSurface', "Listing"),
+	zone: DelverZone.Primary,
+	order: 20,
+	ctor: new SyncDescriptor(DelverListingWidget),
+	contextKey: context => context.targetPath,
+	setContext: (surface, context, token) => surface.setTarget(context.targetPath, token),
+	tearOff: context => new DelverListingInput(context.targetPath),
+});

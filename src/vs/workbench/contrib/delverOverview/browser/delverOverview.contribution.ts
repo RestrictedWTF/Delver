@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { toErrorMessage } from '../../../../base/common/errorMessage.js';
 import { onUnexpectedError } from '../../../../base/common/errors.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
@@ -16,7 +17,8 @@ import {
 	ITreeViewDescriptor,
 	IViewsRegistry,
 } from '../../../common/views.js';
-import { registerDelverView } from '../../../services/delver/browser/delverViewContainer.js';
+import { DelverSurfaceId, DelverZone } from '../../../services/delver/browser/delverSurface.js';
+import { registerDelverTreeSurface } from '../../../services/delver/browser/delverTreeSurface.js';
 import { DELVER_TARGET_OPEN, IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 import {
 	FocusReason,
@@ -48,7 +50,7 @@ class DelverOverviewViewContribution {
 			collapsed: false,
 			order: 10,
 		};
-		registerDelverView(viewDescriptor);
+		registerDelverTreeSurface(DelverSurfaceId.Overview, DelverZone.Primary, viewDescriptor);
 
 		Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViewWelcomeContent(
 			DELVER_OVERVIEW_VIEW_ID,
@@ -69,6 +71,7 @@ class DelverOverviewViewContribution {
 			const token = ++generation;
 
 			if (!session) {
+				treeView.message = undefined;
 				dataProvider.setContent(undefined, undefined, undefined);
 			} else {
 				try {
@@ -76,13 +79,24 @@ class DelverOverviewViewContribution {
 					if (token !== generation) {
 						return;
 					}
+					treeView.message = undefined;
 					dataProvider.setContent(session.targetPath, session.image, info);
 				} catch (error) {
 					if (token !== generation) {
 						return;
 					}
+					// This runs on a session change, so the rows on screen belong to
+					// whatever was open before. Keeping them would attribute one
+					// binary's file name, entry point and counts to another, and
+					// every row here navigates — into the *new* session. Drop them
+					// and say why instead.
+					dataProvider.setContent(undefined, undefined, undefined);
+					treeView.message = localize(
+						'delverOverviewFailed',
+						"Could not load the overview: {0}",
+						toErrorMessage(error),
+					);
 					onUnexpectedError(error);
-					return;
 				}
 			}
 			treeView.refresh().catch(onUnexpectedError);

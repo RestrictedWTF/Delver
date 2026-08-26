@@ -5,9 +5,10 @@
 
 import * as assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
+import { ContextKeyExpr } from '../../../../../platform/contextkey/common/contextkey.js';
 import { SyncDescriptor } from '../../../../../platform/instantiation/common/descriptors.js';
 import { DelverZone, IDelverSurface } from '../../browser/delverSurface.js';
-import { IDelverSurfaceDescriptor, surfacesForZone } from '../../browser/delverSurfaceRegistry.js';
+import { DelverSurfaceRegistry, IDelverSurfaceDescriptor, surfacesForZone } from '../../browser/delverSurfaceRegistry.js';
 
 function descriptor(id: string, zone: DelverZone, order: number): IDelverSurfaceDescriptor {
 	return {
@@ -20,7 +21,7 @@ function descriptor(id: string, zone: DelverZone, order: number): IDelverSurface
 }
 
 suite('Delver surface registry', () => {
-	ensureNoDisposablesAreLeakedInTestSuite();
+	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
 
 	test('selects one zone and orders within it, ignoring registration order', () => {
 		const all = [
@@ -47,5 +48,27 @@ suite('Delver surface registry', () => {
 			surfacesForZone(all, DelverZone.Navigator).map(s => s.id),
 			['exports', 'imports'],
 		);
+	});
+
+	test('filters descriptors whose when clause does not match', () => {
+		const enabled = { ...descriptor('enabled', DelverZone.Navigator, 10), when: ContextKeyExpr.has('enabled') };
+		const disabled = { ...descriptor('disabled', DelverZone.Navigator, 20), when: ContextKeyExpr.has('disabled') };
+
+		assert.deepStrictEqual(
+			surfacesForZone([enabled, disabled], DelverZone.Navigator, expression => expression === enabled.when).map(surface => surface.id),
+			['enabled'],
+		);
+	});
+
+	test('rejects duplicate ids at registration and removes disposed descriptors', () => {
+		const registry = disposables.add(new DelverSurfaceRegistry());
+		const registration = disposables.add(registry.register(descriptor('functions', DelverZone.Navigator, 10)));
+
+		assert.throws(
+			() => registry.register(descriptor('functions', DelverZone.Inspector, 20)),
+			/A Delver surface with id 'functions' is already registered/,
+		);
+		registration.dispose();
+		assert.deepStrictEqual(registry.all(), []);
 	});
 });

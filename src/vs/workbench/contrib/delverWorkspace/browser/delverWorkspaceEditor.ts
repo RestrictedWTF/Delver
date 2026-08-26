@@ -1,0 +1,376 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+import './media/delverWorkspace.css';
+
+import * as dom from '../../../../base/browser/dom.js';
+import { Dimension } from '../../../../base/browser/dom.js';
+import { Orientation, SplitView } from '../../../../base/browser/ui/splitview/splitview.js';
+import { CancellationToken } from '../../../../base/common/cancellation.js';
+import { isCancellationError, onUnexpectedError } from '../../../../base/common/errors.js';
+import { DisposableStore, MutableDisposable } from '../../../../base/common/lifecycle.js';
+import { localize } from '../../../../nls.js';
+import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
+import { IFunctionWire } from '../../../../platform/delver/common/protocol.generated.js';
+import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
+import { IStorageService } from '../../../../platform/storage/common/storage.js';
+import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
+import { IThemeService } from '../../../../platform/theme/common/themeService.js';
+import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
+import { IEditorOpenContext } from '../../../common/editor.js';
+import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
+import { SyncDescriptor0 } from '../../../../platform/instantiation/common/descriptors.js';
+import { DelverSurfaceId, DelverZone, IDelverSurface } from '../../../services/delver/browser/delverSurface.js';
+import { allDelverSurfaces, IDelverSurfaceContext, IDelverSurfaceDescriptor, onDidChangeDelverSurfaces, surfacesForZone } from '../../../services/delver/browser/delverSurfaceRegistry.js';
+import { DELVER_WORKSPACE_EDITOR_ID, DelverWorkspaceInput } from '../../../services/delver/browser/delverWorkspaceInput.js';
+import { DelverPrimaryMode, DelverWorkspaceStateStore, IDelverWorkspaceState } from '../../../services/delver/browser/delverWorkspaceState.js';
+import { IDelverFocusService } from '../../../services/delver/common/delverFocusService.js';
+import { containingFunctionRva } from '../../../services/delver/common/delverFunctions.js';
+import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
+import { IDelverSession, IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
+import { IDelverWorkspaceService } from '../../../services/delver/common/delverWorkspaceService.js';
+import { DelverWorkspaceZone } from './delverWorkspaceZone.js';
+
+const NAVIGATOR_MINIMUM_WIDTH = 180;
+const PRIMARY_MINIMUM_WIDTH = 360;
+const INSPECTOR_MINIMUM_WIDTH = 220;
+const HEADER_HEIGHT_FALLBACK = 32;
+
+/** Hosts one target's three-zone Delver workspace in the editor area. */
+export class DelverWorkspaceEditor extends EditorPane {
+
+	static readonly ID = DELVER_WORKSPACE_EDITOR_ID;
+
+	private root!: HTMLElement;
+	private targetLabel!: HTMLElement;
+	private targetMetadata!: HTMLElement;
+	private splitContainer!: HTMLElement;
+	private splitView!: SplitView<number>;
+	private navigator!: DelverWorkspaceZone;
+	private primary!: DelverWorkspaceZone;
+	private inspector!: DelverWorkspaceZone;
+	private dimension: Dimension | undefined;
+	private editorVisible = true;
+	private targetPath: string | undefined;
+	private session: IDelverSession | undefined;
+	private functions: readonly IFunctionWire[] = [];
+	private state: IDelverWorkspaceState | undefined;
+	private restoreWidths = false;
+
+	private readonly inputDisposables = this._register(new MutableDisposable<DisposableStore>());
+	private readonly stateStore: DelverWorkspaceStateStore;
+
+	constructor(
+		group: IEditorGroup,
+		@ITelemetryService telemetryService: ITelemetryService,
+		@IThemeService themeService: IThemeService,
+		@IStorageService storageService: IStorageService,
+		@IInstantiationService private readonly instantiationService: IInstantiationService,
+		@IContextKeyService private readonly contextKeyService: IContextKeyService,
+		@IDelverSessionService private readonly sessionService: IDelverSessionService,
+		@IDelverFocusService private readonly focusService: IDelverFocusService,
+		@IDelverInterpretationService private readonly interpretationService: IDelverInterpretationService,
+		@IDelverWorkspaceService private readonly workspaceService: IDelverWorkspaceService,
+	) {
+		super(DelverWorkspaceEditor.ID, group, telemetryService, themeService, storageService);
+		this.stateStore = new DelverWorkspaceStateStore(storageService);
+	}
+
+	protected createEditor(parent: HTMLElement): void {
+		this.root = dom.append(parent, dom.$('.delver-workspace'));
+		const header = dom.append(this.root, dom.$('.delver-workspace-header'));
+		this.targetLabel = dom.append(header, dom.$('.delver-workspace-target'));
+		this.targetMetadata = dom.append(header, dom.$('.delver-workspace-metadata'));
+		const home = dom.append(header, dom.$('button.delver-workspace-segment')) as HTMLButtonElement;
+		home.type = 'button';
+		home.textContent = localize('delverWorkspaceHome', "Overview");
+		home.title = localize('delverWorkspaceHomeTitle', "Show Target Overview");
+		this._register(dom.addDisposableListener(home, dom.EventType.CLICK, () => this.setPrimaryMode('overview')));
+
+		this.splitContainer = dom.append(this.root, dom.$('.delver-workspace-split'));
+		// `createInstance`'s descriptor overload is typed for `SyncDescriptor0`,
+		// so a `SyncDescriptor<T>` carrying static arguments — which
+		// `registerDelverTreeSurface` uses to pass each `ITreeView` — falls
+		// through to the `unknown`-returning overload. The cast only selects the
+		// intended overload: `createInstance` applies a descriptor's static
+		// arguments at runtime either way, and the descriptor is the registry's
+		// own, so `T` really is an `IDelverSurface`.
+		const createSurface = (descriptor: IDelverSurfaceDescriptor): IDelverSurface =>
+			this.instantiationService.createInstance(descriptor.ctor as SyncDescriptor0<IDelverSurface>);
+		this.navigator = this._register(new DelverWorkspaceZone(
+			localize('delverWorkspaceNavigator', "Navigator"),
+			NAVIGATOR_MINIMUM_WIDTH,
+			createSurface,
+			id => this.selectNavigator(id),
+		));
+		this.primary = this._register(new DelverWorkspaceZone(
+			localize('delverWorkspacePrimary', "Primary"),
+			PRIMARY_MINIMUM_WIDTH,
+			createSurface,
+			id => this.setPrimaryMode(id === DelverSurfaceId.Overview ? 'overview' : 'reading'),
+		));
+		this.inspector = this._register(new DelverWorkspaceZone(
+			localize('delverWorkspaceInspector', "Inspector"),
+			INSPECTOR_MINIMUM_WIDTH,
+			createSurface,
+			id => this.selectInspector(id),
+		));
+
+		this.splitView = this._register(new SplitView<number>(this.splitContainer, {
+			orientation: Orientation.HORIZONTAL,
+			proportionalLayout: false,
+		}));
+		this.splitView.addView(this.navigator, 240);
+		this.splitView.addView(this.primary, 600);
+		this.splitView.addView(this.inspector, 280);
+		this._register(this.splitView.onDidSashChange(() => this.saveWidths()));
+	}
+
+	override async setInput(
+		input: DelverWorkspaceInput,
+		options: unknown,
+		context: IEditorOpenContext,
+		token: CancellationToken,
+	): Promise<void> {
+		await super.setInput(input, options as never, context, token);
+		this.inputDisposables.clear();
+		this.targetPath = input.targetPath;
+		this.state = this.stateStore.load(input.targetPath);
+		this.restoreWidths = true;
+		this.targetLabel.textContent = input.getName();
+		this.targetMetadata.textContent = localize('delverWorkspaceOpening', "Opening target…");
+		this.refreshDescriptors();
+		this.applyVisibleState();
+
+		let session: IDelverSession;
+		try {
+			session = await this.sessionService.openTarget(input.targetPath);
+		} catch (error) {
+			if (!token.isCancellationRequested && !isCancellationError(error)) {
+				this.targetMetadata.textContent = localize('delverWorkspaceOpenFailed', "Could not open target: {0}", toMessage(error));
+			}
+			return;
+		}
+		if (token.isCancellationRequested || this.input !== input) {
+			return;
+		}
+
+		this.session = session;
+		await this.refreshFunctions(token);
+		if (token.isCancellationRequested || this.input !== input) {
+			return;
+		}
+		this.updateHeader();
+		this.updateSurfaceContext();
+
+		const store = new DisposableStore();
+		this.inputDisposables.value = store;
+		store.add(onDidChangeDelverSurfaces(() => {
+			this.refreshDescriptors();
+			this.applyVisibleState();
+			this.updateSurfaceContext();
+		}));
+		store.add(this.contextKeyService.onDidChangeContext(() => {
+			this.refreshDescriptors();
+			this.applyVisibleState();
+			this.updateSurfaceContext();
+		}));
+		store.add(this.focusService.onDidChangeFocus(event => {
+			if (event.focus.location?.space === 'Image') {
+				this.setPrimaryMode('reading');
+			}
+			this.updateSurfaceContext();
+		}));
+		store.add(this.workspaceService.onDidRequestSurface(id => this.showRequestedSurface(id)));
+		store.add(this.sessionService.onDidChangeActiveSession(changed => {
+			if (!changed) {
+				return;
+			}
+			this.session = changed;
+			void this.refreshFunctions(CancellationToken.None).then(() => {
+				this.updateHeader();
+				this.updateSurfaceContext();
+			}).catch(onUnexpectedError);
+		}));
+
+		if (this.dimension) {
+			this.layout(this.dimension);
+		}
+	}
+
+	override layout(dimension: Dimension): void {
+		this.dimension = dimension;
+		const headerHeight = this.targetLabel.parentElement?.offsetHeight || HEADER_HEIGHT_FALLBACK;
+		const bodyHeight = Math.max(0, dimension.height - headerHeight);
+		this.splitView.layout(dimension.width, bodyHeight);
+		if (this.restoreWidths && this.state) {
+			this.restoreWidths = false;
+			this.splitView.resizeView(0, this.state.navigatorWidth);
+			this.splitView.resizeView(2, this.state.inspectorWidth);
+		}
+	}
+
+	protected override setEditorVisible(visible: boolean): void {
+		super.setEditorVisible(visible);
+		this.editorVisible = visible;
+		this.navigator.setZoneVisible(visible);
+		this.primary.setZoneVisible(visible);
+		this.inspector.setZoneVisible(visible);
+		if (visible && this.dimension) {
+			this.layout(this.dimension);
+		}
+	}
+
+	override focus(): void {
+		this.primary.focus();
+	}
+
+	override clearInput(): void {
+		this.inputDisposables.clear();
+		this.targetPath = undefined;
+		this.session = undefined;
+		this.functions = [];
+		this.navigator.setZoneVisible(false);
+		this.primary.setZoneVisible(false);
+		this.inspector.setZoneVisible(false);
+		super.clearInput();
+	}
+
+	private refreshDescriptors(): void {
+		const all = allDelverSurfaces();
+		const matches = (expression: Parameters<IContextKeyService['contextMatchesRules']>[0]) => this.contextKeyService.contextMatchesRules(expression);
+		this.navigator.setDescriptors(surfacesForZone(all, DelverZone.Navigator, matches));
+		this.primary.setDescriptors(surfacesForZone(all, DelverZone.Primary, matches));
+		this.inspector.setDescriptors(surfacesForZone(all, DelverZone.Inspector, matches));
+	}
+
+	private applyVisibleState(): void {
+		const state = this.state;
+		if (!state) {
+			return;
+		}
+		this.navigator.show([state.navigatorSurfaceId]);
+		this.inspector.show([state.inspectorSurfaceId]);
+		this.primary.show(state.primaryMode === 'overview'
+			? [DelverSurfaceId.Overview]
+			: [DelverSurfaceId.Listing, DelverSurfaceId.Pseudocode]);
+		this.navigator.setZoneVisible(this.editorVisible);
+		this.primary.setZoneVisible(this.editorVisible);
+		this.inspector.setZoneVisible(this.editorVisible);
+	}
+
+	private selectNavigator(id: string): void {
+		if (!this.state) {
+			return;
+		}
+		this.state = { ...this.state, navigatorSurfaceId: id };
+		this.navigator.show([id]);
+		this.persistWorkspaceState();
+	}
+
+	private selectInspector(id: string): void {
+		if (!this.state) {
+			return;
+		}
+		this.state = { ...this.state, inspectorSurfaceId: id };
+		this.inspector.show([id]);
+		this.persistWorkspaceState();
+	}
+
+	private showRequestedSurface(id: string): void {
+		if (id === DelverSurfaceId.Overview) {
+			this.setPrimaryMode('overview');
+		} else if (id === DelverSurfaceId.Listing || id === DelverSurfaceId.Pseudocode) {
+			this.setPrimaryMode('reading');
+		} else if (surfacesForZone(allDelverSurfaces(), DelverZone.Navigator).some(surface => surface.id === id)) {
+			this.selectNavigator(id);
+		} else if (surfacesForZone(allDelverSurfaces(), DelverZone.Inspector).some(surface => surface.id === id)) {
+			this.selectInspector(id);
+		}
+	}
+
+	private setPrimaryMode(mode: DelverPrimaryMode): void {
+		if (!this.state) {
+			return;
+		}
+		this.state = { ...this.state, primaryMode: mode };
+		this.primary.show(mode === 'overview'
+			? [DelverSurfaceId.Overview]
+			: [DelverSurfaceId.Listing, DelverSurfaceId.Pseudocode]);
+		this.updateSurfaceContext();
+		this.persistWorkspaceState();
+	}
+
+	private async refreshFunctions(token: CancellationToken): Promise<void> {
+		try {
+			const result = await this.sessionService.functions();
+			if (!token.isCancellationRequested) {
+				this.functions = result.functions;
+			}
+		} catch {
+			this.functions = [];
+		}
+	}
+
+	private updateSurfaceContext(): void {
+		const targetPath = this.targetPath;
+		const session = this.session;
+		if (!targetPath || !session) {
+			return;
+		}
+		const focus = this.focusService.focus;
+		const location = focus.location;
+		const functionRva = location?.space === 'Image'
+			? containingFunctionRva(this.functions, location.address)
+			: undefined;
+		const functionName = functionRva === undefined ? undefined : this.interpretationService.nameAt({
+			kind: 'image',
+			contentHash: session.contentHash,
+			rva: functionRva,
+		});
+		const surfaceContext: IDelverSurfaceContext = { targetPath, focus, functionRva, functionName };
+		this.navigator.setContext(surfaceContext);
+		this.primary.setContext(surfaceContext);
+		this.inspector.setContext(surfaceContext);
+	}
+
+	private updateHeader(): void {
+		const session = this.session;
+		if (!session) {
+			return;
+		}
+		this.targetMetadata.textContent = session.image
+			? localize(
+				'delverWorkspaceTargetMetadata',
+				"{0} · {1} functions · {2} instructions · analyzed",
+				session.image.arch,
+				session.image.function_count,
+				session.image.instruction_count,
+			)
+			: localize('delverWorkspaceOfflineMetadata', "Saved project · target not attached");
+	}
+
+	private saveWidths(): void {
+		if (!this.state || !this.targetPath || this.restoreWidths) {
+			return;
+		}
+		this.state = {
+			...this.state,
+			navigatorWidth: this.splitView.getViewSize(0),
+			inspectorWidth: this.splitView.getViewSize(2),
+		};
+		this.persistWorkspaceState();
+	}
+
+	private persistWorkspaceState(): void {
+		if (this.state && this.targetPath) {
+			this.stateStore.save(this.targetPath, this.state);
+		}
+	}
+}
+
+function toMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}

@@ -20,10 +20,13 @@ import { IProgressService, ProgressLocation } from '../../../../platform/progres
 import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../browser/editor.js';
 import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { EditorExtensions } from '../../../common/editor.js';
+import { DelverSurfaceId, DelverZone } from '../../../services/delver/browser/delverSurface.js';
+import { registerDelverSurface } from '../../../services/delver/browser/delverSurfaceRegistry.js';
 import { IDelverDecompilerService } from '../../../services/delver/common/delverDecompilerService.js';
 import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 import { DelverPseudocodeEditor } from './delverPseudocodeEditor.js';
 import { DELVER_PSEUDOCODE_EDITOR_ID, DelverPseudocodeInput } from './delverPseudocodeInput.js';
+import { DelverPseudocodeWidget } from './delverPseudocodeWidget.js';
 
 Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
 	EditorPaneDescriptor.create(
@@ -33,6 +36,19 @@ Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane
 	),
 	[new SyncDescriptor(DelverPseudocodeInput)],
 );
+
+registerDelverSurface({
+	id: DelverSurfaceId.Pseudocode,
+	title: localize2('delverPseudocodeSurface', "Pseudocode"),
+	zone: DelverZone.Primary,
+	order: 30,
+	ctor: new SyncDescriptor(DelverPseudocodeWidget),
+	contextKey: context => `${context.targetPath}:${context.functionRva?.toString(16) ?? 'none'}`,
+	setContext: (surface, context, token) => surface.setTarget(context.targetPath, context.functionRva, context.functionName, token),
+	tearOff: context => context.functionRva === undefined
+		? undefined
+		: new DelverPseudocodeInput(context.targetPath, context.functionRva, context.functionName),
+});
 
 /** Warms the one persistent PyGhidra JVM while the analyst explores a live target. */
 class DelverDecompilerPrewarmContribution extends Disposable {

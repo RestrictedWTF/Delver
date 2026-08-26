@@ -21,6 +21,7 @@ import {
 	FocusReason,
 	IDelverFocusService,
 } from '../../../services/delver/common/delverFocusService.js';
+import { containingFunctionRva } from '../../../services/delver/common/delverFunctions.js';
 import {
 	IDelverSession,
 	IDelverSessionService,
@@ -658,26 +659,6 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 	}
 }
 
-/** Finds a containing function without requiring the cursor to be on its entry row. */
-export function containingFunctionRva(functions: readonly IFunctionWire[], rva: bigint): bigint | undefined {
-	let low = 0;
-	let high = functions.length - 1;
-	let candidate: IFunctionWire | undefined;
-	while (low <= high) {
-		const middle = (low + high) >>> 1;
-		const start = BigInt(functions[middle].rva);
-		if (start <= rva) {
-			candidate = functions[middle];
-			low = middle + 1;
-		} else {
-			high = middle - 1;
-		}
-	}
-	if (!candidate || (candidate.end_rva !== undefined && rva >= BigInt(candidate.end_rva))) {
-		return undefined;
-	}
-	return BigInt(candidate.rva);
-}
 
 interface ICellTemplate {
 	readonly element: HTMLElement;

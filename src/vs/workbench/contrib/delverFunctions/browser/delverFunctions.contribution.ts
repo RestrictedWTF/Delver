@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Codicon } from '../../../../base/common/codicons.js';
+import { toErrorMessage } from '../../../../base/common/errorMessage.js';
 import { onUnexpectedError } from '../../../../base/common/errors.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
@@ -18,7 +19,9 @@ import { TreeView } from '../../../browser/parts/views/treeView.js';
 import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { Extensions as ViewExtensions, ITreeViewDescriptor, IViewsRegistry, TreeViewItemHandleArg } from '../../../common/views.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
-import { registerDelverView } from '../../../services/delver/browser/delverViewContainer.js';
+import { DelverSurfaceId, DelverZone } from '../../../services/delver/browser/delverSurface.js';
+import { registerDelverTreeSurface } from '../../../services/delver/browser/delverTreeSurface.js';
+import { DelverWorkspaceInput } from '../../../services/delver/browser/delverWorkspaceInput.js';
 import { DelverFilterableTreeViewPane, registerDelverTreeFilterProvider } from '../../../services/delver/browser/delverFilterableTreeViewPane.js';
 import { editInterpretationAt } from '../../../services/delver/browser/delverInterpretationEditing.js';
 import {
@@ -27,7 +30,7 @@ import {
 } from '../../../services/delver/common/delverFocusService.js';
 import { DELVER_TARGET_OPEN, IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
-import { DelverPseudocodeInput } from '../../delverPseudocode/browser/delverPseudocodeInput.js';
+import { IDelverWorkspaceService } from '../../../services/delver/common/delverWorkspaceService.js';
 import {
 	DELVER_FUNCTIONS_OPEN_COMMAND,
 	DELVER_FUNCTIONS_VIEW_ID,
@@ -64,7 +67,7 @@ class DelverFunctionsViewContribution {
 			collapsed: false,
 			order: 20,
 		};
-		registerDelverView(viewDescriptor);
+		registerDelverTreeSurface(DelverSurfaceId.Functions, DelverZone.Navigator, viewDescriptor);
 
 		Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViewWelcomeContent(
 			DELVER_FUNCTIONS_VIEW_ID,
@@ -131,6 +134,7 @@ class DelverFunctionsViewContribution {
 			const token = ++generation;
 
 			if (!session) {
+				treeView.message = undefined;
 				dataProvider.setFunctions(undefined);
 			} else {
 				try {
@@ -138,14 +142,26 @@ class DelverFunctionsViewContribution {
 					if (token !== generation) {
 						return;
 					}
+					treeView.message = undefined;
 					dataProvider.setFunctions(functions);
 					applyNames(functions);
 				} catch (error) {
 					if (token !== generation) {
 						return;
 					}
+					// The session has already changed. Every row still listed is a
+					// function of the previous target, and opening one decompiles
+					// that RVA in the new one — a body attributed to the wrong
+					// binary. The name cache goes with them, since it is keyed by
+					// the old image's RVAs.
+					dataProvider.setFunctions(undefined);
+					applyNames([]);
+					treeView.message = localize(
+						'delverFunctionsFailed',
+						"Could not load the functions: {0}",
+						toErrorMessage(error),
+					);
 					onUnexpectedError(error);
-					return;
 				}
 			}
 			treeView.refresh().catch(onUnexpectedError);
@@ -177,15 +193,11 @@ CommandsRegistry.registerCommand(DELVER_FUNCTIONS_OPEN_COMMAND, async (accessor:
 		FOCUS_ORIGIN,
 		FocusReason.User,
 	);
-	const name = accessor.get(IDelverInterpretationService).nameAt({
-		kind: 'image',
-		contentHash: session.contentHash,
-		rva: address,
-	});
 	await accessor.get(IEditorService).openEditor(
-		new DelverPseudocodeInput(session.targetPath, address, name),
+		new DelverWorkspaceInput(session.projectPath ?? session.targetPath),
 		{ pinned: true },
 	);
+	accessor.get(IDelverWorkspaceService).showSurface(DelverSurfaceId.Pseudocode);
 });
 
 class RenameFunctionAction extends Action2 {

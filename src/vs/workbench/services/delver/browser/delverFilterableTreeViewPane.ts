@@ -36,6 +36,10 @@ export function registerDelverTreeFilterProvider(treeView: ITreeView, provider: 
 	filterProviders.set(treeView, provider);
 }
 
+export function delverTreeFilterProvider(treeView: ITreeView): IDelverFilterableTreeDataProvider | undefined {
+	return filterProviders.get(treeView);
+}
+
 /** Tree view pane with a persistent, debounced text filter above the tree. */
 export class DelverFilterableTreeViewPane extends TreeViewPane {
 	private filterRow: HTMLElement | undefined;

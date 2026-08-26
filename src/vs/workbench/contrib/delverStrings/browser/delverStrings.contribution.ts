@@ -14,9 +14,14 @@ import { Registry } from '../../../../platform/registry/common/platform.js';
 import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../browser/editor.js';
 import { EditorExtensions } from '../../../common/editor.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
+import { DelverSurfaceId, DelverZone } from '../../../services/delver/browser/delverSurface.js';
+import { registerDelverSurface } from '../../../services/delver/browser/delverSurfaceRegistry.js';
+import { DelverWorkspaceInput } from '../../../services/delver/browser/delverWorkspaceInput.js';
+import { IDelverWorkspaceService } from '../../../services/delver/common/delverWorkspaceService.js';
 import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 import { DelverStringsEditor } from './delverStringsEditor.js';
 import { DELVER_STRINGS_EDITOR_ID, DelverStringsInput } from './delverStringsInput.js';
+import { DelverStringsWidget } from './delverStringsWidget.js';
 
 /**
  * Strings live in the editor area, not the sidebar.
@@ -34,6 +39,17 @@ Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane
 	),
 	[new SyncDescriptor(DelverStringsInput)],
 );
+
+registerDelverSurface({
+	id: DelverSurfaceId.Strings,
+	title: localize2('delverStringsSurface', "Strings"),
+	zone: DelverZone.Navigator,
+	order: 20,
+	ctor: new SyncDescriptor(DelverStringsWidget),
+	contextKey: context => context.targetPath,
+	setContext: (surface, context, token) => surface.setTarget(context.targetPath, token),
+	tearOff: context => new DelverStringsInput(context.targetPath),
+});
 
 class OpenStringsAction extends Action2 {
 	constructor() {
@@ -56,7 +72,8 @@ class OpenStringsAction extends Action2 {
 			return;
 		}
 
-		await editorService.openEditor(new DelverStringsInput(session.targetPath), { pinned: true });
+		await editorService.openEditor(new DelverWorkspaceInput(session.projectPath ?? session.targetPath), { pinned: true });
+		accessor.get(IDelverWorkspaceService).showSurface(DelverSurfaceId.Strings);
 	}
 }
 
