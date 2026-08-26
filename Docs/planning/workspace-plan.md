@@ -890,8 +890,16 @@ Functions, Imports, Exports and Sections are empty; Strings works. The four that
 fail drive their tree from `onDidChangeActiveSession(() => update())` followed
 by `treeView.refresh()`; Strings alone resolves lazily inside `getChildren` and
 is therefore host-independent. Reproduced with a **single** target open, so it
-is not caused by defect 1, though 1 will compound it. This is the same shape as
-every other defect in this work: a path that assumed the old host.
+is not caused by defect 1, though 1 will compound it.
+
+**Attempted and rejected:** refreshing the tree when a segment becomes visible
+(a `ViewPane` does this) was tried and did **not** help. The rows are still
+empty, so the cause is upstream of the tree widget — in whether those
+contributions' `update()` ever reaches `setFunctions` at all. The refresh was
+kept, because a segment is hidden far more often than a pane ever was and it
+is correct on its own terms, but it is not the fix. Next step is to instrument
+`update()` rather than reason about it; three rounds of reasoning have now been
+wrong about this one.
 
 **3 — Navigator segment labels are illegible.**
 At the default 240px they truncate to `Fu… S… I… E… S…`, and two are

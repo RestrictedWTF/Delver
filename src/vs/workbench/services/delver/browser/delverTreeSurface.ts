@@ -99,6 +99,19 @@ export class DelverTreeSurface extends Disposable implements IDelverSurface {
 
 	setVisible(visible: boolean): void {
 		this.treeView.setVisibility(visible);
+		if (visible) {
+			// A `ViewPane` refreshes its tree when its body becomes visible, and
+			// a zone segment is hidden far more often than a pane ever was, so a
+			// segment shown after its provider changed would otherwise render
+			// stale rows.
+			//
+			// This is *not* the fix for Functions/Imports/Exports/Sections
+			// rendering empty — that was tried and did not help, so the cause is
+			// upstream of the tree, in whether those contributions' `update()`
+			// ever reaches `setFunctions`. See the smoke-test findings in
+			// `Docs/planning/workspace-plan.md`.
+			this.treeView.refresh().catch(onUnexpectedError);
+		}
 	}
 
 	focus(): void {

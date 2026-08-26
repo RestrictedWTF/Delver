@@ -39,6 +39,10 @@ function recordingTreeView(calls: ITreeViewCall[]): ITreeView {
 			initialized = true;
 			calls.push({ method: 'setVisibility', args: [visible] });
 		},
+		refresh: () => {
+			calls.push({ method: 'refresh', args: [] });
+			return Promise.resolve();
+		},
 		layout: (height: number, width: number) => calls.push({ method: 'layout', args: [height, width] }),
 		focus: () => calls.push({ method: 'focus', args: [] }),
 	} as unknown as ITreeView;
@@ -64,6 +68,10 @@ suite('Delver tree surface', () => {
 			{ method: 'show', args: ['initialized'] },
 			{ method: 'layout', args: [240, 320] },
 			{ method: 'setVisibility', args: [true] },
+			// Becoming visible refreshes: a contribution may have pushed new data
+			// into the provider while this segment was hidden, and `refresh()`
+			// only renders while visible.
+			{ method: 'refresh', args: [] },
 			{ method: 'focus', args: [] },
 			// Disposal hides the tree: a zone that swapped segments must not
 			// leave a dead tree responding to the focus bus.
