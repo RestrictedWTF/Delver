@@ -24,6 +24,10 @@ const HEADER_HEIGHT_FALLBACK = 32;
  */
 const MINIMUM_COMPANION_WIDTH = 120;
 
+/** Classes of the per-surface nodes this zone owns, and only those. */
+const SURFACE_CLASS = 'delver-workspace-surface';
+const SEGMENT_CLASS = 'delver-workspace-segment';
+
 interface IHostedSurface {
 	readonly descriptor: IDelverSurfaceDescriptor;
 	readonly surface: IDelverSurface;
@@ -163,9 +167,9 @@ export class DelverWorkspaceZone extends Disposable implements IView<number> {
 			}
 			const disposables = new DisposableStore();
 			const surface = disposables.add(this.createSurface(descriptor));
-			const container = dom.append(this.body, dom.$('.delver-workspace-surface'));
+			const container = dom.append(this.body, dom.$(`.${SURFACE_CLASS}`));
 			container.dataset.surfaceId = descriptor.id;
-			const tab = dom.append(this.tabs, dom.$('button.delver-workspace-segment')) as HTMLButtonElement;
+			const tab = dom.append(this.tabs, dom.$(`button.${SEGMENT_CLASS}`)) as HTMLButtonElement;
 			tab.type = 'button';
 			tab.setAttribute('role', 'tab');
 			tab.title = descriptor.title.value;
@@ -205,13 +209,17 @@ export class DelverWorkspaceZone extends Disposable implements IView<number> {
 			live.add(hosted.tab);
 			live.add(hosted.container);
 		}
+		//
+		// Scoped to the two classes this zone creates per surface. The body also
+		// holds the companion sash, which belongs to no descriptor and would be
+		// swept away here — taking the drag handle with it on every call.
 		for (const node of [...this.tabs.children]) {
-			if (!live.has(node)) {
+			if (node.classList.contains(SEGMENT_CLASS) && !live.has(node)) {
 				node.remove();
 			}
 		}
 		for (const node of [...this.body.children]) {
-			if (!live.has(node)) {
+			if (node.classList.contains(SURFACE_CLASS) && !live.has(node)) {
 				node.remove();
 			}
 		}
