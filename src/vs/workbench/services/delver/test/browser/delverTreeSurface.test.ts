@@ -68,10 +68,9 @@ suite('Delver tree surface', () => {
 			{ method: 'show', args: ['initialized'] },
 			{ method: 'layout', args: [240, 320] },
 			{ method: 'setVisibility', args: [true] },
-			// Becoming visible refreshes: a contribution may have pushed new data
-			// into the provider while this segment was hidden, and `refresh()`
-			// only renders while visible.
-			{ method: 'refresh', args: [] },
+			// No `refresh` here: issuing one before the tree can serve children
+			// latches TreeView's private `refreshing` flag and deadlocks every
+			// later refresh. Measured, not assumed.
 			{ method: 'focus', args: [] },
 			// Disposal hides the tree: a zone that swapped segments must not
 			// leave a dead tree responding to the focus bus.

@@ -892,14 +892,51 @@ by `treeView.refresh()`; Strings alone resolves lazily inside `getChildren` and
 is therefore host-independent. Reproduced with a **single** target open, so it
 is not caused by defect 1, though 1 will compound it.
 
-**Attempted and rejected:** refreshing the tree when a segment becomes visible
-(a `ViewPane` does this) was tried and did **not** help. The rows are still
-empty, so the cause is upstream of the tree widget — in whether those
-contributions' `update()` ever reaches `setFunctions` at all. The refresh was
-kept, because a segment is hidden far more often than a pane ever was and it
-is correct on its own terms, but it is not the fix. Next step is to instrument
-`update()` rather than reason about it; three rounds of reasoning have now been
-wrong about this one.
+**Diagnosed by instrumentation, 2026-08-26.** Logging inside the Functions
+contribution answered it. The entire data path is healthy:
+
+```
+contribution constructed, subscribing
+onDidChangeActiveSession fired
+update enter session=true token=1
+fetched functions=523 token=1 gen=1
+setFunctions 523
+pre-refresh refreshing=false isVisible=true hasProvider=true hasTree=true activated=true
+```
+
+...and then **`treeView.refresh()` never settles.** It neither resolves nor
+rejects. `TreeView.doRefresh` sets a private `refreshing` flag, awaits
+`tree.updateChildren(root)`, and only then clears the flag and fires
+`_onDidCompleteRefresh`. For a zone-hosted tree that `updateChildren` never
+settles, so the flag stays set and every later `refresh()` blocks forever on
+`await Event.toPromise(this._onDidCompleteRefresh.event)`.
+
+That explains the whole pattern exactly: **Strings is the one Navigator surface
+that never calls `refresh()`** — it resolves lazily inside `getChildren` — and it
+is the one that works.
+
+Two fixes were tried against a running workbench and **both failed**, so neither
+is in the tree:
+
+- *Refresh on becoming visible.* Made it worse: measured `refreshing === true`
+  with it, `false` without. It was the call creating the latch. Removed, with the
+  reason recorded at the call site.
+- *Defer creating and attaching the tree until first show* (what a `ViewPane`
+  does, since `create()` fires `setInput(root)` unawaited). `refresh()` still
+  never settled.
+
+**Where to go next, in order.** Do not attempt a third variation of the adapter
+without evidence; that approach has now failed twice.
+
+1. Instrument *inside* `updateChildren` — or breakpoint it via `dap-cli` on the
+   renderer — to find which await never settles. That is the one unknown left.
+2. If the cause is that `ITreeView` genuinely requires a `ViewPane` host,
+   consider hosting a real `TreeViewPane` inside the zone instead of adapting
+   raw `ITreeView`. The pane is what upstream keeps working; `DelverTreeSurface`
+   reimplements it and is evidently missing something.
+3. Failing both, give the four broken providers the shape Strings already has —
+   resolve lazily in `getChildren` and stop calling `refresh()` — which is known
+   to work in a zone today.
 
 **3 — Navigator segment labels are illegible.**
 At the default 240px they truncate to `Fu… S… I… E… S…`, and two are
