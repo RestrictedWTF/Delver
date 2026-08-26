@@ -143,7 +143,12 @@ class DelverExportsViewContribution {
 					if (token !== generation) {
 						return;
 					}
-					treeView.message = undefined;
+					// An executable with no export table is the normal case, and an
+					// empty pane is indistinguishable from one that failed to load.
+					// Saying so is a real answer about this image (`principles.md` §1).
+					treeView.message = exports.length === 0
+						? localize('delverExportsEmpty', "This image exports nothing.")
+						: undefined;
 					dataProvider.setExports(exports);
 				} catch (error) {
 					if (token !== generation) {

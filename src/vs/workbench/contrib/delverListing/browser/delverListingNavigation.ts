@@ -25,6 +25,8 @@ import { editInterpretationAt } from '../../../services/delver/browser/delverInt
 import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
 import { DelverPseudocodeInput } from '../../delverPseudocode/browser/delverPseudocodeInput.js';
 import {
+	DELVER_CAN_GO_BACK,
+	DELVER_CAN_GO_FORWARD,
 	DELVER_LISTING_PINNED,
 	DELVER_NAVIGATION_ORIGIN,
 	LISTING_ACTIVE,
@@ -195,7 +197,13 @@ export class NavigateBackAction extends Action2 {
 			title: localize2('delverNavigateBack', 'Navigate Back'),
 			category: localize2('delverCategory', 'Delver'),
 			f1: true,
-			precondition: LISTING_ACTIVE,
+			icon: Codicon.arrowLeft,
+			precondition: ContextKeyExpr.and(LISTING_ACTIVE, DELVER_CAN_GO_BACK),
+			menu: [{
+				id: MenuDelverPrimaryChrome,
+				group: 'navigation',
+				order: -20,
+			}],
 			keybinding: {
 				when: LISTING_ACTIVE,
 				primary: KeyMod.Alt | KeyCode.LeftArrow,
@@ -216,7 +224,13 @@ export class NavigateForwardAction extends Action2 {
 			title: localize2('delverNavigateForward', 'Navigate Forward'),
 			category: localize2('delverCategory', 'Delver'),
 			f1: true,
-			precondition: LISTING_ACTIVE,
+			icon: Codicon.arrowRight,
+			precondition: ContextKeyExpr.and(LISTING_ACTIVE, DELVER_CAN_GO_FORWARD),
+			menu: [{
+				id: MenuDelverPrimaryChrome,
+				group: 'navigation',
+				order: -10,
+			}],
 			keybinding: {
 				when: LISTING_ACTIVE,
 				primary: KeyMod.Alt | KeyCode.RightArrow,

@@ -31,6 +31,15 @@ export const LISTING_ACTIVE = ContextKeyExpr.or(
 	DELVER_LISTING_FOCUSED,
 )!;
 
+/**
+ * Whether the focus bus has anywhere to go back to / forward to.
+ *
+ * The toolbar arrows are disabled rather than hidden when there is no history:
+ * a control that vanishes is harder to find again than one that is greyed.
+ */
+export const DELVER_CAN_GO_BACK = new RawContextKey<boolean>('delverCanGoBack', false);
+export const DELVER_CAN_GO_FORWARD = new RawContextKey<boolean>('delverCanGoForward', false);
+
 /** True while the active listing is pinned. Drives the toolbar toggle. */
 export const DELVER_LISTING_PINNED = new RawContextKey<boolean>('delverListingPinned', false);
 

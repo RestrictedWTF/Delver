@@ -13,7 +13,8 @@ import { isCancellationError, onUnexpectedError } from '../../../../base/common/
 import { localize2 } from '../../../../nls.js';
 import { Action2, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
-import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
+import { Disposable } from '../../../../base/common/lifecycle.js';
+import { ContextKeyExpr, IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { DELVER_TARGET_ATTACHED, DELVER_TARGET_OPEN, IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 import { IDelverWorkspaceService } from '../../../services/delver/common/delverWorkspaceService.js';
 import { DelverSurfaceId, DelverZone } from '../../../services/delver/browser/delverSurface.js';
@@ -25,6 +26,8 @@ import { Registry } from '../../../../platform/registry/common/platform.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../browser/editor.js';
 import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
+import { IDelverFocusService } from '../../../services/delver/common/delverFocusService.js';
+import { DELVER_CAN_GO_BACK, DELVER_CAN_GO_FORWARD } from './delverListingContext.js';
 import { EditorExtensions, EditorsOrder } from '../../../common/editor.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
@@ -368,3 +371,33 @@ registerDelverSurface({
 	setContext: (surface, context, token) => surface.setTarget(context.targetPath, token),
 	tearOff: context => new DelverListingInput(context.targetPath),
 });
+
+/**
+ * Keeps the history context keys current.
+ *
+ * The toolbar arrows are gated on these, so without something publishing them
+ * the controls would be permanently disabled — the class of bug where a feature
+ * exists and is unreachable.
+ */
+class DelverHistoryContextContribution extends Disposable {
+	constructor(
+		@IContextKeyService contextKeyService: IContextKeyService,
+		@IDelverFocusService focusService: IDelverFocusService,
+	) {
+		super();
+		const back = DELVER_CAN_GO_BACK.bindTo(contextKeyService);
+		const forward = DELVER_CAN_GO_FORWARD.bindTo(contextKeyService);
+		const update = () => {
+			back.set(focusService.canGoBack);
+			forward.set(focusService.canGoForward);
+		};
+		update();
+		this._register(focusService.onDidChangeFocus(update));
+	}
+}
+
+registerWorkbenchContribution2(
+	'delver.historyContext',
+	DelverHistoryContextContribution,
+	WorkbenchPhase.BlockRestore,
+);

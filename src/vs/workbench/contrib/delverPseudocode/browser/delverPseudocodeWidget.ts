@@ -24,6 +24,7 @@ import { FocusReason, IDelverFocusService } from '../../../services/delver/commo
 import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 import { IStatusbarEntryAccessor, IStatusbarService, StatusbarAlignment } from '../../../services/statusbar/browser/statusbar.js';
 import { DelverPseudocodeInput } from './delverPseudocodeInput.js';
+import { isPseudocodeSyncEnabled } from './delverPseudocodeSync.js';
 import { focusForPseudocodeLine, pseudocodeLineForRva } from './delverPseudocodeModel.js';
 
 const FOCUS_ORIGIN = 'delver.editor.pseudocode';
@@ -214,7 +215,10 @@ export class DelverPseudocodeWidget extends Disposable implements IDelverSurface
 
 	private publishFocus(line: number): void {
 		const result = this.result;
-		if (!result) {
+		// Sync off means the listing stops following this cursor. Publishing
+		// anyway and having the listing ignore it would be wrong: the focus bus
+		// is what every other surface reads too, so this must not speak at all.
+		if (!result || !isPseudocodeSyncEnabled()) {
 			return;
 		}
 		const focus = focusForPseudocodeLine(result, line);

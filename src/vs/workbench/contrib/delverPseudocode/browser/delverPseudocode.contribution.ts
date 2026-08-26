@@ -9,7 +9,10 @@ import { Disposable } from '../../../../base/common/lifecycle.js';
 import { basename } from '../../../../base/common/path.js';
 import Severity from '../../../../base/common/severity.js';
 import { localize2 } from '../../../../nls.js';
+import { Codicon } from '../../../../base/common/codicons.js';
+import { localize } from '../../../../nls.js';
 import { Action2, registerAction2 } from '../../../../platform/actions/common/actions.js';
+import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { ByteSize } from '../../../../platform/files/common/files.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
@@ -20,13 +23,73 @@ import { IProgressService, ProgressLocation } from '../../../../platform/progres
 import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../browser/editor.js';
 import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { EditorExtensions } from '../../../common/editor.js';
-import { DelverSurfaceId, DelverZone } from '../../../services/delver/browser/delverSurface.js';
+import { DelverSurfaceId, DelverZone, MenuDelverPrimaryChrome } from '../../../services/delver/browser/delverSurface.js';
 import { registerDelverSurface } from '../../../services/delver/browser/delverSurfaceRegistry.js';
 import { IDelverDecompilerService } from '../../../services/delver/common/delverDecompilerService.js';
 import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 import { DelverPseudocodeEditor } from './delverPseudocodeEditor.js';
 import { DELVER_PSEUDOCODE_EDITOR_ID, DelverPseudocodeInput } from './delverPseudocodeInput.js';
 import { DelverPseudocodeWidget } from './delverPseudocodeWidget.js';
+import {
+	DELVER_PSEUDOCODE_SYNC,
+	isPseudocodeSyncEnabled,
+	onDidChangePseudocodeSync,
+	setPseudocodeSyncEnabled,
+} from './delverPseudocodeSync.js';
+
+/**
+ * Stops the pseudocode cursor dragging the listing along.
+ *
+ * Reading decompiled C line by line moved the disassembly on every keystroke,
+ * losing the instruction the analyst was holding. `principles.md` §5 requires a
+ * synchronised view to be defeatable *visibly*, so this lives in the zone header
+ * beside pin rather than in settings.
+ */
+class TogglePseudocodeSyncAction extends Action2 {
+	constructor() {
+		super({
+			id: 'delver.pseudocode.toggleSync',
+			title: localize2('delverTogglePseudocodeSync', 'Sync Listing to Pseudocode'),
+			category: localize2('delverCategory', 'Delver'),
+			f1: true,
+			icon: Codicon.link,
+			toggled: {
+				condition: DELVER_PSEUDOCODE_SYNC.toNegated(),
+				icon: Codicon.debugDisconnect,
+				title: localize('delverPseudocodeSyncOff', "Listing Does Not Follow Pseudocode"),
+			},
+			menu: [{
+				// View state, so it is one of the only two things a zone header
+				// may carry.
+				id: MenuDelverPrimaryChrome,
+				group: 'navigation',
+				order: 2,
+			}],
+		});
+	}
+
+	async run(): Promise<void> {
+		setPseudocodeSyncEnabled(!isPseudocodeSyncEnabled());
+	}
+}
+
+registerAction2(TogglePseudocodeSyncAction);
+
+/** Mirrors the sync flag into a context key so the toolbar can show its state. */
+class DelverPseudocodeSyncContribution extends Disposable {
+	constructor(@IContextKeyService contextKeyService: IContextKeyService) {
+		super();
+		const key = DELVER_PSEUDOCODE_SYNC.bindTo(contextKeyService);
+		key.set(isPseudocodeSyncEnabled());
+		this._register(onDidChangePseudocodeSync(enabled => key.set(enabled)));
+	}
+}
+
+registerWorkbenchContribution2(
+	'delver.pseudocodeSync',
+	DelverPseudocodeSyncContribution,
+	WorkbenchPhase.BlockRestore,
+);
 
 Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
 	EditorPaneDescriptor.create(
