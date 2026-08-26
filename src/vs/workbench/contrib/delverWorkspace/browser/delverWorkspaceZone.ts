@@ -132,6 +132,27 @@ export class DelverWorkspaceZone extends Disposable implements IView<number> {
 			}
 		}
 
+		// Reconcile against `hosted` rather than trusting that every stale node was
+		// removed on the way here. Tabs are created once per id and moved, never
+		// copied, so an orphan should be impossible — but a duplicated segment is
+		// both very visible and very confusing, and this makes it unrepresentable
+		// instead of merely unlikely.
+		const live = new Set<Element>();
+		for (const hosted of this.hosted.values()) {
+			live.add(hosted.tab);
+			live.add(hosted.container);
+		}
+		for (const node of [...this.tabs.children]) {
+			if (!live.has(node)) {
+				node.remove();
+			}
+		}
+		for (const node of [...this.body.children]) {
+			if (!live.has(node)) {
+				node.remove();
+			}
+		}
+
 		const selectable = descriptors.filter(descriptor => !this.companions.has(descriptor.id));
 		const retained = this.visibleIds.filter(id => this.hosted.has(id) && !this.companions.has(id));
 		this.show(retained.length > 0 ? retained : selectable[0] ? [selectable[0].id] : []);
