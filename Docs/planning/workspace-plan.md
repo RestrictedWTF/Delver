@@ -844,3 +844,61 @@ git commit -m "feat: host upstream tree views as Delver surfaces"
 | **Phase 4** | `delver.selectionKind` context keys, `MenuId.DelverSelectionContext`, deleting the `ViewTitle`/`ViewContainerTitle` contributions, reducing the container to the target launcher, deleting `registerDelverView` |
 
 Tear-off beyond the existing Listing/Pseudocode/Strings inputs is not planned in any phase; `tearOff` stays optional on the descriptor until a workflow asks for it.
+
+---
+
+# Smoke test — 2026-08-26
+
+Launched from sources against `C:\Windows\System32\notepad.exe` (523 functions,
+38191 instructions) and `kernel32.dll`. Screenshots in
+`screenshots/workspace-smoke/` (git-ignored).
+
+## Verified working
+
+- Workbench launches with **no Delver console errors**; the decompiler
+  initialises (`ghidra-pyghidra 12.1`).
+- Activity-bar **Delver** entry survives the container reduction; the container
+  holds exactly one view, which renders its empty state, its Open Target button,
+  and an open-targets list.
+- A target opens and analyses for real, and the workspace header reports it.
+- **Three zones render as independent columns** — 240 / 1692 / 280 at full
+  height — carrying all eleven surfaces as segments. Segment switching works.
+- **The listing widget renders real disassembly inside a zone**: metadata
+  header, function landmarks, address/mnemonic/operand columns. The 852-line
+  extraction works in its new host, which was the whole risk of Phase 1.
+- Primary genuinely splits **Listing | Pseudocode**, and Pseudocode shows its
+  correct "select an address inside a detected function" empty state.
+- **Pin appears in the Primary zone chrome**, which also confirms the
+  `LISTING_ACTIVE` fix: the action is enabled for a zone-hosted listing.
+
+## Defects found
+
+**1 — Cross-target contamination. Design-level, not a patch.**
+With two workspaces open, the second shows the first's data: `kernel32.dll`'s
+workspace rendered `notepad.exe`'s listing, and its header stayed at "Opening
+target…". The cause is a mismatch this redesign *exposed* rather than created —
+the workspace is **per target** (one `EditorInput` each) while
+`IDelverSessionService` has a single `activeSession`. Every surface that reads
+`activeSession` answers for whichever target was opened last, regardless of
+which workspace is hosting it. Either the session service becomes multi-session
+and surfaces resolve theirs from the workspace context, or the workspace must
+refuse to be per-target. **That is a decision, and it needs an ADR** — do not
+paper over it by serialising opens.
+
+**2 — Four of five Navigator surfaces render no rows.**
+Functions, Imports, Exports and Sections are empty; Strings works. The four that
+fail drive their tree from `onDidChangeActiveSession(() => update())` followed
+by `treeView.refresh()`; Strings alone resolves lazily inside `getChildren` and
+is therefore host-independent. Reproduced with a **single** target open, so it
+is not caused by defect 1, though 1 will compound it. This is the same shape as
+every other defect in this work: a path that assumed the old host.
+
+**3 — Navigator segment labels are illegible.**
+At the default 240px they truncate to `Fu… S… I… E… S…`, and two are
+indistinguishable. Collapsing five surfaces into segments only pays off if the
+segments can be read; this needs icons, a shorter zone title, or overflow.
+
+**4 — Tear-off unverified.**
+A synthetic `contextmenu` event on a segment tab did not open the menu. That
+does not distinguish "not wired" from "synthetic event insufficient" — it needs
+a real right-click before being called either way.

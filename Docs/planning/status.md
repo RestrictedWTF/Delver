@@ -41,10 +41,25 @@ workspace. A zone bound context off its selected segments without asking whether
 it was visible, so hidden workspaces issued analysis requests and rewrote each
 other's persisted state. None produced a type error.
 
-**Not yet done:** the workbench has never been launched against this. Typecheck
-is clean and 262 Delver browser tests pass, but no one has opened a target and
-watched the zones behave. That is the next thing, and it is the only remaining
-claim in this work that rests on reasoning rather than evidence.
+**Launched and smoke-tested.** Zones render as independent full-height columns
+carrying all eleven surfaces; the listing renders real disassembly inside a
+zone; Primary splits Listing | Pseudocode; pin appears in the zone chrome. No
+Delver console errors.
+
+**Three defects the launch found**, recorded in
+[workspace-plan.md](workspace-plan.md):
+
+1. **Cross-target contamination, and it needs an ADR.** Two open workspaces show
+   the same data: the workspace is per-target, but `IDelverSessionService`
+   has a single `activeSession`, so every surface reading it answers for
+   whichever target was opened last. This mismatch predates the redesign; the
+   redesign made it reachable. Do not paper over it by serialising opens.
+2. **Four of five Navigator surfaces render no rows** — Functions, Imports,
+   Exports, Sections. Strings works because it resolves lazily in
+   `getChildren`; the others refresh from `onDidChangeActiveSession`. Reproduced
+   with one target open, so it is not caused by (1).
+3. **Navigator segment labels truncate** to `Fu... S... I... E... S...` at 240px, two of
+   them indistinguishable. Segments only pay for themselves if they are legible.
 
 ### Earlier this phase
 
