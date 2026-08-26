@@ -948,6 +948,10 @@ workspace is per-target, but `IDelverSessionService` has a single
 ADR — either the session service becomes multi-session and surfaces resolve
 theirs from the workspace context, or the workspace stops being per-target.
 
-**Tear-off unverified.** A synthetic `contextmenu` on a segment tab did not open
-the menu, which does not distinguish "not wired" from "synthetic event
-insufficient". Needs a real right-click.
+**Tear-off: verified working.** It was never broken — synthetic events were. A
+real right-click (`mousemove` + `mousedown right` + `mouseup right`) opens the
+menu with **Open in Editor**, and a real left-click on the item opens
+`Listing: notepad.exe` in a second editor group beside the workspace. Both a
+dispatched `contextmenu` event and a synthetic `.click()` on the menu item are
+silently ignored by VS Code's menu, so anything driving this UI must use the
+mouse primitives, not DOM events.
