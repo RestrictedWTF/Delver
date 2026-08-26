@@ -12,6 +12,10 @@ export interface IDelverWorkspaceState {
 	readonly navigatorSurfaceId: string;
 	readonly inspectorSurfaceId: string;
 	readonly primarySurfaceId: string;
+	/** Which zones are shown. Never all false — see `normalizeDelverWorkspaceState`. */
+	readonly navigatorVisible: boolean;
+	readonly primaryVisible: boolean;
+	readonly inspectorVisible: boolean;
 }
 
 export const DEFAULT_DELVER_WORKSPACE_STATE: IDelverWorkspaceState = {
@@ -20,6 +24,9 @@ export const DEFAULT_DELVER_WORKSPACE_STATE: IDelverWorkspaceState = {
 	navigatorSurfaceId: DelverSurfaceId.Functions,
 	inspectorSurfaceId: DelverSurfaceId.Xrefs,
 	primarySurfaceId: DelverSurfaceId.Listing,
+	navigatorVisible: true,
+	primaryVisible: true,
+	inspectorVisible: true,
 };
 
 const STORAGE_PREFIX = 'delver.workspace.layout.';
@@ -81,7 +88,19 @@ export function normalizeDelverWorkspaceState(value: Partial<IDelverWorkspaceSta
 		navigatorSurfaceId: validId(value.navigatorSurfaceId, DEFAULT_DELVER_WORKSPACE_STATE.navigatorSurfaceId),
 		inspectorSurfaceId: validId(value.inspectorSurfaceId, DEFAULT_DELVER_WORKSPACE_STATE.inspectorSurfaceId),
 		primarySurfaceId: validId(value.primarySurfaceId, DEFAULT_DELVER_WORKSPACE_STATE.primarySurfaceId),
+		// Hiding every zone would leave an empty editor with no way back, so a
+		// state that says so is treated as corrupt rather than obeyed.
+		...visibleZones(value),
 	};
+}
+
+function visibleZones(value: Partial<IDelverWorkspaceState>): Pick<IDelverWorkspaceState, 'navigatorVisible' | 'primaryVisible' | 'inspectorVisible'> {
+	const navigatorVisible = value.navigatorVisible !== false;
+	const primaryVisible = value.primaryVisible !== false;
+	const inspectorVisible = value.inspectorVisible !== false;
+	return navigatorVisible || primaryVisible || inspectorVisible
+		? { navigatorVisible, primaryVisible, inspectorVisible }
+		: { navigatorVisible: true, primaryVisible: true, inspectorVisible: true };
 }
 
 function validWidth(value: number | undefined, fallback: number): number {

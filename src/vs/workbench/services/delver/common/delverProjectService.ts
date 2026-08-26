@@ -441,6 +441,13 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 		this.findingDecisions.delete(session.contentHash);
 		this.toolCalls.delete(session.contentHash);
 		this.signatures.delete(session.contentHash);
+		// Interpretation is cached by content hash and was the one category not
+		// dropped here. `loadFromProject` replaces the log with the *project's*
+		// authored edits, and `load` returns early when a log is already
+		// cached — so without this, closing a project and opening the same
+		// bytes plainly still shows that project's names, and saving would
+		// write them into a new project as if authored there.
+		this.interpretationService.unload(session.contentHash);
 		if (this.active?.contentHash !== session.contentHash) {
 			return;
 		}

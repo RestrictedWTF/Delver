@@ -29,10 +29,14 @@ import { DelverSignatureVariant, IDelverNamedSignatureDraft } from '../../../../
 import { EditOp, EditValue, IAuthor, IEdit } from '../../../../platform/delver/common/interpretation.js';
 import { functionDisplayName, placeholderFunctionName } from '../../../../platform/delver/common/naming.js';
 import {
+	ICallGraphEdgeWire,
+	ICallPathStepWire,
 	IExportWire,
 	IFunctionWire,
 	IImportedModuleWire,
+	IIndirectCallSiteWire,
 	IListingRowWire,
+	IResolvedImportWire,
 	ISectionWire,
 	IStringWire,
 	IXrefWire,
@@ -110,9 +114,14 @@ export const enum DelverAgentCapabilityId {
 	ImageInfo = 'delver_image_info',
 	ListFunctions = 'delver_list_functions',
 	LookupFunction = 'delver_lookup_function',
+	BasicBlocks = 'delver_basic_blocks',
+	FunctionProfile = 'delver_function_profile',
+	CallGraph = 'delver_call_graph',
+	CallPaths = 'delver_call_paths',
 	ConvertAddress = 'delver_convert_address',
 	ReadBytes = 'delver_read_bytes',
 	SearchBytes = 'delver_search_bytes',
+	SearchInstructions = 'delver_search_instructions',
 	MakeSignature = 'delver_make_signature',
 	ListSignatures = 'delver_list_signatures',
 	SaveSignature = 'delver_save_signature',
@@ -175,6 +184,26 @@ export const DELVER_AGENT_CAPABILITIES: readonly IDelverAgentCapability[] = [
 		description: 'Resolves one function by name, or the function containing a given address.',
 	},
 	{
+		id: DelverAgentCapabilityId.BasicBlocks, group: 'analysis', kind: 'read', requiresAttachedTarget: true,
+		title: 'Delver Basic Blocks',
+		description: 'Returns a bounded control-flow graph for one detected function, resolved by address or exact name. Requires the sample to be attached.',
+	},
+	{
+		id: DelverAgentCapabilityId.FunctionProfile, group: 'analysis', kind: 'read', requiresAttachedTarget: true,
+		title: 'Delver Function Profile',
+		description: 'Sizes one detected function — instruction, block, edge, call-site, and return counts — so it can be judged before it is read. Requires the sample to be attached.',
+	},
+	{
+		id: DelverAgentCapabilityId.CallGraph, group: 'analysis', kind: 'read', requiresAttachedTarget: true,
+		title: 'Delver Call Graph',
+		description: 'Returns the bounded direct callers and callees of one detected function, cited function-relatively, alongside the call sites whose target is not statically known. Requires the sample to be attached.',
+	},
+	{
+		id: DelverAgentCapabilityId.CallPaths, group: 'analysis', kind: 'read', requiresAttachedTarget: true,
+		title: 'Delver Call Paths',
+		description: 'Searches for bounded call paths from one detected function to another function or to an imported API, citing every calling instruction along the way, and reports whether the search was complete enough for an empty result to mean anything. Requires the sample to be attached.',
+	},
+	{
 		id: DelverAgentCapabilityId.ConvertAddress, group: 'analysis', kind: 'read', requiresAttachedTarget: false,
 		title: 'Delver Convert Address',
 		description: 'Converts an RVA, virtual address, or raw file offset into the other address spaces and identifies its section.',
@@ -188,6 +217,11 @@ export const DELVER_AGENT_CAPABILITIES: readonly IDelverAgentCapability[] = [
 		id: DelverAgentCapabilityId.SearchBytes, group: 'analysis', kind: 'read', requiresAttachedTarget: true,
 		title: 'Delver Search Bytes',
 		description: 'Searches provider-backed image sections for an exact byte pattern with optional nibble wildcards. Requires the sample to be attached.',
+	},
+	{
+		id: DelverAgentCapabilityId.SearchInstructions, group: 'analysis', kind: 'read', requiresAttachedTarget: true,
+		title: 'Delver Search Instructions',
+		description: 'Searches decoded instructions by exact mnemonic and optional formatted operand-text substring. Requires the sample to be attached.',
 	},
 	{
 		id: DelverAgentCapabilityId.MakeSignature, group: 'analysis', kind: 'read', requiresAttachedTarget: true,
@@ -321,6 +355,13 @@ interface IParsedFinding {
 type ByteReadSpace = 'image' | 'file';
 type ByteReadFormat = 'hex' | 'u8' | 'u16le' | 'u32le' | 'u64le';
 type AddressConversionSpace = 'rva' | 'va' | 'file';
+type CallGraphDirection = 'callers' | 'callees' | 'both';
+
+/** One call-graph edge together with the side of the function it belongs to. */
+interface ICallGraphRow {
+	readonly edge: ICallGraphEdgeWire;
+	readonly role: 'caller' | 'callee';
+}
 
 interface IBytePattern {
 	readonly canonical: string;
@@ -538,9 +579,14 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 		this.handlers.set(DelverAgentCapabilityId.ImageInfo, context => this.handleImageInfo(context));
 		this.handlers.set(DelverAgentCapabilityId.ListFunctions, context => this.handleListFunctions(context));
 		this.handlers.set(DelverAgentCapabilityId.LookupFunction, context => this.handleLookupFunction(context));
+		this.handlers.set(DelverAgentCapabilityId.BasicBlocks, context => this.handleBasicBlocks(context));
+		this.handlers.set(DelverAgentCapabilityId.FunctionProfile, context => this.handleFunctionProfile(context));
+		this.handlers.set(DelverAgentCapabilityId.CallGraph, context => this.handleCallGraph(context));
+		this.handlers.set(DelverAgentCapabilityId.CallPaths, context => this.handleCallPaths(context));
 		this.handlers.set(DelverAgentCapabilityId.ConvertAddress, context => this.handleConvertAddress(context));
 		this.handlers.set(DelverAgentCapabilityId.ReadBytes, context => this.handleReadBytes(context));
 		this.handlers.set(DelverAgentCapabilityId.SearchBytes, context => this.handleSearchBytes(context));
+		this.handlers.set(DelverAgentCapabilityId.SearchInstructions, context => this.handleSearchInstructions(context));
 		this.handlers.set(DelverAgentCapabilityId.MakeSignature, context => this.handleMakeSignature(context));
 		this.handlers.set(DelverAgentCapabilityId.ListSignatures, context => this.handleListSignatures(context));
 		this.handlers.set(DelverAgentCapabilityId.SaveSignature, context => this.handleSaveSignature(context));
@@ -852,6 +898,366 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 		};
 	}
 
+	private async handleBasicBlocks(context: IHandlerContext): Promise<IHandlerOutput> {
+		const session = this.requireAttached();
+		const functions = await this.resolvedFunctions(session);
+		this.throwIfCancelled(context.token);
+		const target = resolveFunctionSelector(context.args, functions, FUNCTION_SELECTOR);
+		const maxBlocks = boundedCount(context.args.maxBlocks, DELVER_AGENT_LIMITS.basicBlocks);
+		const graph = await this.analysisService.basicBlocks(session.sessionId, toWireAddress(target.rva), maxBlocks);
+		this.throwIfCancelled(context.token);
+
+		return {
+			data: {
+				function: describeFunction(target),
+				blocks: graph.blocks.map(block => ({
+					startRva: block.start_rva,
+					endRva: block.end_rva,
+					instructionCount: block.instruction_count,
+				})),
+				edges: graph.edges,
+				truncated: graph.truncated,
+			},
+			completeness: graph.truncated ? 'partial' : 'complete',
+			...(graph.truncated ? { omitted: { reason: `The control-flow graph exceeded the ${maxBlocks}-block bound.` } } : {}),
+			provenance: [{
+				source: 'analysis',
+				detail: `Provider-derived basic-block control-flow graph for ${target.name}.`,
+				contentHash: session.contentHash,
+				addresses: [toWireAddress(target.rva)],
+				untrusted: true,
+			}],
+		};
+	}
+
+	/**
+	 * Sizes one detected function before a model commits to reading it.
+	 *
+	 * Every count here is only as strong as the extent it was measured over.
+	 * When the provider never recorded the function's own end, the analysis
+	 * server infers one, and an inferred extent can swallow the next function
+	 * or stop short of a tail. That is reported as `partial` rather than
+	 * dressed up as a measurement: the whole value of this capability is
+	 * deciding whether a function is worth disassembling, and a decision made
+	 * against a guessed boundary is a guess.
+	 */
+	private async handleFunctionProfile(context: IHandlerContext): Promise<IHandlerOutput> {
+		const session = this.requireAttached();
+		const functions = await this.resolvedFunctions(session);
+		this.throwIfCancelled(context.token);
+		const target = resolveFunctionSelector(context.args, functions, FUNCTION_SELECTOR);
+		const profile = await this.analysisService.functionProfile(session.sessionId, toWireAddress(target.rva));
+		this.throwIfCancelled(context.token);
+
+		return {
+			data: {
+				function: describeFunction(target),
+				endRva: profile.end_rva,
+				bounded: profile.bounded,
+				// Computed here rather than on the wire: a 64-bit span sent as a
+				// JSON number truncates above 2^53 without erroring, so the
+				// subtraction is done in bigint and emitted as a "0x..." string.
+				size: functionExtentSize(profile.function_rva, profile.end_rva),
+				body: {
+					instructionCount: profile.instruction_count,
+					blockCount: profile.block_count,
+					edgeCount: profile.edge_count,
+					decodedExtentBytes: profile.decoded_extent_bytes,
+					returnCount: profile.return_count,
+				},
+				callers: {
+					siteCount: profile.incoming_call_site_count,
+					functionCount: profile.incoming_caller_function_count,
+				},
+				callees: {
+					siteCount: profile.outgoing_call_site_count,
+					functionCount: profile.outgoing_target_function_count,
+					indirectSiteCount: profile.indirect_call_site_count,
+					resolvedIndirectSiteCount: profile.resolved_indirect_call_site_count,
+				},
+			},
+			completeness: profile.bounded ? 'complete' : 'partial',
+			...(profile.bounded ? {} : {
+				omitted: {
+					reason: 'The function\'s own end was never recorded, so its extent was inferred from the next detected function. Every count here describes that inferred extent, not a proven boundary: treat them as an estimate of size, not as a measurement of this function.',
+				},
+			}),
+			provenance: [{
+				source: 'analysis',
+				detail: profile.bounded
+					? `Provider-derived profile of ${target.name} over its recorded extent.`
+					: `Provider-derived profile of ${target.name} over an inferred extent.`,
+				contentHash: session.contentHash,
+				addresses: [toWireAddress(target.rva)],
+				untrusted: true,
+			}],
+		};
+	}
+
+	/**
+	 * Returns the direct callers and callees of one detected function.
+	 *
+	 * The server bounds the three lists it computes; this pages what a model
+	 * actually reads. When both directions are asked for, callers and callees
+	 * are walked as one concatenated sequence so a cursor cannot skip or repeat
+	 * a row when the second page is fetched.
+	 *
+	 * A direct call graph is not automatically the whole story. An indirect
+	 * call site — a dispatch through a register, a vtable, or an import thunk —
+	 * has no statically known callee, so every one of them appears in
+	 * `indirectCallSites`. The commonest of them on Windows is a call through
+	 * the import address table, which the analysis server resolves back to the
+	 * imported API it reaches: a resolved site names a real outgoing call and is
+	 * not a hole in the graph.
+	 *
+	 * Only the sites left unresolved therefore force `partial`, because only
+	 * they make a model that reads an untruncated page as "these are all the
+	 * functions this one calls" wrong. Marking a graph whose every outgoing call
+	 * is named as partial would be the wrong kind of caution: it teaches a model
+	 * to ignore the flag on the graphs where it is true.
+	 */
+	private async handleCallGraph(context: IHandlerContext): Promise<IHandlerOutput> {
+		const session = this.requireAttached();
+		const { startIndex, count, project, filter } = this.pageArgs(
+			context, DelverAgentCapabilityId.CallGraph, DELVER_AGENT_LIMITS.callGraphEdges, ['address', 'name', 'direction']);
+		const direction = callGraphDirection(context.args.direction);
+		const functions = await this.resolvedFunctions(session);
+		this.throwIfCancelled(context.token);
+		const target = resolveFunctionSelector(context.args, functions, FUNCTION_SELECTOR);
+		const graph = await this.analysisService.callGraph(session.sessionId, toWireAddress(target.rva), CALL_GRAPH_SERVER_EDGE_BOUND);
+		this.throwIfCancelled(context.token);
+
+		const includeCallers = direction !== 'callees';
+		const includeCallees = direction !== 'callers';
+		// One ordered sequence, callers first: the cursor is an index into this
+		// concatenation, so the callers-to-callees boundary is just another
+		// page boundary and needs no special case on resume.
+		const sequence: readonly ICallGraphRow[] = [
+			...(includeCallers ? graph.callers.map(edge => ({ edge, role: 'caller' as const })) : []),
+			...(includeCallees ? graph.callees.map(edge => ({ edge, role: 'callee' as const })) : []),
+		];
+		const page = paginate(sequence, startIndex, count);
+
+		// Paging, a server-side bound, and an unresolvable call site are three
+		// different kinds of incompleteness and only the first is fixable by
+		// asking again — so each says which one it is.
+		const reasons: string[] = [];
+		if (page.nextIndex !== undefined) {
+			reasons.push(page.omittedCount === 1
+				? '1 more edge remains in this walk; continue with nextCursor.'
+				: `${page.omittedCount} more edges remain in this walk; continue with nextCursor.`);
+		}
+		if (includeCallers && graph.callers_truncated) {
+			reasons.push(`The analysis server returned ${graph.callers.length} of ${graph.caller_total} callers; the remainder is not reachable by paging.`);
+		}
+		if (includeCallees && graph.callees_truncated) {
+			reasons.push(`The analysis server returned ${graph.callees.length} of ${graph.callee_total} callees; the remainder is not reachable by paging.`);
+		}
+		if (includeCallees && graph.indirect_truncated) {
+			reasons.push(`The analysis server returned ${graph.indirect_call_sites.length} of ${graph.indirect_call_site_total} indirect call sites.`);
+		}
+		// Counted over the unresolved sites, not over every indirect site: a call
+		// through the IAT that resolved to a named import is as fully described as
+		// a direct edge, and saying otherwise would make `partial` meaningless on
+		// the graphs where it is a real warning.
+		if (includeCallees && graph.unresolved_indirect_call_site_total > 0) {
+			const sites = graph.unresolved_indirect_call_site_total === 1
+				? '1 outgoing call site is indirect and has'
+				: `${graph.unresolved_indirect_call_site_total} outgoing call sites are indirect and have`;
+			reasons.push(`${sites} no statically known target, so this direct graph provably does not name every function ${target.name} calls.`);
+		}
+
+		return {
+			data: {
+				function: describeFunction(target),
+				direction,
+				total: page.total,
+				edges: page.items.map(row => this.describeCallGraphEdge(session.contentHash, row, functions)),
+				...(includeCallers ? {
+					callerTotal: graph.caller_total,
+					callersTruncated: graph.callers_truncated,
+				} : {}),
+				...(includeCallees ? {
+					calleeTotal: graph.callee_total,
+					calleesTruncated: graph.callees_truncated,
+					indirectCallSites: graph.indirect_call_sites.map(describeIndirectCallSite),
+					indirectCallSiteTotal: graph.indirect_call_site_total,
+					unresolvedIndirectCallSiteTotal: graph.unresolved_indirect_call_site_total,
+					indirectCallSitesTruncated: graph.indirect_truncated,
+				} : {}),
+			},
+			completeness: reasons.length === 0 ? 'complete' : 'partial',
+			...(page.nextIndex === undefined ? {} : { nextCursor: encodeCursor(DelverAgentCapabilityId.CallGraph, project, page.nextIndex, filter) }),
+			...(reasons.length === 0 ? {} : {
+				omitted: {
+					...(page.nextIndex === undefined ? {} : { count: page.omittedCount }),
+					reason: reasons.join(' '),
+				},
+			}),
+			provenance: [{
+				source: 'analysis',
+				detail: `Direct call graph (${direction}) for ${target.name}.`,
+				contentHash: session.contentHash,
+				addresses: [toWireAddress(target.rva)],
+				untrusted: true,
+			}],
+		};
+	}
+
+	/**
+	 * Describes one call-graph edge in function-relative terms.
+	 *
+	 * A caller is cited where the call comes *from*, a callee where it lands,
+	 * because that is the address an analyst would go and look at. A bare RVA
+	 * would make the model re-derive ownership on every edge and get it wrong
+	 * for thunks — the same reason {@link describeXref} exists.
+	 *
+	 * A callee that is itself a one-instruction `jmp [IAT]` thunk also carries
+	 * the import it reaches. Both facts are kept: the thunk is the function this
+	 * code really branches to and the address an analyst has to look at, while
+	 * the import is what the call ends up invoking. Collapsing one into the
+	 * other would lose a real address.
+	 */
+	private describeCallGraphEdge(contentHash: string, row: ICallGraphRow, functions: readonly IResolvedFunction[]): Record<string, unknown> {
+		const cited = BigInt(row.role === 'caller' ? row.edge.site : row.edge.target);
+		const declared = row.role === 'caller' ? row.edge.site_function_rva : row.edge.target_function_rva;
+		const owner = callGraphOwner(functions, declared, cited);
+		const interpretation = this.interpretationService.at({ kind: 'image', contentHash, rva: cited });
+		return {
+			role: row.role,
+			site: row.edge.site,
+			target: row.edge.target,
+			kind: row.edge.kind,
+			tailCall: row.edge.tail_call,
+			// Present only when a detected function genuinely contains the cited
+			// address: attributing an edge to a guessed owner is worse than a
+			// raw RVA the model knows it has to resolve.
+			inFunction: owner === undefined ? undefined : owner.name,
+			offsetInFunction: owner === undefined ? undefined : toWireAddress(cited - owner.rva),
+			comment: interpretation?.comment,
+			...describeResolvedImport(row.edge.resolved_import),
+		};
+	}
+
+	/**
+	 * Searches for bounded call paths from one function to another function or
+	 * to an imported API.
+	 *
+	 * This is the capability that answers "does anything here reach
+	 * `VirtualAlloc`?", and it is the one whose result is easiest to misread. A
+	 * *positive* answer proves itself: every step cites the exact calling
+	 * instruction, so a returned path can be checked byte by byte. A *negative*
+	 * answer proves nothing on its own. The search is bounded three ways — by
+	 * depth, by how many paths were asked for, and by how many functions the
+	 * server will visit — and any one of those bounds can cut it short before
+	 * the path that exists is found.
+	 *
+	 * Worse, the graph being searched is itself incomplete wherever a call
+	 * dispatches through a register, a vtable, or a data pointer. Those sites
+	 * are counted on the frontier rather than quietly walked past, because that
+	 * is precisely where a real sample hides the edge an analyst is looking
+	 * for.
+	 *
+	 * So `complete` is claimed only when the server exhausted the reachable set
+	 * *and* no bound was hit *and* nothing indirect was left unresolved on the
+	 * frontier *and* no path was withheld. Anything less is `partial` with the
+	 * specific cause named, so a model can tell a cause it can fix by asking
+	 * again with a larger `maxDepth` from one no amount of asking will fix.
+	 * Collapsing those into one flag would teach a model to ignore the flag.
+	 */
+	private async handleCallPaths(context: IHandlerContext): Promise<IHandlerOutput> {
+		const session = this.requireAttached();
+		const functions = await this.resolvedFunctions(session);
+		this.throwIfCancelled(context.token);
+		const source = resolveFunctionSelector(context.args, functions, CALL_PATH_SOURCE_SELECTOR);
+		// An address that lands inside a detected function names that function,
+		// exactly as every other address argument in this tool surface does, and
+		// the server is given the entry it requires. Anything else — an IAT slot,
+		// most often — is passed through untouched for the server to resolve or
+		// refuse. The sink may legitimately not be code at all.
+		const requestedSink = resolveCallPathSink(context.args, functions);
+		const sink = containingFunction(functions, requestedSink);
+		const sinkRva = sink?.rva ?? requestedSink;
+		const maxDepth = boundedCount(context.args.maxDepth, DELVER_AGENT_LIMITS.callPathDepth);
+		const maxPaths = boundedCount(context.args.maxPaths, DELVER_AGENT_LIMITS.callPaths);
+		const search = await this.analysisService.callPaths(
+			session.sessionId,
+			toWireAddress(source.rva),
+			toWireAddress(sinkRva),
+			maxDepth,
+			maxPaths,
+			CALL_PATH_SERVER_VISIT_BOUND,
+		);
+		this.throwIfCancelled(context.token);
+
+		// An unowned sink is reported as a bare address rather than attributed to
+		// a neighbouring function it is not part of.
+		const sinkLabel = sink?.name ?? toWireAddress(sinkRva);
+
+		// Each of these is a different kind of incompleteness, and only some of
+		// them are fixable by asking again, so each names itself rather than
+		// hiding behind one word.
+		const reasons: string[] = [];
+		if (search.paths_truncated) {
+			reasons.push(search.paths.length === 1
+				? '1 path was returned and more exist; this is a sample of the paths between these two addresses, not all of them.'
+				: `${search.paths.length} paths were returned and more exist; this is a sample of the paths between these two addresses, not all of them.`);
+		}
+		if (search.depth_limit_reached) {
+			reasons.push(`The search was cut off at maxDepth ${maxDepth}: no path longer than ${maxDepth} calls was ever explored. Raise maxDepth to look further.`);
+		}
+		if (search.visit_limit_reached) {
+			reasons.push(`The search stopped after visiting ${search.visited_function_count} functions, so part of the reachable graph was never explored.`);
+		}
+		if (search.unresolved_indirect_sites_on_frontier > 0) {
+			const sites = search.unresolved_indirect_sites_on_frontier === 1
+				? '1 call site reached by this search dispatches'
+				: `${search.unresolved_indirect_sites_on_frontier} call sites reached by this search dispatch`;
+			reasons.push(`${sites} through a register, a table, or a data pointer with no statically known target, so a path this search cannot follow may continue past any of them.`);
+		}
+		if (!search.search_exhausted && reasons.length === 0) {
+			reasons.push('The analysis server stopped before the reachable set had been fully explored.');
+		}
+		// Said first and said plainly. A bounded search that found nothing is
+		// the single most misreadable result this tool surface produces, and a
+		// model that reads it as proof of absence clears malicious code.
+		if (search.paths.length === 0 && reasons.length > 0) {
+			reasons.unshift(`No path from ${source.name} to ${sinkLabel} was found, but this search did not finish, so that is not evidence that no path exists.`);
+		}
+
+		const complete = search.search_exhausted
+			&& !search.depth_limit_reached
+			&& !search.visit_limit_reached
+			&& !search.paths_truncated
+			&& search.unresolved_indirect_sites_on_frontier === 0;
+
+		return {
+			data: {
+				from: describeFunction(source),
+				to: sink === undefined ? { rva: toWireAddress(sinkRva) } : describeFunction(sink),
+				maxDepth,
+				maxPaths,
+				pathCount: search.paths.length,
+				paths: search.paths.map(path => ({ steps: path.steps.map(step => describeCallPathStep(step, functions)) })),
+				pathsTruncated: search.paths_truncated,
+				searchExhausted: search.search_exhausted,
+				depthLimitReached: search.depth_limit_reached,
+				visitLimitReached: search.visit_limit_reached,
+				visitedFunctionCount: search.visited_function_count,
+				unresolvedIndirectSitesOnFrontier: search.unresolved_indirect_sites_on_frontier,
+			},
+			completeness: complete ? 'complete' : 'partial',
+			...(complete ? {} : { omitted: { reason: reasons.join(' ') } }),
+			provenance: [{
+				source: 'analysis',
+				detail: `Bounded call-path search from ${source.name} to ${sinkLabel}.`,
+				contentHash: session.contentHash,
+				addresses: [toWireAddress(source.rva), toWireAddress(sinkRva)],
+				untrusted: true,
+			}],
+		};
+	}
+
 	private async handleConvertAddress(context: IHandlerContext): Promise<IHandlerOutput> {
 		const session = this.requireSession();
 		const address = parseWireAddress(context.args.address);
@@ -991,6 +1397,82 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 		};
 	}
 
+	private async handleSearchInstructions(context: IHandlerContext): Promise<IHandlerOutput> {
+		const session = this.requireAttached();
+		const mnemonic = instructionMnemonic(context.args.mnemonic);
+		const operands = optionalBoundedText(context.args.operands, 256, 'operands')?.toLowerCase();
+		const project = this.requireProjectIdentity();
+		const filter = filterFingerprint({ mnemonic, operands });
+		const startRow = decodeCursor(context.args.cursor, DelverAgentCapabilityId.SearchInstructions, project, filter);
+		const count = boundedCount(context.args.count, DELVER_AGENT_LIMITS.instructionSearchMatches);
+		const matches: IListingRowWire[] = [];
+		let row = startRow;
+		let totalRows = 0;
+		let scannedInstructionCount = 0;
+		const windowSize = DELVER_AGENT_LIMITS.listingRows.max;
+
+		while (matches.length <= count) {
+			const listing = await this.analysisService.listingWindow(session.sessionId, row, windowSize);
+			this.throwIfCancelled(context.token);
+			totalRows = listing.total_rows;
+			if (row > totalRows) {
+				throw new DelverAgentError(DelverAgentErrorCode.StaleRevision, 'The instruction-search cursor is outside the decoded instruction list. Restart the search.');
+			}
+			if (listing.rows.length === 0) {
+				break;
+			}
+			for (const instruction of listing.rows) {
+				scannedInstructionCount++;
+				if (instruction.mnemonic.toLowerCase() === mnemonic
+					&& (operands === undefined || instruction.operands.toLowerCase().includes(operands))) {
+					matches.push(instruction);
+					if (matches.length > count) {
+						break;
+					}
+				}
+			}
+			if (matches.length > count) {
+				break;
+			}
+			row += listing.rows.length;
+			if (row >= totalRows) {
+				break;
+			}
+		}
+
+		const hasMore = matches.length > count;
+		const page = matches.slice(0, count);
+		const nextRow = hasMore ? matches[count].row : undefined;
+		const names = this.interpretationService.namesFor(session.contentHash, page.map(instruction => BigInt(instruction.rva)));
+		const ranges = page.map(instruction => ({
+			start: instruction.rva,
+			end: toWireAddress(BigInt(instruction.rva) + BigInt(instruction.len)),
+		}));
+		return {
+			data: {
+				query: { mnemonic, ...(operands === undefined ? {} : { operands }) },
+				startRow,
+				totalInstructionCount: totalRows,
+				scannedInstructionCount,
+				matches: page.map(instruction => this.describeListingRow(session.contentHash, instruction, names)),
+			},
+			completeness: hasMore ? 'partial' : 'complete',
+			...(hasMore ? {
+				nextCursor: encodeCursor(DelverAgentCapabilityId.SearchInstructions, project, nextRow!, filter),
+				omitted: { reason: 'More matching instructions remain; continue with nextCursor. The remaining count is unknown until every decoded instruction is scanned.' },
+			} : {}),
+			provenance: [{
+				source: 'analysis',
+				detail: hasMore
+					? 'Scanned decoded instructions until the next page of mnemonic matches was proven.'
+					: 'Completed the mnemonic search over every remaining decoded instruction.',
+				contentHash: session.contentHash,
+				untrusted: true,
+				ranges,
+			}],
+		};
+	}
+
 	private async handleReadBytes(context: IHandlerContext): Promise<IHandlerOutput> {
 		const session = this.requireAttached();
 		const address = parseWireAddress(context.args.address);
@@ -1062,6 +1544,21 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 		const startOffset = decodeCursor(context.args.cursor, DelverAgentCapabilityId.SearchBytes, project, filter);
 		const count = boundedCount(context.args.count, DELVER_AGENT_LIMITS.byteSearchMatches);
 		const segments = byteSearchSegments(info.sections, sectionNames, executableOnly);
+		// A scan with nothing to scan must not answer "complete, no matches".
+		// Section names are validated above, but a section can exist and still
+		// have no provider-backed bytes — `.textbss` and `.bss` carry a virtual
+		// size and a zero raw size — and `executableOnly` can select none at
+		// all. Reporting absence after reading zero bytes is the exact claim
+		// this contract exists to prevent, so it fails instead, the same way
+		// `handleMakeSignature` already does.
+		if (segments.length === 0) {
+			throw new DelverAgentError(
+				DelverAgentErrorCode.AddressNotMapped,
+				sectionNames.length > 0
+					? `None of the selected sections (${sectionNames.join(', ')}) have provider-backed bytes to scan.`
+					: 'No selected section has provider-backed bytes to scan.',
+			);
+		}
 		const searchableByteCount = segments.reduce((total, segment) => total + segment.size, 0);
 		if (startOffset > searchableByteCount) {
 			throw new DelverAgentError(DelverAgentErrorCode.StaleRevision, 'The byte-search cursor is outside the selected section data. Restart the search.');
@@ -1964,6 +2461,29 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 /** Origin tag for focus moved by an agent, so views can ignore their own echo. */
 export const DELVER_AGENT_FOCUS_ORIGIN = 'delver.agent';
 
+/**
+ * Edges asked of the analysis server for one call-graph query.
+ *
+ * The server clamps this to its own ceiling and bounds callers, callees, and
+ * indirect sites independently. Asking for the ceiling and paging locally is
+ * deliberate: one cursor then walks callers and callees as a single sequence,
+ * and a truncation flag means the graph really is too large rather than that
+ * the model asked for a small page.
+ */
+const CALL_GRAPH_SERVER_EDGE_BOUND = 4096;
+
+/**
+ * Functions the analysis server may visit while searching for one set of call
+ * paths.
+ *
+ * Depth and path count are the bounds a caller tunes; this is the backstop
+ * that keeps a pathological graph from searching forever, and it is set at the
+ * server's own ceiling so that a reported `visitLimitReached` means the graph
+ * really is that large rather than that the dispatcher was timid. A search cut
+ * here is always reported, never hidden.
+ */
+const CALL_PATH_SERVER_VISIT_BOUND = 100_000;
+
 const SCAN_TRUNCATED_REASON = 'The image string scan hit its cap, so some strings were never extracted and no cursor will reach them.';
 
 function proposalAuthor(caller: IDelverAgentCaller | undefined): IAuthor {
@@ -2301,23 +2821,79 @@ function crossRevisionEvidenceSelector(
 }
 
 function resolveSignatureFunction(args: Readonly<Record<string, unknown>>, functions: readonly IResolvedFunction[]): IResolvedFunction {
-	const hasAddress = args.address !== undefined;
-	const hasFunction = args.function !== undefined;
-	if (hasAddress === hasFunction) {
-		throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, 'Pass exactly one of address or function.');
+	return resolveFunctionSelector(args, functions, SIGNATURE_FUNCTION_SELECTOR);
+}
+
+/**
+ * The pair of argument names one function selector is spelled with.
+ *
+ * Most capabilities select a single function and spell it `address`/`name`,
+ * but a capability that names two functions in one call cannot. The keys
+ * therefore travel with the arguments instead of being hard-coded, so there
+ * stays one resolver and every refusal names the argument the caller actually
+ * passed rather than one it will not find in the schema.
+ */
+interface IFunctionSelectorKeys {
+	readonly address: string;
+	readonly name: string;
+}
+
+const FUNCTION_SELECTOR: IFunctionSelectorKeys = { address: 'address', name: 'name' };
+const SIGNATURE_FUNCTION_SELECTOR: IFunctionSelectorKeys = { address: 'address', name: 'function' };
+const CALL_PATH_SOURCE_SELECTOR: IFunctionSelectorKeys = { address: 'fromAddress', name: 'fromName' };
+const CALL_PATH_SINK_SELECTOR: IFunctionSelectorKeys = { address: 'toAddress', name: 'toName' };
+
+/**
+ * Resolves the sink of a call-path search.
+ *
+ * Unlike every other function selector, an address here is deliberately *not*
+ * required to land inside a detected function. The question this capability
+ * exists to answer — "what reaches `VirtualAlloc`?" — is most often asked
+ * about an import address table slot, which is data, not code. Refusing it
+ * locally would refuse the commonest form of the question, so the address is
+ * passed through and the analysis server decides whether it is a sink it can
+ * resolve; its INVALID_ARGUMENT reaches the caller unchanged.
+ */
+function resolveCallPathSink(args: Readonly<Record<string, unknown>>, functions: readonly IResolvedFunction[]): bigint {
+	const address = args[CALL_PATH_SINK_SELECTOR.address];
+	const hasAddress = address !== undefined;
+	const hasName = args[CALL_PATH_SINK_SELECTOR.name] !== undefined;
+	if (hasAddress === hasName) {
+		throw new DelverAgentError(
+			DelverAgentErrorCode.InvalidArgument,
+			`Pass exactly one of ${CALL_PATH_SINK_SELECTOR.address} or ${CALL_PATH_SINK_SELECTOR.name}.`,
+		);
 	}
 	if (hasAddress) {
-		const address = parseWireAddress(args.address);
+		return parseWireAddress(address, CALL_PATH_SINK_SELECTOR.address);
+	}
+	return resolveFunctionSelector(args, functions, CALL_PATH_SINK_SELECTOR).rva;
+}
+
+function resolveFunctionSelector(
+	args: Readonly<Record<string, unknown>>,
+	functions: readonly IResolvedFunction[],
+	keys: IFunctionSelectorKeys,
+): IResolvedFunction {
+	const addressValue = args[keys.address];
+	const nameValue = args[keys.name];
+	const hasAddress = addressValue !== undefined;
+	const hasName = nameValue !== undefined;
+	if (hasAddress === hasName) {
+		throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, `Pass exactly one of ${keys.address} or ${keys.name}.`);
+	}
+	if (hasAddress) {
+		const address = parseWireAddress(addressValue, keys.address);
 		const target = containingFunction(functions, address);
 		if (!target) {
 			throw new DelverAgentError(DelverAgentErrorCode.FunctionNotFound, `No detected function contains ${toWireAddress(address)}.`);
 		}
 		return target;
 	}
-	if (typeof args.function !== 'string' || args.function.trim().length === 0) {
-		throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, 'function must be a non-empty detected or authored function name.');
+	if (typeof nameValue !== 'string' || nameValue.trim().length === 0) {
+		throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, `${keys.name} must be a non-empty detected or authored function name.`);
 	}
-	const query = args.function.trim();
+	const query = nameValue.trim();
 	let matches = functions.filter(candidate => candidate.name === query);
 	if (matches.length === 0) {
 		const folded = query.toLowerCase();
@@ -2659,6 +3235,14 @@ function optionalBoundedText(value: unknown, maxLength: number, name: string): s
 	return value === undefined ? undefined : requiredBoundedText(value, maxLength, name);
 }
 
+function instructionMnemonic(value: unknown): string {
+	const mnemonic = requiredBoundedText(value, 32, 'mnemonic').toLowerCase();
+	if (!/^[a-z][a-z0-9_.]*$/.test(mnemonic)) {
+		throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, 'mnemonic must be an instruction mnemonic, not an operand or expression.');
+	}
+	return mnemonic;
+}
+
 function optionalBoolean(value: unknown, name: string): boolean | undefined {
 	if (value === undefined) {
 		return undefined;
@@ -2692,6 +3276,127 @@ function hexFromBytes(bytes: Uint8Array, startIndex: number, count: number): str
 		result += bytes[index].toString(16).padStart(2, '0');
 	}
 	return result;
+}
+
+function callGraphDirection(value: unknown): CallGraphDirection {
+	if (value === undefined || value === 'both') {
+		return 'both';
+	}
+	if (value === 'callers' || value === 'callees') {
+		return value;
+	}
+	throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, 'direction must be "callers", "callees", or "both".');
+}
+
+/**
+ * The function a call-graph endpoint belongs to.
+ *
+ * The analysis server's own attribution wins where it has one — it detected the
+ * boundary — and the local index is consulted only to attach the resolved,
+ * possibly authored, name. Where the server attributed nothing, a containing
+ * lookup still refuses padding after a known end, so an endpoint is either
+ * genuinely owned or reported unowned.
+ */
+function callGraphOwner(functions: readonly IResolvedFunction[], declaredRva: string | undefined, address: bigint): IResolvedFunction | undefined {
+	if (declaredRva !== undefined) {
+		const declared = BigInt(declaredRva);
+		const entry = containingFunction(functions, declared);
+		if (entry !== undefined && entry.rva === declared) {
+			return entry;
+		}
+	}
+	return containingFunction(functions, address);
+}
+
+/**
+ * Byte span of a function extent, as a `"0x..."` string, or `undefined` when
+ * no end is known.
+ *
+ * A malformed or inverted extent yields nothing rather than a negative size:
+ * an obviously wrong number that a model will still reason over is worse than
+ * an absent one.
+ */
+function functionExtentSize(startRva: string, endRva: string | undefined): string | undefined {
+	if (endRva === undefined) {
+		return undefined;
+	}
+	const start = BigInt(startRva);
+	const end = BigInt(endRva);
+	return end <= start ? undefined : toWireAddress(end - start);
+}
+
+/**
+ * Flattens an import resolved behind an indirect call or a thunk onto the row
+ * that reached it.
+ *
+ * Emitted as loose fields rather than a nested object so a resolved indirect
+ * site and a resolved callee edge read identically, and returned empty — not
+ * as a set of `undefined` keys — when nothing resolved: a present-but-blank
+ * `importModule` invites a model to believe an import was found and left
+ * unnamed. `confidence` is carried through rather than assumed: `exact` is all
+ * the server produces today, but a later vtable or dataflow resolution will be
+ * `probable`, and a reader that hard-codes the current value would silently
+ * promote a guess.
+ */
+function describeResolvedImport(resolved: IResolvedImportWire | undefined): Record<string, unknown> {
+	if (resolved === undefined) {
+		return {};
+	}
+	return {
+		importModule: resolved.module,
+		// Absent for an import by ordinal. There is no name to report, and an
+		// invented one would put a symbol in the graph the sample never carried.
+		importSymbol: resolved.symbol,
+		importOrdinal: resolved.ordinal,
+		iatRva: resolved.iat_rva,
+		resolutionMethod: resolved.method,
+		confidence: resolved.confidence,
+	};
+}
+
+/**
+ * Describes one step of a call path.
+ *
+ * `callSite` is the exact calling instruction, which is what makes a path
+ * quotable evidence rather than a summary: an analyst can go and look at every
+ * address in it. Each end names the function that owns it only where a detected
+ * function genuinely does, for the same reason {@link describeCallGraphEdge}
+ * refuses a guessed owner: a fabricated attribution is worse than a raw RVA the
+ * model knows it still has to resolve.
+ *
+ * A step that lands on an import has no `toFunction`; the flattened import
+ * fields name what it reaches instead.
+ */
+function describeCallPathStep(step: ICallPathStepWire, functions: readonly IResolvedFunction[]): Record<string, unknown> {
+	const from = callGraphOwner(functions, step.from_function_rva, BigInt(step.call_site));
+	const to = step.to_function_rva === undefined
+		? undefined
+		: callGraphOwner(functions, step.to_function_rva, BigInt(step.to_function_rva));
+	return {
+		fromFunction: from?.name,
+		fromFunctionRva: step.from_function_rva,
+		callSite: step.call_site,
+		toFunction: to?.name,
+		toFunctionRva: step.to_function_rva,
+		kind: step.kind,
+		tailCall: step.tail_call,
+		...describeResolvedImport(step.resolved_import),
+	};
+}
+
+/**
+ * Describes one indirect call site.
+ *
+ * A site resolved through the IAT names the imported API it actually reaches;
+ * an unresolved one carries its address and nothing else, because a
+ * placeholder callee is exactly the kind of invented fact that makes a call
+ * graph untrustworthy.
+ */
+function describeIndirectCallSite(site: IIndirectCallSiteWire): Record<string, unknown> {
+	return {
+		site: site.site,
+		...describeResolvedImport(site.resolved),
+	};
 }
 
 function byteReadSpace(value: unknown): ByteReadSpace {

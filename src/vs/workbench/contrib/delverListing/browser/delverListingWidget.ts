@@ -37,7 +37,7 @@ import {
 } from './delverListingContext.js';
 import { IListingInterpretationPresentation, listingInterpretationPresentation } from './delverListingInterpretation.js';
 import { DelverListingModel, IListingRow, IListingStaticRow } from './delverListingModel.js';
-import { mouseHistoryDirection } from './delverListingMouseNavigation.js';
+import { mouseHistoryDirection } from '../../../services/delver/common/delverMouseNavigation.js';
 import { isInstructionHighlighted } from './delverListingHighlights.js';
 import { listingAddressLabel, listingMetadataRow } from './delverListingMetadata.js';
 import { activeListing, IDelverListingHost, setActiveListing, touchActiveListing } from './delverActiveListing.js';

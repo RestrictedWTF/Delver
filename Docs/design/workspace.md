@@ -85,6 +85,24 @@ consequence, and it is the reason the zone model was chosen over a dock canvas.
 Navigator surfaces become *segments of one zone* rather than stacked panes: one
 full-height list, the rest as tabs. Segment switching does not resize anything.
 
+### A zone can be hidden, but never rearranged
+
+The three zones are fixed in **order and role**; each can be **hidden**. A menu
+button in the header toggles them, and the choice persists per target beside the
+zone widths.
+
+Hiding is not the rearrangement §7 refuses. Rearrangement lets an analyst rebuild
+§1's flooding by hand and breaks the guarantee that no surface can shrink
+another; hiding removes a column and gives its width to the survivors, which
+strengthens that guarantee. It answers the narrow, real case — reading a long
+function on a laptop, where Navigator and Inspector are both cost.
+
+**The last visible zone cannot be hidden.** An empty workspace is a state with no
+affordance to leave it: nothing left to click, and the control that would undo it
+lives in the header of a zone that is gone. The menu disables the final entry
+rather than letting the workspace reach that state — the refusal in §7's spirit,
+applied to a control the analyst does own.
+
 ### Overview is a Navigator segment
 
 Overview answers *what is this binary* — the Navigator's question — so that is

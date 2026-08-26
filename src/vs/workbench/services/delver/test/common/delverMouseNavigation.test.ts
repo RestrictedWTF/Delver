@@ -5,9 +5,9 @@
 
 import * as assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { mouseHistoryDirection } from '../../browser/delverListingMouseNavigation.js';
+import { mouseHistoryDirection } from '../../common/delverMouseNavigation.js';
 
-suite('Delver listing mouse navigation', () => {
+suite('Delver mouse navigation', () => {
 	ensureNoDisposablesAreLeakedInTestSuite();
 
 	test('maps Mouse4 and Mouse5 without claiming ordinary buttons', () => {

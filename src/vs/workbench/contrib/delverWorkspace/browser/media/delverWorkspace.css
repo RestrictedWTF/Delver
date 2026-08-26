@@ -22,6 +22,28 @@
 	color: var(--vscode-editor-foreground);
 }
 
+/* Zone toggle: sits with the target's identity, not inside any one zone. */
+.delver-workspace-zones {
+	flex: 0 0 auto;
+	display: flex;
+	align-items: center;
+	padding: 2px 4px;
+	border: 0;
+	border-radius: var(--vscode-cornerRadius-small);
+	background: transparent;
+	color: var(--vscode-icon-foreground);
+	cursor: pointer;
+}
+
+.delver-workspace-zones:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+}
+
+.delver-workspace-zones:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
 .delver-workspace-split {
 	flex: 1;
 	min-height: 0;

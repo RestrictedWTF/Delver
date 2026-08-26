@@ -169,9 +169,16 @@ export const DELVER_AGENT_LIMITS = {
 	bytes: { default: 256, max: 64 * 1024 },
 	bytePatternBytes: 256,
 	byteSearchMatches: { default: 100, max: 256 },
+	instructionSearchMatches: { default: 100, max: 256 },
 	signatures: { default: 50, max: 200 },
 	signatureNameCharacters: DELVER_SIGNATURE_LIMITS.nameCharacters,
 	listingRows: { default: 256, max: 2048 },
+	basicBlocks: { default: 128, max: 512 },
+	callGraphEdges: { default: 100, max: 500 },
+	/** How many calls deep one call-path search may follow. */
+	callPathDepth: { default: 6, max: 16 },
+	/** How many distinct call paths one search may return. */
+	callPaths: { default: 8, max: 64 },
 	functions: { default: 100, max: 1000 },
 	xrefs: { default: 100, max: 2000 },
 	strings: { default: 100, max: 1000 },

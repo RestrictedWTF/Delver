@@ -10,6 +10,8 @@ import { Dimension } from '../../../../base/browser/dom.js';
 import { Orientation, SplitView } from '../../../../base/browser/ui/splitview/splitview.js';
 import { CancellationToken, CancellationTokenSource } from '../../../../base/common/cancellation.js';
 import { toAction } from '../../../../base/common/actions.js';
+import { Codicon } from '../../../../base/common/codicons.js';
+import { renderIcon } from '../../../../base/browser/ui/iconLabel/iconLabels.js';
 import { isCancellationError, onUnexpectedError } from '../../../../base/common/errors.js';
 import { DisposableStore, MutableDisposable } from '../../../../base/common/lifecycle.js';
 import { localize } from '../../../../nls.js';
@@ -35,6 +37,7 @@ import { containingFunctionRva } from '../../../services/delver/common/delverFun
 import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
 import { IDelverSession, IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 import { IDelverWorkspaceService } from '../../../services/delver/common/delverWorkspaceService.js';
+import { mouseHistoryDirection } from '../../../services/delver/common/delverMouseNavigation.js';
 import { DelverWorkspaceZone } from './delverWorkspaceZone.js';
 
 const NAVIGATOR_MINIMUM_WIDTH = 180;
@@ -95,6 +98,44 @@ export class DelverWorkspaceEditor extends EditorPane {
 		const header = dom.append(this.root, dom.$('.delver-workspace-header'));
 		this.targetLabel = dom.append(header, dom.$('.delver-workspace-target'));
 		this.targetMetadata = dom.append(header, dom.$('.delver-workspace-metadata'));
+		// Zone visibility lives beside the target's identity, because it is a
+		// property of this workspace rather than of any one zone — and a control
+		// for hiding a zone cannot live inside the zone it hides.
+		const zones = dom.append(header, dom.$('button.delver-workspace-zones')) as HTMLButtonElement;
+		zones.type = 'button';
+		zones.title = localize('delverWorkspaceZonesTitle', "Toggle Zones");
+		zones.appendChild(renderIcon(Codicon.menu));
+		this._register(dom.addDisposableListener(zones, dom.EventType.CLICK, () => this.showZoneMenu(zones)));
+
+		// Mouse4/Mouse5 anywhere in the workspace, not only over the listing
+		// table — over pseudocode, the trees and the zone chrome they previously
+		// did nothing at all.
+		//
+		// Deliberately the **bubble** phase. The listing binds the same buttons in
+		// capture and stops propagation there, which only suppresses this handler
+		// if this one runs later; a capture listener on the root is an ancestor's,
+		// so it would run *first* and move the history twice for every click on
+		// the table. Bubbling also keeps the listing's own handler authoritative
+		// where it exists, including in a torn-off listing editor with no
+		// workspace above it.
+		this._register(dom.addDisposableListener(this.root, dom.EventType.MOUSE_DOWN, event => {
+			const direction = mouseHistoryDirection(event.button);
+			if (direction === undefined) {
+				return;
+			}
+			event.preventDefault();
+			if (direction === 'back') {
+				this.focusService.back();
+			} else {
+				this.focusService.forward();
+			}
+		}));
+		this._register(dom.addDisposableListener(this.root, dom.EventType.AUXCLICK, event => {
+			if (mouseHistoryDirection(event.button) !== undefined) {
+				event.preventDefault();
+			}
+		}));
+
 		this.splitContainer = dom.append(this.root, dom.$('.delver-workspace-split'));
 		// `createInstance`'s descriptor overload is typed for `SyncDescriptor0`,
 		// so a `SyncDescriptor<T>` carrying static arguments — which
@@ -341,6 +382,51 @@ export class DelverWorkspaceEditor extends EditorPane {
 		return { targetPath, focus, functionRva, functionName };
 	}
 
+	/** Offers one toggle per zone, refusing to hide the last visible one. */
+	private showZoneMenu(anchor: HTMLElement): void {
+		const state = this.state;
+		if (!state) {
+			return;
+		}
+		const zones: readonly [string, keyof IDelverWorkspaceState & `${string}Visible`][] = [
+			[localize('delverZoneNavigator', "Navigator"), 'navigatorVisible'],
+			[localize('delverZonePrimary', "Primary"), 'primaryVisible'],
+			[localize('delverZoneInspector', "Inspector"), 'inspectorVisible'],
+		];
+		const shown = zones.filter(([, key]) => state[key]).length;
+		this.contextMenuService.showContextMenu({
+			getAnchor: () => anchor,
+			getActions: () => zones.map(([label, key]) => toAction({
+				id: `delver.workspace.toggleZone.${key}`,
+				label,
+				checked: state[key] === true,
+				// The last visible zone cannot be hidden: an empty workspace has
+				// no affordance left to bring anything back.
+				enabled: state[key] !== true || shown > 1,
+				run: () => this.setZoneVisible(key, !state[key]),
+			})),
+		});
+	}
+
+	private setZoneVisible(key: 'navigatorVisible' | 'primaryVisible' | 'inspectorVisible', visible: boolean): void {
+		if (!this.state) {
+			return;
+		}
+		this.state = { ...this.state, [key]: visible };
+		this.applyZoneVisibility();
+		this.persistWorkspaceState();
+	}
+
+	private applyZoneVisibility(): void {
+		const state = this.state;
+		if (!state) {
+			return;
+		}
+		this.splitView.setViewVisible(0, state.navigatorVisible);
+		this.splitView.setViewVisible(1, state.primaryVisible);
+		this.splitView.setViewVisible(2, state.inspectorVisible);
+	}
+
 	private refreshDescriptors(): void {
 		const all = allDelverSurfaces();
 		const matches = (expression: Parameters<IContextKeyService['contextMatchesRules']>[0]) => this.contextKeyService.contextMatchesRules(expression);
@@ -360,6 +446,7 @@ export class DelverWorkspaceEditor extends EditorPane {
 		this.navigator.setZoneVisible(this.editorVisible);
 		this.primary.setZoneVisible(this.editorVisible);
 		this.inspector.setZoneVisible(this.editorVisible);
+		this.applyZoneVisibility();
 	}
 
 	private selectNavigator(id: string): void {

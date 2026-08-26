@@ -21,7 +21,7 @@ import { IDelverNamedSignatureDraft, IDelverNamedSignatureWire } from '../../../
 import { Anchor, EditOp, EditStatus, EditValue, IAuthor, IEdit, IInterpretationAt, InterpretationLog } from '../../../../../platform/delver/common/interpretation.js';
 import { IDialogService, IFileDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
 import { IDelverInterpretationService } from '../../common/delverInterpretationService.js';
-import { DelverProjectService } from '../../common/delverProjectService.js';
+import { DelverProjectService, IDelverProjectSession } from '../../common/delverProjectService.js';
 
 const HASH = 'a'.repeat(64);
 const OLD_HASH = 'b'.repeat(64);
@@ -80,6 +80,10 @@ class FakeInterpretationService implements Partial<IDelverInterpretationService>
 
 	loadFromProject(contentHash: string, edits: readonly IInterpretationEditWire[]): void {
 		this.logs.set(contentHash, InterpretationLog.from(edits.map(editFromWire)));
+	}
+
+	unload(contentHash: string): void {
+		this.logs.delete(contentHash);
 	}
 
 	at(anchor: Anchor): IInterpretationAt | undefined {
@@ -143,6 +147,27 @@ suite('DelverProjectService findings', () => {
 			persisted: 0,
 		});
 		await assert.rejects(() => service.resolveFindings(HASH, [finding.id], 'rejected'), /already been decided/);
+	});
+
+	test('closing a project drops its authored interpretation from the cache', async () => {
+		// A project's log is authored *in that project*. Leaving it cached made
+		// the next plain open of the same bytes show the closed project's names
+		// — and saving would have written them into a new project as though the
+		// analyst had authored them there.
+		const { service, interpretation } = createService();
+		disposables.add(service);
+		const anchor = { kind: 'image', contentHash: HASH, rva: 0x1000n } as const;
+		interpretation.loadFromProject(HASH, [
+			interpretationWire(HASH, '0x1000', EditOp.Rename, 'decrypt_config', 1),
+		]);
+
+		const before = interpretation.at(anchor)?.name;
+		await service.close({ contentHash: HASH } as IDelverProjectSession);
+
+		assert.deepStrictEqual(
+			{ before, after: interpretation.at(anchor)?.name },
+			{ before: 'decrypt_config', after: undefined },
+		);
 	});
 
 	test('restores pending findings and autosaves their human decisions', async () => {

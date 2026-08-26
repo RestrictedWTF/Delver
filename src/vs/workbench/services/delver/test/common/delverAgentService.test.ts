@@ -15,15 +15,23 @@ import { IDelverNamedSignature, IDelverNamedSignatureDraft } from '../../../../.
 import { Anchor, EditOp, EditStatus, EditValue, IAuthor, IEdit, IInterpretationAt } from '../../../../../platform/delver/common/interpretation.js';
 import { STATIC_MOMENT } from '../../../../../platform/delver/common/moment.js';
 import {
+	BasicBlockEdgeKindWire,
 	FunctionSourceWire,
 	FlowKindWire,
+	IBasicBlocksResult,
+	IListingRowWire,
+	ICallGraphResult,
+	ICallPathsResult,
+	IFunctionProfileResult,
 	IFunctionsResult,
 	IFunctionWire,
 	IGetImageInfoResult,
+	IndirectResolutionMethodWire,
 	IListingWindowResult,
 	MomentKindWire,
 	IStringsResult,
 	IXrefsResult,
+	ResolutionConfidenceWire,
 	SignatureFieldReasonWire,
 	StringEncodingWire,
 	XrefKindWire,
@@ -82,6 +90,18 @@ const FUNCTIONS: readonly IFunctionWire[] = [
 	{ rva: '0x1000', end_rva: '0x1100', authoritative: true, source: FunctionSourceWire.ExceptionDirectory },
 	{ rva: '0x2000', end_rva: '0x2080', authoritative: false, source: FunctionSourceWire.LinearSweep },
 ];
+
+/** A third detected function, so a call path can have a middle. */
+const RELAY_FUNCTION: IFunctionWire = { rva: '0x3000', end_rva: '0x3080', authoritative: false, source: FunctionSourceWire.LinearSweep };
+
+/** One direct call from the function at 0x1000 into the function at 0x2000. */
+const DIRECT_STEP = {
+	from_function_rva: '0x1000',
+	call_site: '0x1040',
+	to_function_rva: '0x2000',
+	kind: XrefKindWire.Call,
+	tail_call: false,
+};
 
 const IMAGE_INFO: IGetImageInfoResult = {
 	arch: 'x86_64',
@@ -201,6 +221,47 @@ class FakeAnalysisService implements Partial<IDelverAnalysisService> {
 	listingResult: IListingWindowResult = { rows: [], total_rows: 0 };
 	listingReader: ((startRow: number, count: number) => IListingWindowResult) | undefined;
 	xrefsToResult: IXrefsResult = { xrefs: [] };
+	basicBlocksResult: IBasicBlocksResult = { function_rva: '0x1000', blocks: [], edges: [], truncated: false };
+	callGraphResult: ICallGraphResult = {
+		function_rva: '0x1000',
+		callers: [],
+		callees: [],
+		indirect_call_sites: [],
+		caller_total: 0,
+		callee_total: 0,
+		indirect_call_site_total: 0,
+		unresolved_indirect_call_site_total: 0,
+		callers_truncated: false,
+		callees_truncated: false,
+		indirect_truncated: false,
+	};
+	functionProfileResult: IFunctionProfileResult = {
+		function_rva: '0x1000',
+		end_rva: '0x1100',
+		bounded: true,
+		instruction_count: 42,
+		decoded_extent_bytes: 0xf8,
+		block_count: 7,
+		edge_count: 9,
+		incoming_call_site_count: 3,
+		incoming_caller_function_count: 2,
+		outgoing_call_site_count: 4,
+		outgoing_target_function_count: 3,
+		indirect_call_site_count: 1,
+		resolved_indirect_call_site_count: 0,
+		return_count: 2,
+	};
+	callPathsResult: ICallPathsResult = {
+		from_rva: '0x1000',
+		to_rva: '0x2000',
+		paths: [],
+		paths_truncated: false,
+		search_exhausted: true,
+		depth_limit_reached: false,
+		visit_limit_reached: false,
+		visited_function_count: 0,
+		unresolved_indirect_sites_on_frontier: 0,
+	};
 	memoryReader: ((space: 'image' | 'file', address: string, count: number) => IDelverReadMemoryWire) | undefined;
 	memoryResult: IDelverReadMemoryWire = {
 		bytesHex: '78563412ffeeddccaa',
@@ -216,6 +277,33 @@ class FakeAnalysisService implements Partial<IDelverAnalysisService> {
 	async listingWindow(_sessionId: AnalysisSessionId, startRow: number, count: number): Promise<IListingWindowResult> {
 		this.calls.push(`listingWindow:${startRow}:${count}`);
 		return this.listingReader?.(startRow, count) ?? this.listingResult;
+	}
+
+	async basicBlocks(_sessionId: AnalysisSessionId, functionRva: string, maxBlocks: number): Promise<IBasicBlocksResult> {
+		this.calls.push(`basicBlocks:${functionRva}:${maxBlocks}`);
+		return this.basicBlocksResult;
+	}
+
+	async callGraph(_sessionId: AnalysisSessionId, functionRva: string, maxEdges: number): Promise<ICallGraphResult> {
+		this.calls.push(`callGraph:${functionRva}:${maxEdges}`);
+		return this.callGraphResult;
+	}
+
+	async functionProfile(_sessionId: AnalysisSessionId, functionRva: string): Promise<IFunctionProfileResult> {
+		this.calls.push(`functionProfile:${functionRva}`);
+		return this.functionProfileResult;
+	}
+
+	async callPaths(
+		_sessionId: AnalysisSessionId,
+		fromRva: string,
+		toRva: string,
+		maxDepth: number,
+		maxPaths: number,
+		maxVisited: number,
+	): Promise<ICallPathsResult> {
+		this.calls.push(`callPaths:${fromRva}:${toRva}:${maxDepth}:${maxPaths}:${maxVisited}`);
+		return this.callPathsResult;
 	}
 
 	async readMemory(_sessionId: AnalysisSessionId, space: 'image' | 'file', address: string, count: number): Promise<IDelverReadMemoryWire> {
@@ -511,6 +599,14 @@ interface ISearchBytesPayload {
 	}[];
 }
 
+interface ISearchInstructionsPayload {
+	readonly query: { readonly mnemonic: string; readonly operands?: string };
+	readonly startRow: number;
+	readonly totalInstructionCount: number;
+	readonly scannedInstructionCount: number;
+	readonly matches: readonly { readonly rva: string; readonly mnemonic: string; readonly operands: string }[];
+}
+
 interface IMakeSignaturePayload {
 	readonly policy: 'unique-now' | 'relocation-stable' | 'cross-revision-stable';
 	readonly pattern: string;
@@ -562,6 +658,97 @@ interface ILookupPayload {
 	readonly endRva?: string;
 	readonly name: string;
 	readonly authored: boolean;
+}
+
+interface IBasicBlocksPayload {
+	readonly function: ILookupPayload;
+	readonly blocks: readonly { readonly startRva: string; readonly endRva: string; readonly instructionCount: number }[];
+	readonly edges: IBasicBlocksResult['edges'];
+	readonly truncated: boolean;
+}
+
+interface IResolvedImportPayload {
+	readonly importModule?: string;
+	readonly importSymbol?: string;
+	readonly importOrdinal?: number;
+	readonly iatRva?: string;
+	readonly resolutionMethod?: string;
+	readonly confidence?: string;
+}
+
+interface IIndirectCallSitePayload extends IResolvedImportPayload {
+	readonly site: string;
+}
+
+interface ICallGraphPayload {
+	readonly function: ILookupPayload;
+	readonly direction: string;
+	readonly total: number;
+	readonly edges: readonly ({
+		readonly role: string;
+		readonly site: string;
+		readonly target: string;
+		readonly kind: string;
+		readonly tailCall: boolean;
+		readonly inFunction?: string;
+		readonly offsetInFunction?: string;
+		readonly comment?: string;
+	} & IResolvedImportPayload)[];
+	readonly callerTotal?: number;
+	readonly callersTruncated?: boolean;
+	readonly calleeTotal?: number;
+	readonly calleesTruncated?: boolean;
+	readonly indirectCallSites?: readonly IIndirectCallSitePayload[];
+	readonly indirectCallSiteTotal?: number;
+	readonly unresolvedIndirectCallSiteTotal?: number;
+	readonly indirectCallSitesTruncated?: boolean;
+}
+
+interface ICallPathStepPayload extends IResolvedImportPayload {
+	readonly fromFunction?: string;
+	readonly fromFunctionRva: string;
+	readonly callSite: string;
+	readonly toFunction?: string;
+	readonly toFunctionRva?: string;
+	readonly kind: string;
+	readonly tailCall: boolean;
+}
+
+interface ICallPathsPayload {
+	readonly from: ILookupPayload;
+	/** A sink no detected function contains carries its address and nothing else. */
+	readonly to: { readonly rva: string; readonly name?: string };
+	readonly maxDepth: number;
+	readonly maxPaths: number;
+	readonly pathCount: number;
+	readonly paths: readonly { readonly steps: readonly ICallPathStepPayload[] }[];
+	readonly pathsTruncated: boolean;
+	readonly searchExhausted: boolean;
+	readonly depthLimitReached: boolean;
+	readonly visitLimitReached: boolean;
+	readonly visitedFunctionCount: number;
+	readonly unresolvedIndirectSitesOnFrontier: number;
+}
+
+interface IFunctionProfilePayload {
+	readonly function: ILookupPayload;
+	readonly endRva?: string;
+	readonly bounded: boolean;
+	readonly size?: string;
+	readonly body: {
+		readonly instructionCount: number;
+		readonly blockCount: number;
+		readonly edgeCount: number;
+		readonly decodedExtentBytes: number;
+		readonly returnCount: number;
+	};
+	readonly callers: { readonly siteCount: number; readonly functionCount: number };
+	readonly callees: {
+		readonly siteCount: number;
+		readonly functionCount: number;
+		readonly indirectSiteCount: number;
+		readonly resolvedIndirectSiteCount: number;
+	};
 }
 
 interface IDecompilePayload {
@@ -915,6 +1102,708 @@ suite('DelverAgentService', () => {
 		});
 	});
 
+	test('dispatches bounded basic blocks by containing address or exact name and reports truncation', async () => {
+		const { service, session, analysis } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		session.functionsResult = { functions: [...FUNCTIONS] };
+		analysis.basicBlocksResult = {
+			function_rva: '0x1000',
+			blocks: [{ start_rva: '0x1000', end_rva: '0x1010', instruction_count: 3 }],
+			edges: [{ from: '0x1000', to: '0x1010', kind: BasicBlockEdgeKindWire.Fallthrough }],
+			truncated: true,
+		};
+
+		const result = await service.invoke({ capability: 'delver_basic_blocks', args: { address: '0x1008', maxBlocks: 1 } }, CancellationToken.None);
+		const payload = payloadOf<IBasicBlocksPayload>(result);
+		await service.invoke({ capability: 'delver_basic_blocks', args: { name: 'sub_2000' } }, CancellationToken.None);
+
+		assert.deepStrictEqual({
+			functionRva: payload.function.rva,
+			blocks: payload.blocks,
+			edges: payload.edges,
+			truncated: payload.truncated,
+			completeness: result.completeness,
+			omitted: result.omitted,
+			provenance: result.provenance,
+			calls: analysis.calls,
+			bothSelectors: await errorCode(service, { capability: 'delver_basic_blocks', args: { address: '0x1000', name: 'SUB_1000' } }),
+		}, {
+			functionRva: '0x1000',
+			blocks: [{ startRva: '0x1000', endRva: '0x1010', instructionCount: 3 }],
+			edges: [{ from: '0x1000', to: '0x1010', kind: BasicBlockEdgeKindWire.Fallthrough }],
+			truncated: true,
+			completeness: 'partial',
+			omitted: { reason: 'The control-flow graph exceeded the 1-block bound.' },
+			provenance: [{
+				source: 'analysis', detail: 'Provider-derived basic-block control-flow graph for SUB_1000.',
+				contentHash: CONTENT_HASH, addresses: ['0x1000'], untrusted: true,
+			}],
+			calls: ['basicBlocks:0x1000:1', 'basicBlocks:0x2000:128'],
+			bothSelectors: 'INVALID_ARGUMENT',
+		});
+	});
+
+	test('cites call-graph edges function-relatively and pages callers and callees as one sequence', async () => {
+		const { service, session, analysis, interpretation } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		session.functionsResult = { functions: [...FUNCTIONS] };
+		interpretation.author(CONTENT_HASH, 0x2000n, { name: 'decrypt_config' });
+		interpretation.author(CONTENT_HASH, 0x2010n, { comment: 'retry loop' });
+		analysis.callGraphResult = {
+			function_rva: '0x1000',
+			callers: [
+				{ site: '0x2010', target: '0x1000', kind: XrefKindWire.Call, site_function_rva: '0x2000', target_function_rva: '0x1000', tail_call: false },
+				{ site: '0x2040', target: '0x1000', kind: XrefKindWire.Call, site_function_rva: '0x2000', target_function_rva: '0x1000', tail_call: false },
+			],
+			callees: [
+				{ site: '0x1040', target: '0x2000', kind: XrefKindWire.Call, site_function_rva: '0x1000', target_function_rva: '0x2000', tail_call: false },
+				{ site: '0x10f0', target: '0x2000', kind: XrefKindWire.Jump, site_function_rva: '0x1000', target_function_rva: '0x2000', tail_call: true },
+			],
+			indirect_call_sites: [],
+			caller_total: 2,
+			callee_total: 2,
+			indirect_call_site_total: 0,
+			unresolved_indirect_call_site_total: 0,
+			callers_truncated: false,
+			callees_truncated: false,
+			indirect_truncated: false,
+		};
+
+		const first = await service.invoke({ capability: 'delver_call_graph', args: { address: '0x1008', count: 3 } }, CancellationToken.None);
+		const resumed = await service.invoke({ capability: 'delver_call_graph', args: { address: '0x1008', count: 3, cursor: first.nextCursor } }, CancellationToken.None);
+		const callersOnly = await service.invoke({ capability: 'delver_call_graph', args: { name: 'sub_1000', direction: 'callers' } }, CancellationToken.None);
+
+		assert.deepStrictEqual({
+			first: payloadOf<ICallGraphPayload>(first),
+			firstCompleteness: first.completeness,
+			firstOmitted: first.omitted,
+			firstProvenance: first.provenance,
+			resumed: payloadOf<ICallGraphPayload>(resumed).edges,
+			resumedTotal: payloadOf<ICallGraphPayload>(resumed).total,
+			resumedCompleteness: resumed.completeness,
+			callersOnly: payloadOf<ICallGraphPayload>(callersOnly),
+			callersOnlyCompleteness: callersOnly.completeness,
+			calls: analysis.calls,
+			changedDirection: await errorCode(service, { capability: 'delver_call_graph', args: { address: '0x1008', count: 3, direction: 'callees', cursor: first.nextCursor } }),
+			changedSelector: await errorCode(service, { capability: 'delver_call_graph', args: { address: '0x2000', count: 3, cursor: first.nextCursor } }),
+			bothSelectors: await errorCode(service, { capability: 'delver_call_graph', args: { address: '0x1000', name: 'SUB_1000' } }),
+			neitherSelector: await errorCode(service, { capability: 'delver_call_graph', args: {} }),
+			invalidDirection: await errorCode(service, { capability: 'delver_call_graph', args: { address: '0x1000', direction: 'up' } }),
+		}, {
+			first: {
+				function: { rva: '0x1000', endRva: '0x1100', name: 'SUB_1000', authored: false, authoritative: true, source: 'exceptionDirectory' },
+				direction: 'both',
+				total: 4,
+				edges: [
+					{ role: 'caller', site: '0x2010', target: '0x1000', kind: 'call', tailCall: false, inFunction: 'decrypt_config', offsetInFunction: '0x10', comment: 'retry loop' },
+					{ role: 'caller', site: '0x2040', target: '0x1000', kind: 'call', tailCall: false, inFunction: 'decrypt_config', offsetInFunction: '0x40', comment: undefined },
+					{ role: 'callee', site: '0x1040', target: '0x2000', kind: 'call', tailCall: false, inFunction: 'decrypt_config', offsetInFunction: '0x0', comment: undefined },
+				],
+				callerTotal: 2,
+				callersTruncated: false,
+				calleeTotal: 2,
+				calleesTruncated: false,
+				indirectCallSites: [],
+				indirectCallSiteTotal: 0,
+				unresolvedIndirectCallSiteTotal: 0,
+				indirectCallSitesTruncated: false,
+			},
+			firstCompleteness: 'partial',
+			firstOmitted: { count: 1, reason: '1 more edge remains in this walk; continue with nextCursor.' },
+			firstProvenance: [{
+				source: 'analysis', detail: 'Direct call graph (both) for SUB_1000.',
+				contentHash: CONTENT_HASH, addresses: ['0x1000'], untrusted: true,
+			}],
+			// The callers-to-callees boundary is nothing but a page boundary: the
+			// fourth edge is reached exactly once and only from the third.
+			resumed: [
+				{ role: 'callee', site: '0x10f0', target: '0x2000', kind: 'jump', tailCall: true, inFunction: 'decrypt_config', offsetInFunction: '0x0', comment: undefined },
+			],
+			resumedTotal: 4,
+			resumedCompleteness: 'complete',
+			callersOnly: {
+				function: { rva: '0x1000', endRva: '0x1100', name: 'SUB_1000', authored: false, authoritative: true, source: 'exceptionDirectory' },
+				direction: 'callers',
+				total: 2,
+				edges: [
+					{ role: 'caller', site: '0x2010', target: '0x1000', kind: 'call', tailCall: false, inFunction: 'decrypt_config', offsetInFunction: '0x10', comment: 'retry loop' },
+					{ role: 'caller', site: '0x2040', target: '0x1000', kind: 'call', tailCall: false, inFunction: 'decrypt_config', offsetInFunction: '0x40', comment: undefined },
+				],
+				callerTotal: 2,
+				callersTruncated: false,
+			},
+			callersOnlyCompleteness: 'complete',
+			calls: ['callGraph:0x1000:4096', 'callGraph:0x1000:4096', 'callGraph:0x1000:4096'],
+			changedDirection: 'STALE_REVISION',
+			changedSelector: 'STALE_REVISION',
+			bothSelectors: 'INVALID_ARGUMENT',
+			neitherSelector: 'INVALID_ARGUMENT',
+			invalidDirection: 'INVALID_ARGUMENT',
+		});
+	});
+
+	test('refuses to present a truncated or indirect-incomplete call graph as complete', async () => {
+		const { service, session, analysis } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		session.functionsResult = { functions: [...FUNCTIONS] };
+		analysis.callGraphResult = {
+			function_rva: '0x1000',
+			callers: [{ site: '0x2010', target: '0x1000', kind: XrefKindWire.Call, site_function_rva: '0x2000', target_function_rva: '0x1000', tail_call: false }],
+			callees: [{ site: '0x1040', target: '0x2000', kind: XrefKindWire.Call, site_function_rva: '0x1000', target_function_rva: '0x2000', tail_call: false }],
+			indirect_call_sites: [{ site: '0x1050' }],
+			caller_total: 9,
+			callee_total: 1,
+			indirect_call_site_total: 1,
+			unresolved_indirect_call_site_total: 1,
+			callers_truncated: true,
+			callees_truncated: false,
+			indirect_truncated: false,
+		};
+
+		const truncated = await service.invoke({ capability: 'delver_call_graph', args: { address: '0x1000' } }, CancellationToken.None);
+		// Callers were the truncated side, so asking only for callees must not
+		// inherit their incompleteness — but the indirect sites still apply.
+		const calleesOnly = await service.invoke({ capability: 'delver_call_graph', args: { address: '0x1000', direction: 'callees' } }, CancellationToken.None);
+		analysis.callGraphResult = { ...analysis.callGraphResult, caller_total: 1, callers_truncated: false };
+		const indirectOnly = await service.invoke({ capability: 'delver_call_graph', args: { address: '0x1000' } }, CancellationToken.None);
+		analysis.callGraphResult = { ...analysis.callGraphResult, indirect_call_sites: [], indirect_call_site_total: 0, unresolved_indirect_call_site_total: 0 };
+		const whole = await service.invoke({ capability: 'delver_call_graph', args: { address: '0x1000' } }, CancellationToken.None);
+
+		assert.deepStrictEqual({
+			truncatedCompleteness: truncated.completeness,
+			truncatedOmitted: truncated.omitted,
+			truncatedFlags: [
+				payloadOf<ICallGraphPayload>(truncated).callersTruncated,
+				payloadOf<ICallGraphPayload>(truncated).calleesTruncated,
+				payloadOf<ICallGraphPayload>(truncated).indirectCallSitesTruncated,
+			],
+			calleesOnlyCompleteness: calleesOnly.completeness,
+			calleesOnlyOmitted: calleesOnly.omitted,
+			calleesOnlyCallerTotal: payloadOf<ICallGraphPayload>(calleesOnly).callerTotal,
+			indirectOnlyCompleteness: indirectOnly.completeness,
+			indirectOnlyOmitted: indirectOnly.omitted,
+			indirectOnlySites: payloadOf<ICallGraphPayload>(indirectOnly).indirectCallSites,
+			wholeCompleteness: whole.completeness,
+			wholeOmitted: whole.omitted,
+		}, {
+			truncatedCompleteness: 'partial',
+			truncatedOmitted: {
+				reason: 'The analysis server returned 1 of 9 callers; the remainder is not reachable by paging.'
+					+ ' 1 outgoing call site is indirect and has no statically known target, so this direct graph provably does not name every function SUB_1000 calls.',
+			},
+			truncatedFlags: [true, false, false],
+			calleesOnlyCompleteness: 'partial',
+			calleesOnlyOmitted: {
+				reason: '1 outgoing call site is indirect and has no statically known target, so this direct graph provably does not name every function SUB_1000 calls.',
+			},
+			calleesOnlyCallerTotal: undefined,
+			indirectOnlyCompleteness: 'partial',
+			indirectOnlyOmitted: {
+				reason: '1 outgoing call site is indirect and has no statically known target, so this direct graph provably does not name every function SUB_1000 calls.',
+			},
+			indirectOnlySites: [{ site: '0x1050' }],
+			wholeCompleteness: 'complete',
+			wholeOmitted: undefined,
+		});
+	});
+
+	test('names an indirect call site resolved through the IAT and calls a fully resolved graph complete', async () => {
+		const { service, session, analysis, interpretation } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		session.functionsResult = { functions: [...FUNCTIONS] };
+		interpretation.author(CONTENT_HASH, 0x2000n, { name: 'j_CreateFileW' });
+		analysis.callGraphResult = {
+			function_rva: '0x1000',
+			callers: [],
+			// A direct call into a one-instruction `jmp [IAT]` thunk: the edge
+			// still lands on the thunk, and the import is what it reaches.
+			callees: [{
+				site: '0x1040', target: '0x2000', kind: XrefKindWire.Call,
+				site_function_rva: '0x1000', target_function_rva: '0x2000', tail_call: false,
+				resolved_import: {
+					iat_rva: '0x3008', module: 'KERNEL32.dll', symbol: 'CreateFileW',
+					method: IndirectResolutionMethodWire.ImportThunk, confidence: ResolutionConfidenceWire.Exact,
+				},
+			}],
+			indirect_call_sites: [
+				{
+					site: '0x1060',
+					resolved: {
+						iat_rva: '0x3010', module: 'ADVAPI32.dll', symbol: 'CryptEncrypt',
+						method: IndirectResolutionMethodWire.IatOperand, confidence: ResolutionConfidenceWire.Exact,
+					},
+				},
+				// Imported by ordinal, so there is no symbol to report and none
+				// is invented.
+				{
+					site: '0x1070',
+					resolved: {
+						iat_rva: '0x3018', module: 'WS2_32.dll', ordinal: 23,
+						method: IndirectResolutionMethodWire.IatOperand, confidence: ResolutionConfidenceWire.Exact,
+					},
+				},
+			],
+			caller_total: 0,
+			callee_total: 1,
+			indirect_call_site_total: 2,
+			unresolved_indirect_call_site_total: 0,
+			callers_truncated: false,
+			callees_truncated: false,
+			indirect_truncated: false,
+		};
+
+		const resolved = await service.invoke({ capability: 'delver_call_graph', args: { address: '0x1000' } }, CancellationToken.None);
+
+		assert.deepStrictEqual({
+			payload: payloadOf<ICallGraphPayload>(resolved),
+			// Two indirect sites and still complete: every outgoing call this
+			// function makes is named, which is exactly what the flag claims.
+			completeness: resolved.completeness,
+			omitted: resolved.omitted,
+		}, {
+			payload: {
+				function: { rva: '0x1000', endRva: '0x1100', name: 'SUB_1000', authored: false, authoritative: true, source: 'exceptionDirectory' },
+				direction: 'both',
+				total: 1,
+				edges: [{
+					role: 'callee', site: '0x1040', target: '0x2000', kind: 'call', tailCall: false,
+					inFunction: 'j_CreateFileW', offsetInFunction: '0x0', comment: undefined,
+					importModule: 'KERNEL32.dll', importSymbol: 'CreateFileW', importOrdinal: undefined,
+					iatRva: '0x3008', resolutionMethod: 'importThunk', confidence: 'exact',
+				}],
+				callerTotal: 0,
+				callersTruncated: false,
+				calleeTotal: 1,
+				calleesTruncated: false,
+				indirectCallSites: [
+					{
+						site: '0x1060', importModule: 'ADVAPI32.dll', importSymbol: 'CryptEncrypt', importOrdinal: undefined,
+						iatRva: '0x3010', resolutionMethod: 'iatOperand', confidence: 'exact',
+					},
+					{
+						site: '0x1070', importModule: 'WS2_32.dll', importSymbol: undefined, importOrdinal: 23,
+						iatRva: '0x3018', resolutionMethod: 'iatOperand', confidence: 'exact',
+					},
+				],
+				indirectCallSiteTotal: 2,
+				unresolvedIndirectCallSiteTotal: 0,
+				indirectCallSitesTruncated: false,
+			},
+			completeness: 'complete',
+			omitted: undefined,
+		});
+	});
+
+	test('holds a call graph partial only while an indirect call site is unresolved', async () => {
+		const { service, session, analysis } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		session.functionsResult = { functions: [...FUNCTIONS] };
+		analysis.callGraphResult = {
+			function_rva: '0x1000',
+			callers: [],
+			callees: [],
+			indirect_call_sites: [
+				{
+					site: '0x1060',
+					resolved: {
+						iat_rva: '0x3010', module: 'ADVAPI32.dll', symbol: 'CryptEncrypt',
+						method: IndirectResolutionMethodWire.IatOperand, confidence: ResolutionConfidenceWire.Exact,
+					},
+				},
+				// Dispatched through a register and through a vtable slot: no
+				// import behind either, so neither carries import fields.
+				{ site: '0x1070' },
+				{ site: '0x1080' },
+			],
+			caller_total: 0,
+			callee_total: 0,
+			indirect_call_site_total: 3,
+			unresolved_indirect_call_site_total: 2,
+			callers_truncated: false,
+			callees_truncated: false,
+			indirect_truncated: false,
+		};
+
+		const mixed = await service.invoke({ capability: 'delver_call_graph', args: { address: '0x1000' } }, CancellationToken.None);
+		// The same three sites with every one of them resolved: the only thing
+		// that moves completeness is the unresolved count, never the indirect
+		// total, and two of these sites are still indirect.
+		analysis.callGraphResult = {
+			...analysis.callGraphResult,
+			indirect_call_sites: analysis.callGraphResult.indirect_call_sites.map(site => site.resolved !== undefined ? site : {
+				site: site.site,
+				resolved: {
+					iat_rva: '0x3020', module: 'KERNEL32.dll', symbol: 'LoadLibraryW',
+					method: IndirectResolutionMethodWire.IatOperand, confidence: ResolutionConfidenceWire.Exact,
+				},
+			}),
+			unresolved_indirect_call_site_total: 0,
+		};
+		const allResolved = await service.invoke({ capability: 'delver_call_graph', args: { address: '0x1000' } }, CancellationToken.None);
+
+		assert.deepStrictEqual({
+			mixedCompleteness: mixed.completeness,
+			mixedOmitted: mixed.omitted,
+			mixedSites: payloadOf<ICallGraphPayload>(mixed).indirectCallSites,
+			mixedTotals: [
+				payloadOf<ICallGraphPayload>(mixed).indirectCallSiteTotal,
+				payloadOf<ICallGraphPayload>(mixed).unresolvedIndirectCallSiteTotal,
+			],
+			allResolvedCompleteness: allResolved.completeness,
+			allResolvedOmitted: allResolved.omitted,
+			allResolvedTotals: [
+				payloadOf<ICallGraphPayload>(allResolved).indirectCallSiteTotal,
+				payloadOf<ICallGraphPayload>(allResolved).unresolvedIndirectCallSiteTotal,
+			],
+		}, {
+			mixedCompleteness: 'partial',
+			mixedOmitted: {
+				reason: '2 outgoing call sites are indirect and have no statically known target,'
+					+ ' so this direct graph provably does not name every function SUB_1000 calls.',
+			},
+			mixedSites: [
+				{
+					site: '0x1060', importModule: 'ADVAPI32.dll', importSymbol: 'CryptEncrypt', importOrdinal: undefined,
+					iatRva: '0x3010', resolutionMethod: 'iatOperand', confidence: 'exact',
+				},
+				// An unresolved site carries its address and nothing else.
+				{ site: '0x1070' },
+				{ site: '0x1080' },
+			],
+			mixedTotals: [3, 2],
+			allResolvedCompleteness: 'complete',
+			allResolvedOmitted: undefined,
+			allResolvedTotals: [3, 0],
+		});
+	});
+
+	test('sizes a function and downgrades an inferred extent to a partial answer', async () => {
+		const { service, session, analysis } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		session.functionsResult = { functions: [...FUNCTIONS] };
+
+		const recorded = await service.invoke({ capability: 'delver_function_profile', args: { address: '0x1008' } }, CancellationToken.None);
+		analysis.functionProfileResult = { ...analysis.functionProfileResult, function_rva: '0x2000', end_rva: '0x2080', bounded: false };
+		const inferred = await service.invoke({ capability: 'delver_function_profile', args: { name: 'sub_2000' } }, CancellationToken.None);
+		analysis.functionProfileResult = { ...analysis.functionProfileResult, end_rva: undefined };
+		const endless = await service.invoke({ capability: 'delver_function_profile', args: { name: 'SUB_2000' } }, CancellationToken.None);
+
+		assert.deepStrictEqual({
+			recorded: payloadOf<IFunctionProfilePayload>(recorded),
+			recordedCompleteness: recorded.completeness,
+			recordedOmitted: recorded.omitted,
+			recordedProvenance: recorded.provenance,
+			inferredSize: payloadOf<IFunctionProfilePayload>(inferred).size,
+			inferredCompleteness: inferred.completeness,
+			inferredOmitted: inferred.omitted,
+			inferredProvenance: inferred.provenance,
+			endlessSize: payloadOf<IFunctionProfilePayload>(endless).size,
+			endlessEndRva: payloadOf<IFunctionProfilePayload>(endless).endRva,
+			calls: analysis.calls,
+			bothSelectors: await errorCode(service, { capability: 'delver_function_profile', args: { address: '0x1000', name: 'SUB_1000' } }),
+			neitherSelector: await errorCode(service, { capability: 'delver_function_profile', args: {} }),
+		}, {
+			recorded: {
+				function: { rva: '0x1000', endRva: '0x1100', name: 'SUB_1000', authored: false, authoritative: true, source: 'exceptionDirectory' },
+				endRva: '0x1100',
+				bounded: true,
+				size: '0x100',
+				body: { instructionCount: 42, blockCount: 7, edgeCount: 9, decodedExtentBytes: 0xf8, returnCount: 2 },
+				callers: { siteCount: 3, functionCount: 2 },
+				callees: { siteCount: 4, functionCount: 3, indirectSiteCount: 1, resolvedIndirectSiteCount: 0 },
+			},
+			recordedCompleteness: 'complete',
+			recordedOmitted: undefined,
+			recordedProvenance: [{
+				source: 'analysis', detail: 'Provider-derived profile of SUB_1000 over its recorded extent.',
+				contentHash: CONTENT_HASH, addresses: ['0x1000'], untrusted: true,
+			}],
+			// An inferred extent still has a size; it is just not a claim about
+			// where this function ends, and the envelope says so.
+			inferredSize: '0x80',
+			inferredCompleteness: 'partial',
+			inferredOmitted: {
+				reason: 'The function\'s own end was never recorded, so its extent was inferred from the next detected function.'
+					+ ' Every count here describes that inferred extent, not a proven boundary: treat them as an estimate of size, not as a measurement of this function.',
+			},
+			inferredProvenance: [{
+				source: 'analysis', detail: 'Provider-derived profile of SUB_2000 over an inferred extent.',
+				contentHash: CONTENT_HASH, addresses: ['0x2000'], untrusted: true,
+			}],
+			endlessSize: undefined,
+			endlessEndRva: undefined,
+			calls: ['functionProfile:0x1000', 'functionProfile:0x2000', 'functionProfile:0x2000'],
+			bothSelectors: 'INVALID_ARGUMENT',
+			neitherSelector: 'INVALID_ARGUMENT',
+		});
+	});
+
+	test('splits a profile\'s indirect call sites into resolved and unresolved', async () => {
+		const { service, session, analysis } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		session.functionsResult = { functions: [...FUNCTIONS] };
+		analysis.functionProfileResult = {
+			...analysis.functionProfileResult,
+			indirect_call_site_count: 3,
+			resolved_indirect_call_site_count: 2,
+		};
+
+		const profile = await service.invoke({ capability: 'delver_function_profile', args: { address: '0x1000' } }, CancellationToken.None);
+
+		assert.deepStrictEqual({
+			callees: payloadOf<IFunctionProfilePayload>(profile).callees,
+			// Resolution says nothing about the extent, so a recorded extent is
+			// still a complete answer whether or not the calls resolved.
+			completeness: profile.completeness,
+			omitted: profile.omitted,
+		}, {
+			callees: { siteCount: 4, functionCount: 3, indirectSiteCount: 3, resolvedIndirectSiteCount: 2 },
+			completeness: 'complete',
+			omitted: undefined,
+		});
+	});
+
+	test('walks call paths from a function to a sink and cites every call site', async () => {
+		const { service, session, analysis, interpretation } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		session.functionsResult = { functions: [...FUNCTIONS, RELAY_FUNCTION] };
+		interpretation.author(CONTENT_HASH, 0x2000n, { name: 'decrypt_config' });
+		analysis.callPathsResult = {
+			from_rva: '0x1000',
+			to_rva: '0x2000',
+			paths: [
+				// The direct call, and the same sink reached one hop further out.
+				{ steps: [DIRECT_STEP] },
+				{
+					steps: [
+						{ from_function_rva: '0x1000', call_site: '0x1080', to_function_rva: '0x3000', kind: XrefKindWire.Call, tail_call: false },
+						{ from_function_rva: '0x3000', call_site: '0x3010', to_function_rva: '0x2000', kind: XrefKindWire.Jump, tail_call: true },
+					],
+				},
+			],
+			paths_truncated: false,
+			search_exhausted: true,
+			depth_limit_reached: false,
+			visit_limit_reached: false,
+			visited_function_count: 3,
+			unresolved_indirect_sites_on_frontier: 0,
+		};
+
+		const found = await service.invoke({ capability: 'delver_call_paths', args: { fromAddress: '0x1008', toName: 'decrypt_config' } }, CancellationToken.None);
+		// Both bounds are clamped to the capability's ceiling rather than passed
+		// through, so a model cannot ask the server for an unbounded search.
+		const clamped = await service.invoke({ capability: 'delver_call_paths', args: { fromName: 'sub_1000', toAddress: '0x2000', maxDepth: 99, maxPaths: 999 } }, CancellationToken.None);
+
+		assert.deepStrictEqual({
+			payload: payloadOf<ICallPathsPayload>(found),
+			completeness: found.completeness,
+			omitted: found.omitted,
+			provenance: found.provenance,
+			clampedBounds: [payloadOf<ICallPathsPayload>(clamped).maxDepth, payloadOf<ICallPathsPayload>(clamped).maxPaths],
+			calls: analysis.calls,
+			bothSourceSelectors: await errorCode(service, { capability: 'delver_call_paths', args: { fromAddress: '0x1000', fromName: 'SUB_1000', toName: 'SUB_2000' } }),
+			neitherSourceSelector: await errorCode(service, { capability: 'delver_call_paths', args: { toName: 'SUB_2000' } }),
+			bothSinkSelectors: await errorCode(service, { capability: 'delver_call_paths', args: { fromAddress: '0x1000', toAddress: '0x2000', toName: 'SUB_2000' } }),
+			neitherSinkSelector: await errorCode(service, { capability: 'delver_call_paths', args: { fromAddress: '0x1000' } }),
+			sourceNotAFunction: await errorCode(service, { capability: 'delver_call_paths', args: { fromAddress: '0x9000', toName: 'SUB_2000' } }),
+			sinkNameNotAFunction: await errorCode(service, { capability: 'delver_call_paths', args: { fromAddress: '0x1000', toName: 'VirtualAlloc' } }),
+		}, {
+			payload: {
+				from: { rva: '0x1000', endRva: '0x1100', name: 'SUB_1000', authored: false, authoritative: true, source: 'exceptionDirectory' },
+				to: { rva: '0x2000', endRva: '0x2080', name: 'decrypt_config', authored: true, authoritative: false, source: 'linearSweep' },
+				maxDepth: 6,
+				maxPaths: 8,
+				pathCount: 2,
+				paths: [
+					{
+						steps: [
+							{
+								fromFunction: 'SUB_1000', fromFunctionRva: '0x1000', callSite: '0x1040',
+								toFunction: 'decrypt_config', toFunctionRva: '0x2000', kind: 'call', tailCall: false,
+							},
+						],
+					},
+					{
+						steps: [
+							{
+								fromFunction: 'SUB_1000', fromFunctionRva: '0x1000', callSite: '0x1080',
+								toFunction: 'SUB_3000', toFunctionRva: '0x3000', kind: 'call', tailCall: false,
+							},
+							{
+								fromFunction: 'SUB_3000', fromFunctionRva: '0x3000', callSite: '0x3010',
+								toFunction: 'decrypt_config', toFunctionRva: '0x2000', kind: 'jump', tailCall: true,
+							},
+						],
+					},
+				],
+				pathsTruncated: false,
+				searchExhausted: true,
+				depthLimitReached: false,
+				visitLimitReached: false,
+				visitedFunctionCount: 3,
+				unresolvedIndirectSitesOnFrontier: 0,
+			},
+			completeness: 'complete',
+			omitted: undefined,
+			provenance: [{
+				source: 'analysis', detail: 'Bounded call-path search from SUB_1000 to decrypt_config.',
+				contentHash: CONTENT_HASH, addresses: ['0x1000', '0x2000'], untrusted: true,
+			}],
+			clampedBounds: [16, 64],
+			calls: ['callPaths:0x1000:0x2000:6:8:100000', 'callPaths:0x1000:0x2000:16:64:100000'],
+			bothSourceSelectors: 'INVALID_ARGUMENT',
+			neitherSourceSelector: 'INVALID_ARGUMENT',
+			bothSinkSelectors: 'INVALID_ARGUMENT',
+			neitherSinkSelector: 'INVALID_ARGUMENT',
+			sourceNotAFunction: 'FUNCTION_NOT_FOUND',
+			// A sink *name* still has to resolve locally; only an address is
+			// allowed to be something other than a detected function.
+			sinkNameNotAFunction: 'FUNCTION_NOT_FOUND',
+		});
+	});
+
+	test('reaches an import sink through a resolved IAT call without demanding the sink be a function', async () => {
+		const { service, session, analysis } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		session.functionsResult = { functions: [...FUNCTIONS] };
+		analysis.callPathsResult = {
+			from_rva: '0x1000',
+			to_rva: '0x3008',
+			paths: [{
+				steps: [
+					DIRECT_STEP,
+					// The last hop lands on an import rather than on a function:
+					// there is no to_function_rva, and the resolved import names
+					// what the call actually invokes.
+					{
+						from_function_rva: '0x2000', call_site: '0x2010', kind: XrefKindWire.Call, tail_call: false,
+						resolved_import: {
+							iat_rva: '0x3008', module: 'KERNEL32.dll', symbol: 'VirtualAlloc',
+							method: IndirectResolutionMethodWire.IatOperand, confidence: ResolutionConfidenceWire.Exact,
+						},
+					},
+				],
+			}],
+			paths_truncated: false,
+			search_exhausted: true,
+			depth_limit_reached: false,
+			visit_limit_reached: false,
+			visited_function_count: 2,
+			unresolved_indirect_sites_on_frontier: 0,
+		};
+
+		// 0x3008 is an import address table slot: no detected function contains
+		// it, and refusing it locally would refuse the question this capability
+		// exists to answer.
+		const reached = await service.invoke({ capability: 'delver_call_paths', args: { fromAddress: '0x1000', toAddress: '0x3008' } }, CancellationToken.None);
+
+		assert.deepStrictEqual({
+			payload: payloadOf<ICallPathsPayload>(reached),
+			completeness: reached.completeness,
+			omitted: reached.omitted,
+			provenance: reached.provenance,
+			calls: analysis.calls,
+		}, {
+			payload: {
+				from: { rva: '0x1000', endRva: '0x1100', name: 'SUB_1000', authored: false, authoritative: true, source: 'exceptionDirectory' },
+				to: { rva: '0x3008' },
+				maxDepth: 6,
+				maxPaths: 8,
+				pathCount: 1,
+				paths: [{
+					steps: [
+						{
+							fromFunction: 'SUB_1000', fromFunctionRva: '0x1000', callSite: '0x1040',
+							toFunction: 'SUB_2000', toFunctionRva: '0x2000', kind: 'call', tailCall: false,
+						},
+						{
+							fromFunction: 'SUB_2000', fromFunctionRva: '0x2000', callSite: '0x2010',
+							toFunction: undefined, toFunctionRva: undefined, kind: 'call', tailCall: false,
+							importModule: 'KERNEL32.dll', importSymbol: 'VirtualAlloc', importOrdinal: undefined,
+							iatRva: '0x3008', resolutionMethod: 'iatOperand', confidence: 'exact',
+						},
+					],
+				}],
+				pathsTruncated: false,
+				searchExhausted: true,
+				depthLimitReached: false,
+				visitLimitReached: false,
+				visitedFunctionCount: 2,
+				unresolvedIndirectSitesOnFrontier: 0,
+			},
+			completeness: 'complete',
+			omitted: undefined,
+			provenance: [{
+				source: 'analysis', detail: 'Bounded call-path search from SUB_1000 to 0x3008.',
+				contentHash: CONTENT_HASH, addresses: ['0x1000', '0x3008'], untrusted: true,
+			}],
+			calls: ['callPaths:0x1000:0x3008:6:8:100000'],
+		});
+	});
+
+	test('never calls a bounded negative call-path search proof that no path exists', async () => {
+		const { service, session, analysis } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		session.functionsResult = { functions: [...FUNCTIONS] };
+		const clean = analysis.callPathsResult;
+
+		// A path was found, but the returned set is a sample of a larger one.
+		analysis.callPathsResult = { ...clean, paths: [{ steps: [DIRECT_STEP] }], paths_truncated: true, visited_function_count: 12 };
+		const truncated = await service.invoke({ capability: 'delver_call_paths', args: { fromAddress: '0x1000', toAddress: '0x2000' } }, CancellationToken.None);
+		// Nothing found, but the frontier was cut at the depth bound: the only
+		// honest reading is "not known", and the reason names the fixable cause.
+		analysis.callPathsResult = { ...clean, search_exhausted: false, depth_limit_reached: true, visited_function_count: 31 };
+		const depthCut = await service.invoke({ capability: 'delver_call_paths', args: { fromAddress: '0x1000', toAddress: '0x2000', maxDepth: 4 } }, CancellationToken.None);
+		// Two causes at once, so both are named and neither hides the other.
+		analysis.callPathsResult = { ...clean, search_exhausted: false, visit_limit_reached: true, visited_function_count: 100000, unresolved_indirect_sites_on_frontier: 1 };
+		const visitCut = await service.invoke({ capability: 'delver_call_paths', args: { fromAddress: '0x1000', toAddress: '0x2000' } }, CancellationToken.None);
+		// The whole reachable set really was explored — and it still proves
+		// nothing, because two call sites on the frontier go through a register
+		// or a vtable and this search cannot follow them.
+		analysis.callPathsResult = { ...clean, visited_function_count: 44, unresolved_indirect_sites_on_frontier: 2 };
+		const frontier = await service.invoke({ capability: 'delver_call_paths', args: { fromAddress: '0x1000', toAddress: '0x2000' } }, CancellationToken.None);
+		// Exhausted, cut by no bound, and nothing indirect left unresolved:
+		// only now is "nothing reaches it" a claim about the program.
+		analysis.callPathsResult = { ...clean, visited_function_count: 44 };
+		const exhausted = await service.invoke({ capability: 'delver_call_paths', args: { fromAddress: '0x1000', toAddress: '0x2000' } }, CancellationToken.None);
+
+		assert.deepStrictEqual({
+			truncated: [truncated.completeness, truncated.omitted],
+			depthCut: [depthCut.completeness, depthCut.omitted],
+			visitCut: [visitCut.completeness, visitCut.omitted],
+			frontier: [frontier.completeness, frontier.omitted],
+			frontierCount: payloadOf<ICallPathsPayload>(frontier).unresolvedIndirectSitesOnFrontier,
+			exhausted: [exhausted.completeness, exhausted.omitted],
+			exhaustedPaths: payloadOf<ICallPathsPayload>(exhausted).paths,
+		}, {
+			// A found path is still only a sample, so the envelope stays partial
+			// even though the answer to "is there a path" is yes.
+			truncated: ['partial', {
+				reason: '1 path was returned and more exist; this is a sample of the paths between these two addresses, not all of them.',
+			}],
+			depthCut: ['partial', {
+				reason: 'No path from SUB_1000 to SUB_2000 was found, but this search did not finish, so that is not evidence that no path exists.'
+					+ ' The search was cut off at maxDepth 4: no path longer than 4 calls was ever explored. Raise maxDepth to look further.',
+			}],
+			visitCut: ['partial', {
+				reason: 'No path from SUB_1000 to SUB_2000 was found, but this search did not finish, so that is not evidence that no path exists.'
+					+ ' The search stopped after visiting 100000 functions, so part of the reachable graph was never explored.'
+					+ ' 1 call site reached by this search dispatches through a register, a table, or a data pointer with no statically known target,'
+					+ ' so a path this search cannot follow may continue past any of them.',
+			}],
+			// Exhausted and still partial: an unresolved indirect call on the
+			// frontier is exactly where a real sample hides the missing edge.
+			frontier: ['partial', {
+				reason: 'No path from SUB_1000 to SUB_2000 was found, but this search did not finish, so that is not evidence that no path exists.'
+					+ ' 2 call sites reached by this search dispatch through a register, a table, or a data pointer with no statically known target,'
+					+ ' so a path this search cannot follow may continue past any of them.',
+			}],
+			frontierCount: 2,
+			exhausted: ['complete', undefined],
+			exhaustedPaths: [],
+		});
+	});
+
 	test('converts RVA, VA, and file offsets from an offline section table', async () => {
 		const { service, session } = createService(store);
 		session.activeSession = OFFLINE_SESSION;
@@ -1242,6 +2131,69 @@ suite('DelverAgentService', () => {
 			invalidPattern: 'INVALID_ARGUMENT',
 			unknownSection: 'INVALID_ARGUMENT',
 			invalidExecutableOnly: 'INVALID_ARGUMENT',
+		});
+	});
+
+	test('searches decoded instructions with cursor-safe mnemonic and operand-text filters', async () => {
+		const { service, session, analysis } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		const rows: IListingRowWire[] = [
+			{ row: 0, rva: '0x1000', len: 3, bytes_hex: '4889d8', mnemonic: 'mov', operands: 'rax,rbx', flow: FlowKindWire.Sequential, signature_fields: [] },
+			{ row: 1, rva: '0x1003', len: 5, bytes_hex: 'b801000000', mnemonic: 'MOV', operands: 'eax,1', flow: FlowKindWire.Sequential, signature_fields: [] },
+			{ row: 2, rva: '0x1008', len: 5, bytes_hex: 'e800000000', mnemonic: 'call', operands: '0000100D', flow: FlowKindWire.Call, branch_target: '0x100d', signature_fields: [] },
+			{ row: 3, rva: '0x100d', len: 3, bytes_hex: '4801c1', mnemonic: 'add', operands: 'rcx,rax', flow: FlowKindWire.Sequential, signature_fields: [] },
+		];
+		analysis.listingReader = (startRow, count) => ({ rows: rows.slice(startRow, startRow + count), total_rows: rows.length });
+
+		const first = await service.invoke({
+			capability: 'delver_search_instructions',
+			args: { mnemonic: 'MOV', count: 1 },
+		}, CancellationToken.None);
+		const resumed = await service.invoke({
+			capability: 'delver_search_instructions',
+			args: { mnemonic: 'mov', count: 1, cursor: first.nextCursor },
+		}, CancellationToken.None);
+		const operandFiltered = await service.invoke({
+			capability: 'delver_search_instructions',
+			args: { mnemonic: 'mov', operands: 'RAX' },
+		}, CancellationToken.None);
+		const negative = await service.invoke({
+			capability: 'delver_search_instructions',
+			args: { mnemonic: 'ret' },
+		}, CancellationToken.None);
+
+		assert.deepStrictEqual({
+			first: payloadOf<ISearchInstructionsPayload>(first),
+			firstCompleteness: first.completeness,
+			firstHasCursor: typeof first.nextCursor === 'string',
+			resumed: payloadOf<ISearchInstructionsPayload>(resumed),
+			resumedCompleteness: resumed.completeness,
+			operandRvas: payloadOf<ISearchInstructionsPayload>(operandFiltered).matches.map(match => match.rva),
+			negative: payloadOf<ISearchInstructionsPayload>(negative),
+			negativeCompleteness: negative.completeness,
+			changedQuery: await errorCode(service, {
+				capability: 'delver_search_instructions', args: { mnemonic: 'call', cursor: first.nextCursor },
+			}),
+			invalidMnemonic: await errorCode(service, { capability: 'delver_search_instructions', args: { mnemonic: 'mov eax' } }),
+			invalidOperands: await errorCode(service, { capability: 'delver_search_instructions', args: { mnemonic: 'mov', operands: 1 } }),
+		}, {
+			first: {
+				query: { mnemonic: 'mov' }, startRow: 0, totalInstructionCount: 4, scannedInstructionCount: 2,
+				matches: [payloadOf<ISearchInstructionsPayload>(first).matches[0]],
+			},
+			firstCompleteness: 'partial',
+			firstHasCursor: true,
+			resumed: {
+				query: { mnemonic: 'mov' }, startRow: 1, totalInstructionCount: 4, scannedInstructionCount: 3,
+				matches: [payloadOf<ISearchInstructionsPayload>(resumed).matches[0]],
+			},
+			resumedCompleteness: 'complete',
+			operandRvas: ['0x1000'],
+			negative: { query: { mnemonic: 'ret' }, startRow: 0, totalInstructionCount: 4, scannedInstructionCount: 4, matches: [] },
+			negativeCompleteness: 'complete',
+			changedQuery: 'STALE_REVISION',
+			invalidMnemonic: 'INVALID_ARGUMENT',
+			invalidOperands: 'INVALID_ARGUMENT',
 		});
 	});
 

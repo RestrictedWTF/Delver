@@ -49,6 +49,17 @@ export interface IDelverInterpretationService {
 	/** Restores the portable project's authored log without requiring its original sample. */
 	loadFromProject(contentHash: string, edits: readonly IInterpretationEditWire[]): void;
 
+	/**
+	 * Drops the cached log for `contentHash`, so the next {@link load} reads the
+	 * authoritative store again.
+	 *
+	 * Required when a project closes. A project's log is authored *in that
+	 * project*; leaving it cached means the next plain open of the same bytes
+	 * shows the closed project's names and, worse, saves them into a new
+	 * project as though the analyst had authored them there.
+	 */
+	unload(contentHash: string): void;
+
 	/** Authored name at `anchor`, if any. */
 	nameAt(anchor: Anchor): string | undefined;
 
@@ -131,6 +142,12 @@ export class DelverInterpretationService extends Disposable implements IDelverIn
 		let loading = this.loading.get(contentHash);
 		if (!loading) {
 			loading = this.storeService.load(contentHash).then(edits => {
+				// An `unload` while this read was in flight means the caller no
+				// longer wants this log. Publishing it now would resurrect the
+				// state unload exists to drop, so the read is discarded instead.
+				if (this.loading.get(contentHash) !== loading) {
+					return;
+				}
 				this.logs.set(contentHash, InterpretationLog.from(edits.map(editFromWire)));
 			});
 			this.loading.set(contentHash, loading);
@@ -144,6 +161,11 @@ export class DelverInterpretationService extends Disposable implements IDelverIn
 
 	loadFromProject(contentHash: string, edits: readonly IInterpretationEditWire[]): void {
 		this.logs.set(contentHash, InterpretationLog.from(edits.map(editFromWire)));
+	}
+
+	unload(contentHash: string): void {
+		this.logs.delete(contentHash);
+		this.loading.delete(contentHash);
 	}
 
 	nameAt(anchor: Anchor): string | undefined {

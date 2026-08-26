@@ -28,12 +28,16 @@ suite('Delver workspace state', () => {
 			navigatorSurfaceId: DelverSurfaceId.Strings,
 			inspectorSurfaceId: DelverSurfaceId.Review,
 			primarySurfaceId: DelverSurfaceId.Imports,
+			navigatorVisible: false,
 		}), {
 			navigatorWidth: 320,
 			inspectorWidth: 360,
 			navigatorSurfaceId: DelverSurfaceId.Strings,
 			inspectorSurfaceId: DelverSurfaceId.Review,
 			primarySurfaceId: DelverSurfaceId.Imports,
+			navigatorVisible: false,
+			primaryVisible: true,
+			inspectorVisible: true,
 		});
 
 		assert.deepStrictEqual(normalizeDelverWorkspaceState({
@@ -42,12 +46,20 @@ suite('Delver workspace state', () => {
 			navigatorSurfaceId: '',
 			inspectorSurfaceId: 'x'.repeat(201),
 			primarySurfaceId: '',
+			navigatorVisible: false,
+			primaryVisible: false,
+			inspectorVisible: false,
 		}), {
 			navigatorWidth: 280,
 			inspectorWidth: 280,
 			navigatorSurfaceId: DelverSurfaceId.Functions,
 			inspectorSurfaceId: DelverSurfaceId.Xrefs,
 			primarySurfaceId: DelverSurfaceId.Listing,
+			// All three hidden is treated as corrupt: an empty workspace has no
+			// affordance left to bring a zone back.
+			navigatorVisible: true,
+			primaryVisible: true,
+			inspectorVisible: true,
 		});
 	});
 
