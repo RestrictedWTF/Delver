@@ -10,6 +10,7 @@ import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { Disposable, DisposableStore, IDisposable, MutableDisposable } from '../../../../base/common/lifecycle.js';
 import { localize } from '../../../../nls.js';
 import { IContextKey, IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
+import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
 import { IDelverAnalysisService } from '../../../../platform/delver/common/delverAnalysisService.js';
 import { IRange } from '../../../../platform/delver/common/address.js';
 import { FlowKindWire, IFunctionWire, ISectionWire, IStringWire, StringEncodingWire } from '../../../../platform/delver/common/protocol.generated.js';
@@ -27,6 +28,7 @@ import {
 	IDelverSessionService,
 } from '../../../services/delver/common/delverSessionService.js';
 import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
+import { DELVER_SELECTION_NONE, IDelverSelectionService, MenuDelverSelectionContext } from '../../../services/delver/common/delverSelection.js';
 import {
 	DELVER_LISTING_PINNED,
 	DELVER_NAVIGATION_ORIGIN,
@@ -99,7 +101,9 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 		@IDelverFocusService private readonly focusService: IDelverFocusService,
 		@IDelverSessionService private readonly sessionService: IDelverSessionService,
 		@IDelverInterpretationService private readonly interpretationService: IDelverInterpretationService,
-		@IContextKeyService contextKeyService: IContextKeyService,
+		@IContextKeyService private readonly contextKeyService: IContextKeyService,
+		@IContextMenuService private readonly contextMenuService: IContextMenuService,
+		@IDelverSelectionService private readonly selectionService: IDelverSelectionService,
 	) {
 		super();
 		this.pinnedContext = DELVER_LISTING_PINNED.bindTo(contextKeyService);
@@ -364,7 +368,23 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 		}));
 
 		store.add(table.onDidScroll(() => this.updateVisibleRange()));
-		store.add(table.onDidChangeSelection(e => this.publishFocus(e.elements[0])));
+		store.add(table.onDidChangeSelection(e => {
+			this.publishFocus(e.elements[0]);
+			this.publishSelection(e.elements[0]);
+		}));
+		store.add(table.onContextMenu(event => {
+			// Selecting under the cursor before opening the menu is what makes
+			// the menu's `when` clauses describe the row the analyst actually
+			// right-clicked, rather than whatever was selected beforehand.
+			if (event.element) {
+				this.publishSelection(event.element);
+			}
+			this.contextMenuService.showContextMenu({
+				getAnchor: () => event.anchor,
+				menuId: MenuDelverSelectionContext,
+				contextKeyService: this.contextKeyService,
+			});
+		}));
 		store.add(this.focusService.onDidChangeFocus(e => {
 			this.updatePseudocodeHighlights(e.focus.selections ?? []);
 			if (e.origin !== FOCUS_ORIGIN && this.shouldFollow(e.reason)) {
@@ -504,6 +524,32 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 	}
 
 	/** Broadcasts the selected row's address to the rest of the workbench. */
+	/**
+	 * Reports what kind of object the selected row is.
+	 *
+	 * A listing row is an instruction unless it is a function's entry — the
+	 * distinction is the whole reason "Generate Signature" can be offered here
+	 * and nowhere else. String rows come from the appended string table.
+	 */
+	private publishSelection(row: IListingRow | undefined): void {
+		if (!row) {
+			this.selectionService.setSelection(DELVER_SELECTION_NONE);
+			return;
+		}
+		if (row.data) {
+			this.selectionService.setSelection({
+				kind: this.functionStarts.has(row.data.rva) ? 'function' : 'instruction',
+				address: row.data.rva,
+			});
+			return;
+		}
+		if (row.static?.kind === 'string') {
+			this.selectionService.setSelection({ kind: 'string', address: row.static.value.rva });
+			return;
+		}
+		this.selectionService.setSelection(DELVER_SELECTION_NONE);
+	}
+
 	private publishFocus(row: IListingRow | undefined): void {
 		const address = row?.data
 			? BigInt(row.data.rva)

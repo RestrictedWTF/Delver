@@ -62,12 +62,6 @@ export class SearchBytePatternAction extends Action2 {
 			f1: true,
 			icon: Codicon.search,
 			precondition: DELVER_TARGET_ATTACHED,
-			menu: [{
-				id: MenuId.ViewTitle,
-				when: ContextKeyExpr.equals('view', DELVER_SIGNATURES_VIEW_ID),
-				group: 'navigation',
-				order: 1,
-			}],
 		});
 	}
 
@@ -206,12 +200,6 @@ export class ExportIdaPythonMatchersAction extends Action2 {
 			f1: true,
 			icon: Codicon.export,
 			precondition: DELVER_TARGET_OPEN,
-			menu: [{
-				id: MenuId.ViewTitle,
-				when: ContextKeyExpr.and(ContextKeyExpr.equals('view', DELVER_SIGNATURES_VIEW_ID), DELVER_TARGET_OPEN),
-				group: 'navigation',
-				order: 3,
-			}],
 		});
 	}
 
@@ -261,12 +249,6 @@ export class ScanEarlierSignaturesAction extends Action2 {
 			f1: true,
 			icon: Codicon.history,
 			precondition: DELVER_TARGET_ATTACHED,
-			menu: [{
-				id: MenuId.ViewTitle,
-				when: ContextKeyExpr.equals('view', DELVER_SIGNATURES_VIEW_ID),
-				group: 'navigation',
-				order: 2,
-			}],
 		});
 	}
 

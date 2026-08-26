@@ -16,6 +16,7 @@ import { IProgressService, ProgressLocation } from '../../../../platform/progres
 import { IQuickInputService, IQuickPickItem } from '../../../../platform/quickinput/common/quickInput.js';
 import { DelverAgentCapabilityId, IDelverAgentService } from '../../../services/delver/common/delverAgentService.js';
 import { DelverAgentError, DelverAgentErrorCode, IDelverAgentResult, toWireAddress } from '../../../services/delver/common/delverAgentTypes.js';
+import { MenuDelverSelectionContext, whenSelectionIs } from '../../../services/delver/common/delverSelection.js';
 import { DELVER_TARGET_ATTACHED, IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 import { LISTING_ACTIVE } from './delverListingContext.js';
 import { activeListing } from './delverActiveListing.js';
@@ -111,9 +112,13 @@ export class GenerateSignatureAction extends Action2 {
 					order: 2,
 				},
 				{
-					id: MenuId.ViewTitle,
-					when: ContextKeyExpr.and(enabled, ContextKeyExpr.equals('view', 'delver.view.signatures')),
-					group: 'navigation',
+					// Bound to the selected *function*, not to a container.
+					// Attaching this to a view title was how it ended up in
+					// unrelated title bars with nothing on screen connecting it
+					// to what it operates on (`Docs/design/workspace.md` §5).
+					id: MenuDelverSelectionContext,
+					when: ContextKeyExpr.and(enabled, whenSelectionIs('function')),
+					group: 'delver.function',
 					order: 2,
 				},
 			],

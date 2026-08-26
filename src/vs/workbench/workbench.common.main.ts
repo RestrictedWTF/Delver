@@ -483,6 +483,7 @@ import './contrib/opener/browser/opener.contribution.js';
 import './services/delver/common/delverFocusService.js';
 import './services/delver/common/delverSessionService.js';
 import './services/delver/common/delverInterpretationService.js';
+import './services/delver/common/delverSelection.js';
 import './services/delver/common/delverDecompilerService.js';
 import './services/delver/common/delverAgentService.js';
 import './services/delver/common/delverWorkspaceService.js';
