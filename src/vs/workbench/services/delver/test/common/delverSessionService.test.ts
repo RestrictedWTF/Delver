@@ -422,17 +422,48 @@ suite('DelverSessionService', () => {
 		);
 	});
 
-	test('opening a different target closes the previous one', async () => {
-		// A session owns two child processes; leaving the old one running would
-		// leak a provider pair per file opened.
+	test('opening a second target leaves the first one open', async () => {
+		// Reversed by ADR 0008. A workspace editor exists per target, so evicting
+		// the previous session here is what made a second workspace render the
+		// first one's binary. A session now closes with its workspace.
 		const { service, analysis } = createService(store);
-		const first = await service.openTarget('C:\\samples\\a.exe');
-		await service.openTarget('C:\\samples\\b.exe');
+		await service.openTarget('C:\samples\a.exe');
+		await service.openTarget('C:\samples\b.exe');
 
 		assert.deepStrictEqual(
 			{ closed: analysis.closed, active: service.activeSession?.targetPath },
-			{ closed: [first.sessionId], active: 'C:\\samples\\b.exe' },
+			{ closed: [], active: 'C:\samples\b.exe' },
 		);
+	});
+
+	test('the active target follows whichever workspace claims it', async () => {
+		const { service } = createService(store);
+		await service.openTarget('C:\samples\a.exe');
+		await service.openTarget('C:\samples\b.exe');
+
+		const seen: (string | undefined)[] = [];
+		store.add(service.onDidChangeActiveSession(session => seen.push(session?.targetPath)));
+		service.setActiveTarget('C:\samples\a.exe');
+		const afterSwitch = service.activeSession?.targetPath;
+		// Re-claiming the same target announces nothing, and a target that was
+		// never opened cannot become active.
+		service.setActiveTarget('C:\samples\a.exe');
+		service.setActiveTarget('C:\samples\never.exe');
+
+		assert.deepStrictEqual(
+			{ afterSwitch, active: service.activeSession?.targetPath, seen },
+			{ afterSwitch: 'C:\samples\a.exe', active: 'C:\samples\a.exe', seen: ['C:\samples\a.exe'] },
+		);
+	});
+
+	test('closing one target hands the implicit API to another still open', async () => {
+		const { service } = createService(store);
+		const kept = await service.openTarget('C:\samples\a.exe');
+		await service.openTarget('C:\samples\b.exe');
+
+		await service.closeTarget('C:\samples\b.exe');
+
+		assert.strictEqual(service.activeSession?.targetPath, kept.targetPath);
 	});
 
 	test('closing clears the session and announces it', async () => {
@@ -555,29 +586,38 @@ suite('DelverSessionService', () => {
 		);
 	});
 
-	test('canceling the save prompt keeps the current target open', async () => {
-		const { service, analysis, dialog } = createService(store);
-		const first = await service.openTarget('C:\\samples\\a.exe');
+	test('opening a second target never prompts about the first', async () => {
+		// Was: opening prompted to save and cancelling refused the open. Under
+		// ADR 0008 opening evicts nothing, so there is nothing to save or refuse.
+		const { service, analysis, dialog, projectLifecycle } = createService(store);
+		await service.openTarget('C:\samples\a.exe');
 		dialog.decision = 'cancel';
 
-		await assert.rejects(() => service.openTarget('C:\\samples\\b.exe'), error => error instanceof CancellationError);
+		const second = await service.openTarget('C:\samples\b.exe');
 
 		assert.deepStrictEqual(
-			{ active: service.activeSession?.targetPath, opened: analysis.opened, closed: analysis.closed },
-			{ active: first.targetPath, opened: ['C:\\samples\\a.exe'], closed: [] },
+			{
+				active: second.targetPath,
+				opened: analysis.opened,
+				closed: analysis.closed,
+				saved: projectLifecycle.saved,
+			},
+			{ active: 'C:\samples\b.exe', opened: ['C:\samples\a.exe', 'C:\samples\b.exe'], closed: [], saved: [] },
 		);
 	});
 
-	test('saving before target replacement clears the old project state', async () => {
-		const { service, projectLifecycle, dialog } = createService(store);
-		await service.openTarget('C:\\samples\\a.exe');
-		dialog.decision = 'save';
+	test('dirty state belongs to a target, not to the service', async () => {
+		const { service } = createService(store);
+		await service.openTarget('C:\samples\a.exe');
+		service.markProjectDirty();
+		await service.openTarget('C:\samples\b.exe');
+		const secondDirty = service.isProjectDirty;
 
-		await service.openTarget('C:\\samples\\b.exe');
+		service.setActiveTarget('C:\samples\a.exe');
 
 		assert.deepStrictEqual(
-			{ saved: projectLifecycle.saved, active: service.activeSession?.targetPath, dirty: service.isProjectDirty },
-			{ saved: ['C:\\samples\\a.exe'], active: 'C:\\samples\\b.exe', dirty: true },
+			{ secondDirty, firstDirty: service.isProjectDirty },
+			{ secondDirty: true, firstDirty: true },
 		);
 	});
 

@@ -37,7 +37,12 @@ export class DelverWorkspaceInput extends EditorInput {
 	}
 
 	override get capabilities(): EditorInputCapabilities {
-		return EditorInputCapabilities.Readonly | EditorInputCapabilities.Singleton;
+		// Readonly, but deliberately **not** Singleton. Singleton allows one
+		// editor of this type in the whole workbench, so opening a second target
+		// replaced the first workspace instead of joining it — the editor-layer
+		// half of the same mistake ADR 0008 fixes in the session layer. `matches`
+		// already keeps one editor *per target*, which is the real requirement.
+		return EditorInputCapabilities.Readonly;
 	}
 
 	override getName(): string {

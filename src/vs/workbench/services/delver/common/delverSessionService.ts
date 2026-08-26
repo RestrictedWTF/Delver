@@ -107,8 +107,16 @@ export interface IDelverSessionService {
 	/** Saves the active analysis to its current project or prompts for a project path. */
 	saveProject(): Promise<boolean>;
 
-	/** Closes the open target. Returns false when the user cancels. */
-	closeTarget(): Promise<boolean>;
+	/** Closes one open target, or the active one. False when the user cancels. */
+	closeTarget(targetPath?: string): Promise<boolean>;
+
+	/**
+	 * Points the implicit API at an already-open target.
+	 *
+	 * Called by a workspace editor when it becomes visible, so `functions()` and
+	 * friends answer for the target on screen rather than the one opened last.
+	 */
+	setActiveTarget(targetPath: string): void;
 }
 
 type IDelverLiveSession = IDelverSession & Required<Pick<IDelverSession, 'sessionId' | 'image'>>;
@@ -117,6 +125,13 @@ const enum ProjectCloseDecision {
 	Save = 'save',
 	Discard = 'discard',
 	Cancel = 'cancel',
+}
+
+/** One open target: its session, plus the project state that belongs to it. */
+interface IDelverSessionEntry {
+	session: IDelverSession;
+	isProjectDirty: boolean;
+	projectPath: string | undefined;
 }
 
 const enum UpdatedTargetDecision {
@@ -131,23 +146,34 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 	private readonly _onDidChangeActiveSession = this._register(new Emitter<IDelverSession | undefined>());
 	readonly onDidChangeActiveSession = this._onDidChangeActiveSession.event;
 
-	private _activeSession: IDelverSession | undefined;
-	private _isProjectDirty = false;
-	private _projectPath: string | undefined;
+	/**
+	 * Every open target, keyed by its path.
+	 *
+	 * Dirty state and project path live here with the session rather than on the
+	 * service, because they describe *a* project, not the service. See ADR 0008.
+	 */
+	private readonly sessions = new Map<string, IDelverSessionEntry>();
+
+	/** Which open target the implicit API answers for; follows the focused workspace. */
+	private _activeTargetPath: string | undefined;
 
 	/** Tail of in-flight opens, so concurrent requests cannot race. */
 	private opening: Promise<IDelverSession | undefined> = Promise.resolve(undefined);
 
+	private get activeEntry(): IDelverSessionEntry | undefined {
+		return this._activeTargetPath === undefined ? undefined : this.sessions.get(this._activeTargetPath);
+	}
+
 	get activeSession(): IDelverSession | undefined {
-		return this._activeSession;
+		return this.activeEntry?.session;
 	}
 
 	get isProjectDirty(): boolean {
-		return this._isProjectDirty;
+		return this.activeEntry?.isProjectDirty ?? false;
 	}
 
 	get projectPath(): string | undefined {
-		return this._projectPath;
+		return this.activeEntry?.projectPath;
 	}
 
 	private readonly targetOpenContext: IContextKey<boolean>;
@@ -168,14 +194,14 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 		this._register(lifecycleService.onBeforeShutdown(event => {
 			event.veto(this.shouldVetoShutdown(), 'veto.delverUnsavedProject');
 		}));
-		this._register({ dispose: () => { void this.releaseTarget(); } });
+		this._register({ dispose: () => { void this.releaseAllTargets(); } });
 	}
 
 	async openTarget(targetPath: string): Promise<IDelverSession> {
 		if (extname(targetPath).toLowerCase() === '.delverdb') {
 			return this.openProject(targetPath);
 		}
-		const existing = this._activeSession;
+		const existing = this.activeSession;
 		if (existing?.targetPath === targetPath) {
 			return existing;
 		}
@@ -189,7 +215,7 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 	}
 
 	async attachTarget(targetPath: string): Promise<IDelverSession> {
-		const existing = this._activeSession;
+		const existing = this.activeSession;
 		if (!existing?.projectPath) {
 			throw new Error('Open a Delver project before locating its target.');
 		}
@@ -199,14 +225,17 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 			throw new Error('The selected target does not match this project revision (SHA-256 differs).');
 		}
 		const attached: IDelverSession = { ...candidate, projectPath: existing.projectPath };
-		this._activeSession = attached;
+		const entry = this.activeEntry;
+		if (entry) {
+			entry.session = attached;
+		}
 		this.targetAttachedContext.set(true);
 		this._onDidChangeActiveSession.fire(attached);
 		return attached;
 	}
 
 	async openProject(projectPath: string): Promise<IDelverSession> {
-		const existing = this._activeSession;
+		const existing = this.activeSession;
 		if (existing?.projectPath === projectPath) {
 			return existing;
 		}
@@ -251,7 +280,7 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 	}
 
 	async refreshTarget(targetPath: string): Promise<IDelverSession> {
-		const existing = this._activeSession;
+		const existing = this.activeSession;
 		if (!existing || existing.targetPath !== targetPath) {
 			return this.openTarget(targetPath);
 		}
@@ -262,21 +291,25 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 	}
 
 	private async doOpen(targetPath: string): Promise<IDelverSession> {
-		const existing = this._activeSession;
-		if (existing?.targetPath === targetPath) {
-			return existing;
-		}
-		if (!await this.closeTarget()) {
-			throw new CancellationError();
+		// Already open — including in another workspace — so adopt it rather than
+		// analysing the same bytes twice.
+		const open = this.sessions.get(targetPath);
+		if (open) {
+			this._activeTargetPath = targetPath;
+			this.publishActive(open.session);
+			return open.session;
 		}
 
+		// Deliberately does *not* close the previous target. Sessions are
+		// per-target now (ADR 0008); evicting one here is what made a second
+		// workspace show the first one's binary.
 		const session = await this.createSession(targetPath);
 		this.adoptSession(session, true);
 		return session;
 	}
 
 	private async doRefresh(targetPath: string): Promise<IDelverSession> {
-		const existing = this._activeSession;
+		const existing = this.activeSession;
 		if (!existing || existing.targetPath !== targetPath) {
 			return this.doOpen(targetPath);
 		}
@@ -291,7 +324,7 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 		}
 
 		if (!this.projectService.projectPath(existing.contentHash)) {
-			if (!await this.confirmProjectClose()) {
+			if (!await this.confirmProjectClose(this.sessions.get(existing.targetPath))) {
 				await this.analysisService.closeImage(candidate.sessionId).catch(() => undefined);
 				throw new CancellationError();
 			}
@@ -349,35 +382,64 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 	}
 
 	private adoptSession(session: IDelverSession, dirty: boolean): void {
-		this._activeSession = session;
-		this._isProjectDirty = dirty;
-		this._projectPath = this.projectService.projectPath(session.contentHash);
-		this.targetOpenContext.set(true);
-		this.targetAttachedContext.set(session.sessionId !== undefined);
+		this.sessions.set(session.targetPath, {
+			session,
+			isProjectDirty: dirty,
+			projectPath: this.projectService.projectPath(session.contentHash),
+		});
+		this._activeTargetPath = session.targetPath;
+		this.publishActive(session);
+	}
+
+	/**
+	 * Points the implicit API at an already-open target.
+	 *
+	 * The workspace editor calls this when it becomes visible, so that
+	 * `functions()`, `imports()` and the rest answer for the target the analyst
+	 * is actually looking at rather than whichever was opened last (ADR 0008).
+	 */
+	setActiveTarget(targetPath: string): void {
+		if (this._activeTargetPath === targetPath || !this.sessions.has(targetPath)) {
+			return;
+		}
+		this._activeTargetPath = targetPath;
+		this.publishActive(this.sessions.get(targetPath)!.session);
+	}
+
+	private publishActive(session: IDelverSession | undefined): void {
+		this.targetOpenContext.set(session !== undefined);
+		this.targetAttachedContext.set(session?.sessionId !== undefined);
 		this._onDidChangeActiveSession.fire(session);
 	}
 
 	markProjectDirty(): void {
-		if (this._activeSession) {
-			this._isProjectDirty = true;
+		const entry = this.activeEntry;
+		if (entry) {
+			entry.isProjectDirty = true;
 		}
 	}
 
 	markProjectSaved(projectPath?: string): void {
-		if (this._activeSession) {
-			this._isProjectDirty = false;
+		const entry = this.activeEntry;
+		if (entry) {
+			entry.isProjectDirty = false;
 			if (projectPath !== undefined) {
-				this._projectPath = projectPath;
+				entry.projectPath = projectPath;
 			}
 		}
 	}
 
 	async saveProject(): Promise<boolean> {
-		const session = this._activeSession;
-		if (!session || !await this.projectService.save(session)) {
+		return this.saveEntry(this.activeEntry);
+	}
+
+	/** Saves one target's project, active or not — shutdown must save them all. */
+	private async saveEntry(entry: IDelverSessionEntry | undefined): Promise<boolean> {
+		if (!entry || !await this.projectService.save(entry.session)) {
 			return false;
 		}
-		this.markProjectSaved(this.projectService.projectPath(session.contentHash));
+		entry.isProjectDirty = false;
+		entry.projectPath = this.projectService.projectPath(entry.session.contentHash);
 		return true;
 	}
 
@@ -402,7 +464,7 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 	}
 
 	private readSnapshotOrLive<T>(category: 'imageInfo' | 'functions' | 'imports' | 'exports' | 'strings', parse: (value: string) => T): Promise<T> {
-		const session = this._activeSession;
+		const session = this.activeSession;
 		if (!session) {
 			return Promise.reject(new Error('No Delver project is open.'));
 		}
@@ -426,24 +488,32 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 		}
 	}
 
-	async closeTarget(): Promise<boolean> {
-		if (!await this.confirmProjectClose()) {
+	async closeTarget(targetPath?: string): Promise<boolean> {
+		const key = targetPath ?? this._activeTargetPath;
+		const entry = key === undefined ? undefined : this.sessions.get(key);
+		if (!await this.confirmProjectClose(entry)) {
 			return false;
 		}
-		await this.releaseTarget();
+		await this.releaseTarget(key);
 		return true;
 	}
 
 	private async shouldVetoShutdown(): Promise<boolean> {
-		return !await this.confirmProjectClose();
+		// Every open target, not just the focused one. A second workspace with
+		// unsaved analysis must not be discarded silently because its tab
+		// happened not to be in front.
+		for (const entry of [...this.sessions.values()]) {
+			if (!await this.confirmProjectClose(entry)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
-	private async confirmProjectClose(): Promise<boolean> {
-		const session = this._activeSession;
-		if (!session || !this._isProjectDirty) {
+	private async confirmProjectClose(entry: IDelverSessionEntry | undefined): Promise<boolean> {
+		if (!entry || !entry.isProjectDirty) {
 			return true;
 		}
-
 		const { result } = await this.dialogService.prompt<ProjectCloseDecision>({
 			type: Severity.Warning,
 			message: localize('delverSaveProjectMessage', "Do you want to save the changes to your Delver project?"),
@@ -466,12 +536,12 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 
 		switch (result) {
 			case ProjectCloseDecision.Save:
-				if (!await this.saveProject()) {
+				if (!await this.saveEntry(entry)) {
 					return false;
 				}
 				return true;
 			case ProjectCloseDecision.Discard:
-				this._isProjectDirty = false;
+				entry.isProjectDirty = false;
 				return true;
 			default:
 				return false;
@@ -501,20 +571,31 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 		return result ?? UpdatedTargetDecision.Cancel;
 	}
 
-	private async releaseTarget(): Promise<void> {
-		const session = this._activeSession;
-		if (!session) {
+	/** Closes one open target, or the active one. */
+	private async releaseTarget(targetPath?: string): Promise<void> {
+		const key = targetPath ?? this._activeTargetPath;
+		const entry = key === undefined ? undefined : this.sessions.get(key);
+		if (!entry || key === undefined) {
 			return;
 		}
-		this._activeSession = undefined;
-		this._isProjectDirty = false;
-		this._projectPath = undefined;
-		this.targetOpenContext.set(false);
-		this.targetAttachedContext.set(false);
-		this._onDidChangeActiveSession.fire(undefined);
-		await this.projectService.close(session).catch(() => undefined);
-		if (session.sessionId) {
-			await this.analysisService.closeImage(session.sessionId).catch(() => undefined);
+		this.sessions.delete(key);
+		if (this._activeTargetPath === key) {
+			// Hand the implicit API to whatever else is still open, so closing one
+			// workspace does not leave every surface answering for nothing.
+			const next = this.sessions.keys().next();
+			this._activeTargetPath = next.done ? undefined : next.value;
+			this.publishActive(this.activeSession);
+		}
+		await this.projectService.close(entry.session).catch(() => undefined);
+		if (entry.session.sessionId) {
+			await this.analysisService.closeImage(entry.session.sessionId).catch(() => undefined);
+		}
+	}
+
+	/** Closes every open target. Used on shutdown. */
+	private async releaseAllTargets(): Promise<void> {
+		for (const key of [...this.sessions.keys()]) {
+			await this.releaseTarget(key);
 		}
 	}
 }

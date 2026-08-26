@@ -180,6 +180,7 @@ export class DelverWorkspaceEditor extends EditorPane {
 		}
 
 		this.session = session;
+		this.sessionService.setActiveTarget(input.targetPath);
 		await this.refreshFunctions(token);
 		if (token.isCancellationRequested || this.input !== input) {
 			return;
@@ -258,6 +259,13 @@ export class DelverWorkspaceEditor extends EditorPane {
 		this.primary.setZoneVisible(visible);
 		this.inspector.setZoneVisible(visible);
 		if (visible && this.dimension) {
+			// Claim the implicit API for this workspace's target. Sessions are
+			// per-target (ADR 0008) but `functions()`, `imports()` and the rest
+			// still answer for whichever is active, so the workspace on screen
+			// has to be the one they answer for.
+			if (this.targetPath) {
+				this.sessionService.setActiveTarget(this.targetPath);
+			}
 			this.layout(this.dimension);
 			// Focus moved while this workspace was hidden and it deliberately
 			// ignored those events, so its surfaces hold the context from

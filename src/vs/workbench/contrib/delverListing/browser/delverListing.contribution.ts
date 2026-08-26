@@ -116,10 +116,12 @@ class OpenTargetAction extends Action2 {
 			}
 		}
 
-		const pane = await editorService.openEditor(new DelverWorkspaceInput(targetPath), { pinned: true, forceReload });
-		if (pane) {
-			await closeDelverEditors(editorService, editor => editor !== pane.input && editor.resource?.path !== targetPath);
-		}
+		// Opens alongside whatever is already open. This used to sweep closed
+		// every Delver editor belonging to another target -- the third place the
+		// single-target assumption was encoded, after the session service and the
+		// input's Singleton capability (ADR 0008). Editors now close with their
+		// own target, not when a different one opens.
+		await editorService.openEditor(new DelverWorkspaceInput(targetPath), { pinned: true, forceReload });
 	}
 }
 
