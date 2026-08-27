@@ -395,6 +395,22 @@ export class ReturnAction extends Action2 {
  * the address alone — a name has to survive the same bytes being loaded
  * somewhere else.
  */
+/**
+ * The address a context menu named when it was opened.
+ *
+ * A menu is opened on the object under the cursor, which is not always where the
+ * focus bus points: right-clicking a line without selecting it first leaves the
+ * bus on the previously selected one, and the pseudocode pane never moves the
+ * bus at all while sync is off. Taking the target from the menu keeps what the
+ * analyst pointed at and what gets edited the same thing.
+ *
+ * Absent when the command came from a keybinding or the palette, where the bus
+ * is the right answer.
+ */
+function requestedAddress(value: unknown): bigint | undefined {
+	return typeof value === 'string' && /^0x[0-9a-f]+$/i.test(value) ? BigInt(value) : undefined;
+}
+
 export class RenameAction extends Action2 {
 	constructor() {
 		super({
@@ -417,16 +433,16 @@ export class RenameAction extends Action2 {
 		});
 	}
 
-	async run(accessor: ServicesAccessor): Promise<void> {
+	async run(accessor: ServicesAccessor, target?: unknown): Promise<void> {
 		const focusService = accessor.get(IDelverFocusService);
 		const notificationService = accessor.get(INotificationService);
 
-		const location = focusService.focus.location;
-		if (!location) {
+		const address = requestedAddress(target) ?? focusService.focus.location?.address;
+		if (address === undefined) {
 			notificationService.info(localize('delverNothingToRename', "Select an address to rename."));
 			return;
 		}
-		await editInterpretationAt(accessor, location.address, EditOp.Rename);
+		await editInterpretationAt(accessor, address, EditOp.Rename);
 	}
 }
 
@@ -453,13 +469,13 @@ export class CommentAction extends Action2 {
 		});
 	}
 
-	async run(accessor: ServicesAccessor): Promise<void> {
-		const location = accessor.get(IDelverFocusService).focus.location;
-		if (!location) {
+	async run(accessor: ServicesAccessor, target?: unknown): Promise<void> {
+		const address = requestedAddress(target) ?? accessor.get(IDelverFocusService).focus.location?.address;
+		if (address === undefined) {
 			accessor.get(INotificationService).info(localize('delverNothingToComment', "Select an instruction to comment."));
 			return;
 		}
-		await editInterpretationAt(accessor, location.address, EditOp.Comment);
+		await editInterpretationAt(accessor, address, EditOp.Comment);
 	}
 }
 
@@ -486,13 +502,13 @@ export class TagAction extends Action2 {
 		});
 	}
 
-	async run(accessor: ServicesAccessor): Promise<void> {
-		const location = accessor.get(IDelverFocusService).focus.location;
-		if (!location) {
+	async run(accessor: ServicesAccessor, target?: unknown): Promise<void> {
+		const address = requestedAddress(target) ?? accessor.get(IDelverFocusService).focus.location?.address;
+		if (address === undefined) {
 			accessor.get(INotificationService).info(localize('delverNothingToTag', "Select an instruction to tag."));
 			return;
 		}
-		await editInterpretationAt(accessor, location.address, EditOp.Tags);
+		await editInterpretationAt(accessor, address, EditOp.Tags);
 	}
 }
 

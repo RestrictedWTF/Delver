@@ -138,12 +138,13 @@ export class DelverPseudocodeWidget extends Disposable implements IDelverSurface
 		const line = event.target.position?.lineNumber;
 		const result = this.result;
 		const focus = line !== undefined && result ? focusForPseudocodeLine(result, line) : undefined;
-		if (focus) {
+		const address = focus && result ? toWireAddress(focus.address) : undefined;
+		if (focus && result && address !== undefined) {
 			// Selecting under the cursor before opening the menu is what makes the
 			// menu's `when` clauses describe the line actually right-clicked.
 			this.selectionService.setSelection({
-				kind: focus.address === result?.functionRva ? 'function' : 'instruction',
-				address: toWireAddress(focus.address),
+				kind: focus.address === result.functionRva ? 'function' : 'instruction',
+				address,
 			});
 		}
 		// Opened on the next turn, not this one. Monaco's context-menu controller
@@ -159,6 +160,9 @@ export class DelverPseudocodeWidget extends Disposable implements IDelverSurface
 				getAnchor: () => anchor,
 				menuId: MenuDelverSelectionContext,
 				contextKeyService: this.contextKeyService,
+				// The actions read their target from here rather than the focus bus,
+				// which this pane deliberately leaves alone while sync is off.
+				menuActionOptions: address === undefined ? undefined : { arg: address, shouldForwardArgs: true },
 			});
 		}, 0);
 	}
