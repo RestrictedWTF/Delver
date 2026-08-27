@@ -13,14 +13,19 @@ import { generateUuid } from '../../../../base/common/uuid.js';
 import { IEditorConstructionOptions } from '../../../../editor/browser/config/editorConfiguration.js';
 import { CodeEditorWidget } from '../../../../editor/browser/widget/codeEditor/codeEditorWidget.js';
 import { ILanguageService } from '../../../../editor/common/languages/language.js';
+import { IEditorMouseEvent } from '../../../../editor/browser/editorBrowser.js';
 import { ITextModel } from '../../../../editor/common/model.js';
 import { IModelService } from '../../../../editor/common/services/model.js';
 import { localize } from '../../../../nls.js';
+import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
+import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { defaultButtonStyles } from '../../../../platform/theme/browser/defaultStyles.js';
 import { IDelverSurface } from '../../../services/delver/browser/delverSurface.js';
 import { IDelverDecompilerService, IDecompiledFunction, rangesForDecompilerLine } from '../../../services/delver/common/delverDecompilerService.js';
 import { FocusReason, IDelverFocusService } from '../../../services/delver/common/delverFocusService.js';
+import { IDelverSelectionService, MenuDelverSelectionContext } from '../../../services/delver/common/delverSelection.js';
+import { toWireAddress } from '../../../services/delver/common/delverAgentTypes.js';
 import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 import { IStatusbarEntryAccessor, IStatusbarService, StatusbarAlignment } from '../../../services/statusbar/browser/statusbar.js';
 import { DelverPseudocodeInput } from './delverPseudocodeInput.js';
@@ -57,6 +62,9 @@ export class DelverPseudocodeWidget extends Disposable implements IDelverSurface
 
 	constructor(
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
+		@IContextMenuService private readonly contextMenuService: IContextMenuService,
+		@IContextKeyService private readonly contextKeyService: IContextKeyService,
+		@IDelverSelectionService private readonly selectionService: IDelverSelectionService,
 		@IModelService private readonly modelService: IModelService,
 		@ILanguageService private readonly languageService: ILanguageService,
 		@IDelverDecompilerService private readonly decompilerService: IDelverDecompilerService,
@@ -93,8 +101,58 @@ export class DelverPseudocodeWidget extends Disposable implements IDelverSurface
 			scrollBeyondLastLine: false,
 			renderLineHighlight: 'line',
 			fontFamily: 'var(--monaco-monospace-font)',
+			// Monaco's own menu is empty here and so opens and shuts on the same
+			// frame: every `MenuId.EditorContext` entry is gated on being writable
+			// or on a language provider, and this pane is read-only decompiler
+			// output with neither. Delver's selection-scoped menu takes its place
+			// (`design/workspace.md` §5).
+			contextmenu: false,
 		};
 		this.editor = this._register(this.instantiationService.createInstance(CodeEditorWidget, this.editorContainer, options, Object.create(null)));
+		this._register(this.editor.onContextMenu(event => this.showContextMenu(event)));
+	}
+
+	/**
+	 * Offers the same object-scoped menu the listing offers.
+	 *
+	 * The analyst right-clicking a line of C is pointing at the address that line
+	 * came from, so the menu is the one bound to that address — rename it, comment
+	 * it, generate a signature for it — rather than a second, pseudocode-shaped
+	 * vocabulary for the same objects.
+	 */
+	private showContextMenu(event: IEditorMouseEvent): void {
+		// Monaco does both of these itself when its own menu is enabled, and
+		// returns before them when `contextmenu` is off. With the option off,
+		// nothing else suppresses the browser's default or stops the event.
+		event.event.preventDefault();
+		event.event.stopPropagation();
+
+		const line = event.target.position?.lineNumber;
+		const result = this.result;
+		const focus = line !== undefined && result ? focusForPseudocodeLine(result, line) : undefined;
+		if (focus) {
+			// Selecting under the cursor before opening the menu is what makes the
+			// menu's `when` clauses describe the line actually right-clicked.
+			this.selectionService.setSelection({
+				kind: focus.address === result?.functionRva ? 'function' : 'instruction',
+				address: toWireAddress(focus.address),
+			});
+		}
+		// Opened on the next turn, not this one. Monaco's context-menu controller
+		// runs first on the same event and — because its own menu is off — calls
+		// `editor.focus()` and moves the cursor to the clicked position. That work
+		// finishes after a menu opened inline would already have taken focus, so
+		// the menu blurs and hides itself on the frame it appeared: the symptom is
+		// a context menu that flashes and vanishes. Yielding lets the editor settle
+		// first, and the menu then keeps the focus it takes.
+		const anchor = { x: event.event.posx, y: event.event.posy };
+		setTimeout(() => {
+			this.contextMenuService.showContextMenu({
+				getAnchor: () => anchor,
+				menuId: MenuDelverSelectionContext,
+				contextKeyService: this.contextKeyService,
+			});
+		}, 0);
 	}
 
 	async setTarget(targetPath: string, functionRva: bigint | undefined, functionName: string | undefined, token: CancellationToken): Promise<void> {
