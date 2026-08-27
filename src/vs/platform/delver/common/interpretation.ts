@@ -110,6 +110,18 @@ export interface IInterpretationAt {
 }
 
 /**
+ * An authored comment folded onto one line for display.
+ *
+ * Comments are stored exactly as authored, newlines included — an imported one
+ * can be a paragraph. Every surface that shows a comment beside code has one
+ * line to do it in, so the fold lives here rather than in each of them, and the
+ * stored value is never touched.
+ */
+export function foldedComment(comment: string | undefined): string | undefined {
+	return comment?.replace(/\r\n|\r|\n/g, ' ⏎ ');
+}
+
+/**
  * Key for an anchor. Addresses are `bigint`, so they cannot key a Map directly
  * without collapsing distinct images onto one another.
  */

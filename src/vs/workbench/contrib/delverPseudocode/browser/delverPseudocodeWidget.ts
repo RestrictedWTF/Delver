@@ -14,6 +14,8 @@ import { IEditorConstructionOptions } from '../../../../editor/browser/config/ed
 import { CodeEditorWidget } from '../../../../editor/browser/widget/codeEditor/codeEditorWidget.js';
 import { ILanguageService } from '../../../../editor/common/languages/language.js';
 import { IEditorMouseEvent } from '../../../../editor/browser/editorBrowser.js';
+import { IEditorDecorationsCollection } from '../../../../editor/common/editorCommon.js';
+import { Range } from '../../../../editor/common/core/range.js';
 import { ITextModel } from '../../../../editor/common/model.js';
 import { IModelService } from '../../../../editor/common/services/model.js';
 import { localize } from '../../../../nls.js';
@@ -22,10 +24,12 @@ import { IContextMenuService } from '../../../../platform/contextview/browser/co
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { defaultButtonStyles } from '../../../../platform/theme/browser/defaultStyles.js';
 import { IDelverSurface } from '../../../services/delver/browser/delverSurface.js';
-import { IDelverDecompilerService, IDecompiledFunction, rangesForDecompilerLine } from '../../../services/delver/common/delverDecompilerService.js';
+import { decompilerLinesForRva, IDelverDecompilerService, IDecompiledFunction, rangesForDecompilerLine } from '../../../services/delver/common/delverDecompilerService.js';
 import { FocusReason, IDelverFocusService } from '../../../services/delver/common/delverFocusService.js';
 import { IDelverSelectionService, MenuDelverSelectionContext } from '../../../services/delver/common/delverSelection.js';
+import { foldedComment } from '../../../../platform/delver/common/interpretation.js';
 import { toWireAddress } from '../../../services/delver/common/delverAgentTypes.js';
+import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
 import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 import { IStatusbarEntryAccessor, IStatusbarService, StatusbarAlignment } from '../../../services/statusbar/browser/statusbar.js';
 import { DelverPseudocodeInput } from './delverPseudocodeInput.js';
@@ -52,6 +56,8 @@ export class DelverPseudocodeWidget extends Disposable implements IDelverSurface
 	private editor!: CodeEditorWidget;
 	private dimension: Dimension | undefined;
 	private result: IDecompiledFunction | undefined;
+	private contentHash: string | undefined;
+	private commentDecorations: IEditorDecorationsCollection | undefined;
 	private input: DelverPseudocodeInput | undefined;
 	private applyingFocus = false;
 	private visible = false;
@@ -69,6 +75,7 @@ export class DelverPseudocodeWidget extends Disposable implements IDelverSurface
 		@ILanguageService private readonly languageService: ILanguageService,
 		@IDelverDecompilerService private readonly decompilerService: IDelverDecompilerService,
 		@IDelverSessionService private readonly sessionService: IDelverSessionService,
+		@IDelverInterpretationService private readonly interpretationService: IDelverInterpretationService,
 		@IDelverFocusService private readonly focusService: IDelverFocusService,
 		@IStatusbarService private readonly statusbarService: IStatusbarService,
 	) {
@@ -109,6 +116,7 @@ export class DelverPseudocodeWidget extends Disposable implements IDelverSurface
 			contextmenu: false,
 		};
 		this.editor = this._register(this.instantiationService.createInstance(CodeEditorWidget, this.editorContainer, options, Object.create(null)));
+		this.commentDecorations = this.editor.createDecorationsCollection();
 		this._register(this.editor.onContextMenu(event => this.showContextMenu(event)));
 	}
 
@@ -189,6 +197,9 @@ export class DelverPseudocodeWidget extends Disposable implements IDelverSurface
 		if (token.isCancellationRequested) {
 			throw new CancellationError();
 		}
+		// Remembered so comments can be looked up for exactly the image this
+		// decompilation came from, rather than whichever target is active later.
+		this.contentHash = session.contentHash;
 		const request = {
 			sessionId: session.sessionId,
 			targetPath: session.targetPath,
@@ -265,10 +276,91 @@ export class DelverPseudocodeWidget extends Disposable implements IDelverSurface
 				this.applyFocus();
 			}
 		}));
+		store.add(this.interpretationService.onDidChange(event => {
+			if (event.edit.anchor.contentHash === this.contentHash) {
+				this.applyComments();
+			}
+		}));
+		this.applyComments();
 		this.applyFocus();
 		if (this.dimension) {
 			this.editor.layout(this.dimension);
 		}
+	}
+
+	/**
+	 * Shows authored comments beside the C they belong to.
+	 *
+	 * Injected text rather than edits to the model: the decompiler's output is
+	 * the thing line mappings are expressed against, so inserting a character of
+	 * our own into it would move every address off its line.
+	 *
+	 * Driven from the authored edits rather than by asking each line what is at
+	 * it — a function is thousands of lines and the comments on it are a handful.
+	 * A comment on an address the decompiler folded away has no line here and is
+	 * simply not shown; it is still on its instruction in the listing.
+	 */
+	private applyComments(): void {
+		const result = this.result;
+		const contentHash = this.contentHash;
+		const model = this.model.value;
+		const decorations = this.commentDecorations;
+		if (!decorations) {
+			return;
+		}
+		if (!result || !contentHash || !model) {
+			decorations.clear();
+			return;
+		}
+
+		const byLine = new Map<number, string[]>();
+		const seen = new Set<bigint>();
+		for (const edit of this.interpretationService.logFor(contentHash)) {
+			const rva = edit.anchor.rva;
+			if (seen.has(rva)) {
+				continue;
+			}
+			seen.add(rva);
+			const comment = foldedComment(this.interpretationService.at({ kind: 'image', contentHash, rva })?.comment);
+			if (!comment) {
+				continue;
+			}
+			for (const line of decompilerLinesForRva(result, rva)) {
+				const existing = byLine.get(line);
+				if (existing) {
+					existing.push(comment);
+				} else {
+					byLine.set(line, [comment]);
+				}
+			}
+		}
+
+		const lineCount = model.getLineCount();
+		decorations.set([...byLine.entries()]
+			.filter(([line]) => line >= 1 && line <= lineCount)
+			.map(([line, comments]) => {
+				const column = model.getLineMaxColumn(line);
+				return {
+					range: new Range(line, column, line, column),
+					options: {
+						description: 'delver-pseudocode-comment',
+						// The range is a single point at end of line, and a collapsed
+						// range renders nothing without this.
+						showIfCollapsed: true,
+						// Several instructions can map to one line of C, and each may
+						// carry its own comment. Joining keeps them all visible rather
+						// than silently showing whichever was found first.
+						after: {
+							content: `  // ${comments.join(' · ')}`,
+							inlineClassName: 'delver-pseudocode-comment',
+							// Italic changes the glyph advance; without this the
+							// injected run is measured in the editor's metrics and the
+							// text drifts out of its own box.
+							inlineClassNameAffectsLetterSpacing: true,
+						},
+					},
+				};
+			}));
 	}
 
 	private publishFocus(line: number): void {

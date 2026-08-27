@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { IInterpretationAt } from '../../../../platform/delver/common/interpretation.js';
+import { foldedComment, IInterpretationAt } from '../../../../platform/delver/common/interpretation.js';
 import { functionDisplayName } from '../../../../platform/delver/common/naming.js';
 
 export interface IListingInterpretationPresentation {
@@ -30,7 +30,7 @@ export function listingInterpretationPresentation(
 	const label = isFunctionStart
 		? functionDisplayName(address, interpretation?.name)
 		: interpretation?.name;
-	const comment = interpretation?.comment?.replace(/\r\n|\r|\n/g, ' ⏎ ');
+	const comment = foldedComment(interpretation?.comment);
 	const tags = interpretation?.tags?.map(tag => `#${tag}`).join(' ');
 	const linesBeforeInstruction = label === undefined ? 0 : 1;
 	return {

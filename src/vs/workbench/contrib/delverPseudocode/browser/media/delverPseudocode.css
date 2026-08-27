@@ -51,3 +51,16 @@
 	display: flex;
 	gap: 8px;
 }
+
+/*
+ * An authored comment shown beside the C it annotates.
+ *
+ * Same voice as the listing's comment column — dimmed and italic — so a comment
+ * reads as the analyst's note in either view rather than as decompiler output.
+ * The `//` in the injected text does the rest: it is the comment marker of the
+ * language on screen, where the listing uses `;` for the same reason.
+ */
+.delver-pseudocode-comment {
+	color: var(--vscode-descriptionForeground);
+	font-style: italic;
+}
