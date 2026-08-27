@@ -8,6 +8,7 @@ import { KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { Action2, MenuId } from '../../../../platform/actions/common/actions.js';
 import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
+import { EditorContextKeys } from '../../../../editor/common/editorContextKeys.js';
 import { InputFocusedContextKey } from '../../../../platform/contextkey/common/contextkeys.js';
 import { IFunctionWire } from '../../../../platform/delver/common/protocol.generated.js';
 import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
@@ -19,6 +20,7 @@ import {
 	FocusReason,
 	IDelverFocusService,
 } from '../../../services/delver/common/delverFocusService.js';
+import { MenuDelverSelectionContext, whenSelectionIs } from '../../../services/delver/common/delverSelection.js';
 import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 import { EditOp, EditStatus, IAuthor } from '../../../../platform/delver/common/interpretation.js';
 import { editInterpretationAt } from '../../../services/delver/browser/delverInterpretationEditing.js';
@@ -66,6 +68,23 @@ export function parseAddress(input: string): bigint | undefined {
 		return undefined;
 	}
 }
+
+/**
+ * True unless the analyst is typing somewhere a keystroke would be text.
+ *
+ * `inputFocus` alone is too broad here: it is set for any focused Monaco editor,
+ * including the read-only pseudocode pane, which is where focus sits for much of
+ * a reading session. Gating on it meant Ctrl+Z reached the text editor's undo —
+ * a no-op on read-only text — instead of taking back the last rename.
+ *
+ * A read-only editor cannot consume these keys meaningfully, so Delver takes
+ * them; a rename box or a search field still wins, which is the case the guard
+ * exists for.
+ */
+const NOT_TYPING = ContextKeyExpr.or(
+	ContextKeyExpr.not(InputFocusedContextKey),
+	EditorContextKeys.readOnly,
+)!;
 
 export class GoToAddressAction extends Action2 {
 	constructor() {
@@ -292,6 +311,12 @@ export class DecompileFunctionAction extends Action2 {
 			category: localize2('delverCategory', 'Delver'),
 			f1: true,
 			precondition: LISTING_ACTIVE,
+			menu: [{
+				id: MenuDelverSelectionContext,
+				when: whenSelectionIs('function'),
+				group: 'delver.function',
+				order: 1,
+			}],
 			keybinding: {
 				when: LISTING_ACTIVE,
 				primary: KeyCode.F5,
@@ -378,6 +403,12 @@ export class RenameAction extends Action2 {
 			category: localize2('delverCategory', 'Delver'),
 			f1: true,
 			precondition: LISTING_ACTIVE,
+			menu: [{
+				id: MenuDelverSelectionContext,
+				when: whenSelectionIs('function', 'instruction', 'string'),
+				group: 'delver.interpretation',
+				order: 1,
+			}],
 			keybinding: {
 				when: LISTING_ACTIVE,
 				primary: KeyCode.F2,
@@ -408,8 +439,14 @@ export class CommentAction extends Action2 {
 			category: localize2('delverCategory', 'Delver'),
 			f1: true,
 			precondition: LISTING_ACTIVE,
+			menu: [{
+				id: MenuDelverSelectionContext,
+				when: whenSelectionIs('function', 'instruction', 'string'),
+				group: 'delver.interpretation',
+				order: 2,
+			}],
 			keybinding: {
-				when: ContextKeyExpr.and(LISTING_ACTIVE, ContextKeyExpr.not(InputFocusedContextKey)),
+				when: ContextKeyExpr.and(LISTING_ACTIVE, NOT_TYPING),
 				primary: KeyCode.Semicolon,
 				weight: KeybindingWeight.EditorContrib,
 			},
@@ -435,8 +472,14 @@ export class TagAction extends Action2 {
 			category: localize2('delverCategory', 'Delver'),
 			f1: true,
 			precondition: LISTING_ACTIVE,
+			menu: [{
+				id: MenuDelverSelectionContext,
+				when: whenSelectionIs('function', 'instruction', 'string'),
+				group: 'delver.interpretation',
+				order: 3,
+			}],
 			keybinding: {
-				when: ContextKeyExpr.and(LISTING_ACTIVE, ContextKeyExpr.not(InputFocusedContextKey)),
+				when: ContextKeyExpr.and(LISTING_ACTIVE, NOT_TYPING),
 				primary: KeyCode.KeyT,
 				weight: KeybindingWeight.EditorContrib,
 			},
@@ -463,7 +506,7 @@ export class UndoInterpretationAction extends Action2 {
 			f1: true,
 			precondition: LISTING_ACTIVE,
 			keybinding: {
-				when: ContextKeyExpr.and(LISTING_ACTIVE, ContextKeyExpr.not(InputFocusedContextKey)),
+				when: ContextKeyExpr.and(LISTING_ACTIVE, NOT_TYPING),
 				primary: KeyMod.CtrlCmd | KeyCode.KeyZ,
 				weight: KeybindingWeight.EditorContrib,
 			},
@@ -480,6 +523,45 @@ export class UndoInterpretationAction extends Action2 {
 			const edit = await accessor.get(IDelverInterpretationService).undoLast(session.contentHash);
 			if (!edit) {
 				notifications.info(localize('delverNothingToUndo', "No local interpretation edit to undo."));
+			}
+		} catch (error) {
+			notifications.error(error instanceof Error ? error : String(error));
+		}
+	}
+}
+
+/** Takes back the newest undo of local interpretation. */
+export class RedoInterpretationAction extends Action2 {
+	constructor() {
+		super({
+			id: 'delver.interpretation.redo',
+			title: localize2('delverRedoInterpretation', 'Redo Interpretation'),
+			category: localize2('delverCategory', 'Delver'),
+			f1: true,
+			precondition: LISTING_ACTIVE,
+			keybinding: {
+				// Both spellings, matching upstream's redo, which claims Ctrl+Y with
+				// Ctrl+Shift+Z as its secondary. An analyst reaching for either one
+				// means the same thing.
+				when: ContextKeyExpr.and(LISTING_ACTIVE, NOT_TYPING),
+				primary: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyZ,
+				secondary: [KeyMod.CtrlCmd | KeyCode.KeyY],
+				mac: { primary: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyZ },
+				weight: KeybindingWeight.EditorContrib,
+			},
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const session = accessor.get(IDelverSessionService).activeSession;
+		const notifications = accessor.get(INotificationService);
+		if (!session) {
+			return;
+		}
+		try {
+			const edit = await accessor.get(IDelverInterpretationService).redoLast(session.contentHash);
+			if (!edit) {
+				notifications.info(localize('delverNothingToRedo', "No undone interpretation edit to redo."));
 			}
 		} catch (error) {
 			notifications.error(error instanceof Error ? error : String(error));

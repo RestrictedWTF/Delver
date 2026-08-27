@@ -27,7 +27,8 @@ import { IWorkspaceContextService } from '../../../../platform/workspace/common/
 import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../browser/editor.js';
 import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { IDelverFocusService } from '../../../services/delver/common/delverFocusService.js';
-import { DELVER_CAN_GO_BACK, DELVER_CAN_GO_FORWARD } from './delverListingContext.js';
+import { DELVER_CAN_GO_BACK, DELVER_CAN_GO_FORWARD, DELVER_LISTING_FOCUSED } from './delverListingContext.js';
+import { activeListing, onDidChangeActiveListing } from './delverActiveListing.js';
 import { EditorExtensions, EditorsOrder } from '../../../common/editor.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
@@ -50,6 +51,7 @@ import {
 	TagAction,
 	TogglePinAction,
 	UndoInterpretationAction,
+	RedoInterpretationAction,
 } from './delverListingNavigation.js';
 import { ExportInterpretationAction, ImportInterpretationAction } from './delverInterpretationActions.js';
 import { GenerateSignatureAction } from './delverSignatureActions.js';
@@ -344,10 +346,36 @@ registerAction2(FollowAction);
 registerAction2(DecompileFunctionAction);
 registerAction2(GenerateSignatureAction);
 registerAction2(ReturnAction);
+/**
+ * Owns `delverListingFocused` at workbench scope.
+ *
+ * It describes a window-wide fact — some listing is live — so it must be
+ * readable from wherever DOM focus happens to be. Bound inside the listing
+ * widget it landed in the editor group's scoped context key service, and every
+ * keybinding gated on it lost to upstream whenever focus sat outside that group:
+ * Ctrl+Z ran the text editor's undo, F2 and `;` did nothing.
+ */
+class DelverListingActiveContribution extends Disposable {
+	constructor(@IContextKeyService contextKeyService: IContextKeyService) {
+		super();
+		const key = DELVER_LISTING_FOCUSED.bindTo(contextKeyService);
+		const sync = () => key.set(activeListing() !== undefined);
+		sync();
+		this._register(onDidChangeActiveListing(sync));
+	}
+}
+
+registerWorkbenchContribution2(
+	'delver.listingActive',
+	DelverListingActiveContribution,
+	WorkbenchPhase.BlockRestore,
+);
+
 registerAction2(RenameAction);
 registerAction2(CommentAction);
 registerAction2(TagAction);
 registerAction2(UndoInterpretationAction);
+registerAction2(RedoInterpretationAction);
 registerAction2(RevertAuthorAction);
 registerAction2(ExportInterpretationAction);
 registerAction2(ImportInterpretationAction);

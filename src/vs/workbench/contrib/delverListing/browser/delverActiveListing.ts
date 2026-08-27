@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { Emitter, Event } from '../../../../base/common/event.js';
 import { IDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
 
 /**
@@ -26,13 +27,29 @@ export interface IDelverListingHost {
  */
 const hosts: IDelverListingHost[] = [];
 
+const onDidChange = new Emitter<void>();
+
+/**
+ * Fires when the stack changes — a listing appeared, went away, or came to the
+ * top.
+ *
+ * Exists so the context key describing "a listing is live" can be owned by a
+ * workbench contribution. Bound from a widget instead, it lands in the context
+ * key service scoped to that editor's group, and keybinding resolution — which
+ * evaluates `when` against whatever element has DOM focus — cannot see it from
+ * anywhere else in the window.
+ */
+export const onDidChangeActiveListing: Event<void> = onDidChange.event;
+
 /** Marks `host` as the one actions apply to. Dispose when it loses focus. */
 export function setActiveListing(host: IDelverListingHost): IDisposable {
 	hosts.push(host);
+	onDidChange.fire();
 	return toDisposable(() => {
 		const index = hosts.lastIndexOf(host);
 		if (index !== -1) {
 			hosts.splice(index, 1);
+			onDidChange.fire();
 		}
 	});
 }
@@ -56,6 +73,7 @@ export function touchActiveListing(host: IDelverListingHost): void {
 	if (index !== -1 && index !== hosts.length - 1) {
 		hosts.splice(index, 1);
 		hosts.push(host);
+		onDidChange.fire();
 	}
 }
 

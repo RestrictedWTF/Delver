@@ -106,6 +106,43 @@ suite('DelverInterpretationService persistence', () => {
 		);
 	});
 
+	test('redo takes an undo back, and undo then continues further into history', async () => {
+		const persistence = new FakeStore();
+		const service = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService));
+		const anchor = { kind: 'image' as const, contentHash: HASH, rva: 0x1000000000000001n };
+		await service.edit(anchor, EditOp.Rename, 'first');
+		await service.edit(anchor, EditOp.Rename, 'second');
+
+		await service.undoLast(HASH);
+		const names: string[] = [service.nameAt(anchor)!];
+		await service.redoLast(HASH);
+		names.push(service.nameAt(anchor)!);
+		// The redone undo must not still suppress 'first', or this finds nothing.
+		await service.undoLast(HASH);
+		names.push(service.nameAt(anchor)!);
+		await service.undoLast(HASH);
+		names.push(service.nameAt(anchor)!);
+
+		assert.deepStrictEqual(names, ['first', 'second', 'first', 'loaded_name']);
+	});
+
+	test('redo reports nothing to take back when no undo is standing', async () => {
+		const persistence = new FakeStore();
+		const service = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService));
+		const anchor = { kind: 'image' as const, contentHash: HASH, rva: 0x1000000000000001n };
+		await service.edit(anchor, EditOp.Rename, 'first');
+
+		const beforeAnyUndo = await service.redoLast(HASH);
+		await service.undoLast(HASH);
+		await service.redoLast(HASH);
+		const afterRedoing = await service.redoLast(HASH);
+
+		assert.deepStrictEqual(
+			{ beforeAnyUndo, afterRedoing, name: service.nameAt(anchor) },
+			{ beforeAnyUndo: undefined, afterRedoing: undefined, name: 'first' },
+		);
+	});
+
 	test('revert author restores every affected field without removing other authors', async () => {
 		const persistence = new FakeStore();
 		const service = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService));

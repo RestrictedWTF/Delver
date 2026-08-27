@@ -97,6 +97,9 @@ export interface IDelverInterpretationService {
 	/** Compensates the most recent uncompensated accepted edit by `author`. */
 	undoLast(contentHash: string, author?: IAuthor): Promise<IEdit | undefined>;
 
+	/** Takes back the newest undo, restoring what it undid. */
+	redoLast(contentHash: string, author?: IAuthor): Promise<IEdit | undefined>;
+
 	/** Appends compensations that reconstruct state as if `author` had not edited it. */
 	revertAuthor(contentHash: string, author: IAuthor, actor?: IAuthor): Promise<number>;
 
@@ -228,14 +231,44 @@ export class DelverInterpretationService extends Disposable implements IDelverIn
 	}
 
 	undoLast(contentHash: string, author: IAuthor = LOCAL_AUTHOR): Promise<IEdit | undefined> {
+		// The newest ordinary edit still standing.
+		return this.compensateLast(contentHash, author, edit => edit.compensates === undefined);
+	}
+
+	redoLast(contentHash: string, author: IAuthor = LOCAL_AUTHOR): Promise<IEdit | undefined> {
+		// The newest *undo* still standing. Taking one back is the same operation
+		// as undo — append what the field would say without it — which is why redo
+		// is not a second mechanism but the same one aimed at a compensation.
+		//
+		// An undo is a compensation of an ordinary edit. A redo is a compensation
+		// of an undo, and must not itself be a target: redoing a redo would walk
+		// forward forever, appending a compensation of a compensation on every
+		// keypress and toggling the field between two values.
+		return this.compensateLast(contentHash, author, (edit, bySeq) =>
+			(edit.compensates ?? []).some(seq => bySeq.get(seq)?.compensates === undefined));
+	}
+
+	/**
+	 * Appends an edit that takes back the newest edit this author made matching
+	 * `isTarget`, carrying the value the field would hold without it.
+	 *
+	 * The log never loses anything (invariant 5): taking an edit back is itself
+	 * an authored edit, which is what makes both directions replayable and lets
+	 * redo undo an undo.
+	 */
+	private compensateLast(
+		contentHash: string,
+		author: IAuthor,
+		isTarget: (edit: IEdit, bySeq: ReadonlyMap<number, IEdit>) => boolean,
+	): Promise<IEdit | undefined> {
 		return this.queueEdit(contentHash, async () => {
 			await this.load(contentHash);
 			const log = this.logs.get(contentHash)!;
-			const active = activeLogEdits(log.log);
 			const compensated = compensatedSequences(log.log);
+			const bySeq = new Map(log.log.map(edit => [edit.seq, edit] as const));
 			const target = [...log.log].reverse().find(edit =>
 				edit.status === EditStatus.Accepted
-				&& edit.compensates === undefined
+				&& isTarget(edit, bySeq)
 				&& !compensated.has(edit.seq)
 				&& sameAuthor(edit.author, author)
 			);
@@ -243,7 +276,10 @@ export class DelverInterpretationService extends Disposable implements IDelverIn
 				return undefined;
 			}
 
-			const desired = InterpretationLog.from(active.filter(edit => edit !== target));
+			// Recomputed from the whole log rather than the current active set:
+			// removing a compensation revives whatever it was suppressing, and only
+			// a fresh pass sees that.
+			const desired = InterpretationLog.from(activeLogEdits(log.log.filter(edit => edit !== target)));
 			return this.appendPersisted(contentHash, {
 				author,
 				anchor: target.anchor,
@@ -351,13 +387,26 @@ function sameAuthor(left: IAuthor, right: IAuthor): boolean {
 	return left.kind === right.kind && left.id === right.id;
 }
 
+/**
+ * Sequences whose compensation still stands.
+ *
+ * A compensator that has itself been compensated — which is what redo appends —
+ * no longer suppresses its target, so the target counts as live again. Without
+ * that rule, undoing after a redo finds nothing left to undo: the original edit
+ * would still look compensated by an undo that has since been taken back.
+ *
+ * Walked newest-first because a compensator always follows what it compensates,
+ * so each edit's own fate is already known by the time it is considered.
+ */
 function compensatedSequences(edits: readonly IEdit[]): Set<number> {
 	const compensated = new Set<number>();
-	for (const edit of edits) {
-		if (edit.status === EditStatus.Accepted) {
-			for (const seq of edit.compensates ?? []) {
-				compensated.add(seq);
-			}
+	const accepted = edits.filter(edit => edit.status === EditStatus.Accepted);
+	for (const edit of [...accepted].sort((left, right) => right.seq - left.seq)) {
+		if (compensated.has(edit.seq)) {
+			continue;
+		}
+		for (const seq of edit.compensates ?? []) {
+			compensated.add(seq);
 		}
 	}
 	return compensated;
