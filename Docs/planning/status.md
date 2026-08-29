@@ -15,6 +15,112 @@ codebase on 2026-08-26, ranked, with the fixed rows deleted as they land.
 
 ## Just landed
 
+**Three things landed: an agent can read its own findings back, an analyst can
+say that a run of bytes is data, not code, and a caller can ask for a
+re-derivation without authoring anything to force one.**
+
+**Findings were write-only.** `delver_report_finding` wrote and nothing read, so
+S6's exit criterion — *resumes from unresolved work without replaying chat
+history* — was entirely absent rather than partly met: the only way an agent
+could recover what it had already found was to re-read the conversation that
+produced it. `delver_list_findings` is the thirty-sixth capability. It pages like
+every other inventory capability, with a revision-bound cursor and a `filter`
+over its `status` argument, which is `all`, `undecided`, `accepted` or
+`rejected`. An unrecognised value is refused with `INVALID_ARGUMENT` rather than
+quietly answered as `all` — a fabricated complete answer to a question nobody
+asked is the worse failure, and this project ranks it that way everywhere else.
+Each finding is paired with `findingDecisionFor`, so `decision` is absent exactly
+when a human has not reviewed it, and `undecidedTotal` is reported beside
+`total`, because the unresolved count is the number a resuming caller acts on.
+The cursor's state stamp is `['findings', count, decidedCount]`: both logs are
+append-only, so counting them is enough to tell one view of them from another.
+The result is `untrusted: true`, since finding text can quote sample-derived
+strings. The tool schema is in `delverAIToolDefinitions.ts`.
+
+**A run of bytes can now be declared data, not code.** Until now the only
+corrections were `define` and `undefine` of a function start, and neither says
+anything about whether the bytes are code at all. A `DataRangeCorrection { rva,
+end_rva }` excludes a half-open range from the derivation: it is not decoded, no
+function start is admitted inside it from any source — seed, call target or
+sweep — and it originates no cross-reference. A cross-reference *targeting* the
+range survives, because a pointer into a table is exactly the evidence that made
+it data. Strings are unaffected.
+
+**It needed no new `EditOp`.** A data range reuses `EditOp.FunctionBounds` at the
+same `(contentHash, rva)` anchor, with canonical JSON
+`{"kind":"data","endRva":"0x..."}`. "A function starts here", "the function
+detected here is not one", and "these bytes are not code at all" are three
+mutually exclusive answers to one question about one address, and sharing one
+slot is what makes them exclusive rather than merely inconsistent — a second
+answer supersedes the first instead of sitting beside it. It also cost nothing:
+no store migration, no new review-view op case, no new interpretation view field.
+
+Three decisions worth carrying:
+
+- **`endRva` is mandatory for `data`**, where it is optional for `define`. An
+  unbounded "data starts here" would have to be guessed at, and guessing too
+  large silently deletes real functions.
+- **A `data` range is deliberately not checked against executable mapping**,
+  unlike a `define`. A range an analyst calls data is usually *inside* an
+  executable section — that is the mistake being corrected — so a
+  mapped-executable test would refuse every useful case.
+- **The linear sweep steps over the range to its exclusive end**, rather than
+  incrementing a byte at a time. This is the `rva+1` trap that
+  [ADR 0015](../history/adr/0015-authored-corrections-re-derive-facts.md) already
+  records for `Undefine`, in a second form: incrementing would guess a function
+  at every excluded byte.
+
+In Rust, `Corrections<'a> { functions, data_ranges }` is a borrowed view with
+`From<&[FunctionCorrection]>` impls, so existing call sites compile untouched.
+Three conflict variants join the existing ones — `EmptyDataRange`,
+`OverlappingDataRanges` (nesting counts as an overlap; abutting at an exclusive
+end does not), and `DefineInsideDataRange`. An `undefine` inside a range is
+allowed: redundant, not contradictory. A conflicting set is refused whole and
+nothing is applied, as before. On the wire, `DataRangeCorrectionWire` carries the
+range, `data_ranges` joins `OpenImageParams` and `SetCorrectionsParams`, and
+`SetCorrectionsResult` reports `data_ranges_applied` **apart from**
+`corrections_applied`, because one data range can silence many detected functions
+and a single total could not say which kind of assertion did it. In TypeScript,
+`functionCorrectionsFor` became `authoredCorrectionsFor` returning
+`{ functions, dataRanges }`, `delver_propose_function` accepts `kind: "data"`,
+and Review labels the row "Treat X through Y as data, not code". ADR 0015 is
+amended with all of it.
+
+**Regenerating `protocol.generated.ts` also revealed that it had been stale.** It
+picked up three fields added to the `delver-protocol` crate in earlier sessions
+and never regenerated: `strings_truncated` on `OpenImageResult`, and `decoding`
+and `generation` on `SetCorrectionsResult`. Invariant 12 says the generated files
+are generated; it does not say when, and the gap is where the drift lived.
+
+**A re-derivation can now be asked for.** `delver_reanalyze` is the
+thirty-seventh capability and closes S5's forced-reanalysis bullet. It takes no
+arguments — it re-derives the whole image or it does nothing, so there is no
+subject to name. Before it, `analysis/setCorrections` was pushed only by the
+session service, at open and when an accepted `functionBounds` edit landed, so a
+caller who merely wanted to know whether its answers were current had to author
+a correction to find out. It authors nothing and modifies no bytes, but it is
+priced as a write because it invalidates state the caller holds: every cursor
+and every table index taken before the call indexes a table that no longer
+exists. So the result carries `generation` — what lets a stale cursor be refused
+rather than answered from the rebuilt table — and `decoding`, without which
+every count in it is an unqualified zero on an architecture the decoder does not
+support. It requires an attached sample and refuses with `TARGET_NOT_ATTACHED`
+otherwise. `functionCountObservedBefore` comes from a listing taken before the
+call rather than from the server's own `function_count_before`, so the two
+agreeing is evidence rather than a tautology.
+
+**Byte and assembly patching remains explicitly excluded**, on ADR 0015's
+reasoning: a patch changes the bytes, so facts derived from them are facts about
+something the sample no longer is. It needs its own decision.
+
+**Verified:** 401 Delver TypeScript tests, 234 Rust tests, and the 10 Python
+decompiler-worker tests pass; the client typecheck is clean, the corpus matches
+6/6, `cargo fmt` and clippy are clean, and the layers check is clean. Run the
+TypeScript suite with the full selector — `--grep Delver` alone misses six
+suites, as the previous session found the hard way.
+
+### Previously — a four-way audit, and partial verification
+
 **A four-way audit over the session's uncommitted work, and the finding that the
 verification itself was partial.** Four read-only agents covered the Rust
 workspace, the platform layer, the workbench services, and the contribs plus

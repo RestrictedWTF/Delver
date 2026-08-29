@@ -25,7 +25,7 @@ import { StopWatch } from '../../../../base/common/stopwatch.js';
 import { stringHash } from '../../../../base/common/hash.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { AnalysisSessionId, IDelverAnalysisService } from '../../../../platform/delver/common/delverAnalysisService.js';
-import { DELVER_FINDING_LIMITS, DelverFindingSeverity, IDelverFindingDraft, IDelverFindingEvidence } from '../../../../platform/delver/common/findings.js';
+import { DELVER_FINDING_LIMITS, DelverFindingSeverity, IDelverFinding, IDelverFindingDraft, IDelverFindingEvidence } from '../../../../platform/delver/common/findings.js';
 import { DelverSignatureVariant, IDelverNamedSignatureDraft } from '../../../../platform/delver/common/delverSignature.js';
 import { Anchor, EditOp, EditValue, IAuthor, IEdit } from '../../../../platform/delver/common/interpretation.js';
 import { functionDisplayName, placeholderFunctionName } from '../../../../platform/delver/common/naming.js';
@@ -150,6 +150,8 @@ export const enum DelverAgentCapabilityId {
 	ProposeType = 'delver_propose_type',
 	ProposeFunction = 'delver_propose_function',
 	ReportFinding = 'delver_report_finding',
+	ListFindings = 'delver_list_findings',
+	Reanalyze = 'delver_reanalyze',
 }
 
 /**
@@ -331,6 +333,16 @@ export const DELVER_AGENT_CAPABILITIES: readonly IDelverAgentCapability[] = [
 		description: 'Proposes corrections to detected function bounds — defining a function detection missed, or removing one it invented — for review. Appends attributed provisional edits but does not change accepted interpretation and does not re-run analysis.',
 	},
 	{
+		id: DelverAgentCapabilityId.Reanalyze, group: 'proposals', kind: 'write', requiresAttachedTarget: true,
+		title: 'Delver Reanalyze',
+		description: 'Re-derives every fact for the open image from its bytes and the accepted corrections. Changes no authored interpretation and modifies no bytes, but invalidates every cursor and table index handed out before it.',
+	},
+	{
+		id: DelverAgentCapabilityId.ListFindings, group: 'proposals', kind: 'read', requiresAttachedTarget: false,
+		title: 'Delver List Findings',
+		description: 'Lists findings already retained for these bytes, with the human decision on each. Filter to the undecided ones to resume an investigation without replaying it.',
+	},
+	{
 		id: DelverAgentCapabilityId.ReportFinding, group: 'proposals', kind: 'write', requiresAttachedTarget: false,
 		title: 'Delver Report Finding',
 		description: 'Reports evidence-backed findings for human review, with severity, confidence, concrete image ranges, and dispatcher provenance.',
@@ -419,7 +431,7 @@ type IParsedTypeProposal =
  */
 interface IParsedFunctionProposal {
 	readonly rva: bigint;
-	readonly kind: 'define' | 'undefine';
+	readonly kind: 'define' | 'undefine' | 'data';
 	readonly value: string;
 }
 
@@ -743,6 +755,8 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 		this.handlers.set(DelverAgentCapabilityId.ProposeType, context => this.handleTypeProposals(context));
 		this.handlers.set(DelverAgentCapabilityId.ProposeFunction, context => this.handleFunctionProposals(context));
 		this.handlers.set(DelverAgentCapabilityId.ReportFinding, context => this.handleReportFindings(context));
+		this.handlers.set(DelverAgentCapabilityId.ListFindings, context => this.handleListFindings(context));
+		this.handlers.set(DelverAgentCapabilityId.Reanalyze, context => this.handleReanalyze(context));
 	}
 
 	private requireSession(): IDelverSession {
@@ -3075,6 +3089,13 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 				}
 			}
 		}
+		// A `data` range is checked against nothing either, and for a reason that
+		// is not the `undefine` one: a range the analyst calls data is very often
+		// in an executable section — that is precisely the mistake being
+		// corrected — so a mapped-executable test would refuse the useful cases
+		// and pass the useless ones. The analysis crate refuses an empty or
+		// overlapping set; nothing else about the claim is checkable here.
+
 		// An `undefine` is checked against nothing. The address it names may not
 		// be a detected entry at all by the time a human reviews it, and refusing
 		// it here would mean an analyst could not pre-empt a seed the next
@@ -3112,6 +3133,154 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 				addresses: [...new Set(proposals.map(proposal => toWireAddress(proposal.rva)))],
 			}],
 		};
+	}
+
+	/**
+	 * Re-derives every fact for the open image.
+	 *
+	 * The one operation that changes what a caller reads without authoring
+	 * anything. Every other route to a re-derivation goes through accepting a
+	 * correction, which means a caller who merely wants to know whether its
+	 * answers are current had to author an edit to find out.
+	 *
+	 * Nothing here modifies the sample, and nothing here modifies interpretation
+	 * — but the counts either side are reported, and so is the new generation,
+	 * because every cursor and every table index issued before this call now
+	 * indexes a table that no longer exists.
+	 */
+	private async handleReanalyze(context: IHandlerContext): Promise<IHandlerOutput> {
+		const session = this.requireAttached();
+		const before = await this.sessionService.functions();
+		this.throwIfCancelled(context.token);
+		const result = await this.sessionService.reanalyze();
+		return {
+			data: {
+				functionCountBefore: result.function_count_before,
+				functionCount: result.function_count,
+				instructionCount: result.instruction_count,
+				correctionsApplied: result.corrections_applied,
+				dataRangesApplied: result.data_ranges_applied,
+				// Without this, every count above is an unqualified zero on an
+				// architecture the decoder does not support — which reads as
+				// "re-analysed, and the image has no code".
+				decoding: result.decoding.kind,
+				// The reason a caller has to read this: an index taken before the
+				// call indexes a different table afterwards, and passing the old
+				// generation back is what gets that refused rather than silently
+				// answered from the new one.
+				generation: result.generation,
+				// Restated from the pre-call listing rather than from the result,
+				// so the two numbers being equal is evidence and not a tautology.
+				functionCountObservedBefore: before.total,
+			},
+			completeness: 'complete',
+			provenance: [{
+				source: 'analysis',
+				detail: 'Facts re-derived from the image bytes and the accepted correction set. Cursors and table indices issued before this call are stale.',
+				contentHash: session.contentHash,
+			}],
+		};
+	}
+
+	/**
+	 * Findings already retained for these bytes, with the decision on each.
+	 *
+	 * The counterpart to `delver_report_finding`, which could write and never
+	 * read. Without this an agent resuming a large investigation has no way to
+	 * learn what it already concluded except by replaying the conversation that
+	 * produced it — and a conversation is exactly what does not survive a
+	 * reconnect. The findings do; they are in the project.
+	 *
+	 * `undecided` is the resumption filter: what a human has not yet answered is
+	 * the work that is actually outstanding.
+	 */
+	private async handleListFindings(context: IHandlerContext): Promise<IHandlerOutput> {
+		const session = this.requireSession();
+		const { startIndex, count, project, filter } = this.pageArgs(
+			context,
+			DelverAgentCapabilityId.ListFindings,
+			{ default: 20, max: DELVER_FINDING_LIMITS.batch },
+			['status'],
+			this.findingStamp(session.contentHash),
+		);
+
+		const status = typeof context.args.status === 'string' ? context.args.status : 'all';
+		if (status !== 'all' && status !== 'undecided' && status !== 'accepted' && status !== 'rejected') {
+			throw new DelverAgentError(
+				DelverAgentErrorCode.InvalidArgument,
+				'status must be "all", "undecided", "accepted", or "rejected".',
+			);
+		}
+
+		const all = this.projectService.findingsFor(session.contentHash);
+		const decided = (finding: IDelverFinding) => this.projectService.findingDecisionFor(session.contentHash, finding.id);
+		const matching = all.filter(finding => {
+			const decision = decided(finding);
+			switch (status) {
+				case 'undecided': return decision === undefined;
+				case 'accepted': return decision?.outcome === 'accepted';
+				case 'rejected': return decision?.outcome === 'rejected';
+				default: return true;
+			}
+		});
+
+		const page = paginate(matching, startIndex, count);
+		return {
+			data: {
+				total: page.total,
+				undecidedTotal: all.filter(finding => decided(finding) === undefined).length,
+				untrusted: true,
+				findings: page.items.map(finding => {
+					const decision = decided(finding);
+					return {
+						id: finding.id,
+						title: finding.title,
+						description: finding.description,
+						severity: finding.severity,
+						confidence: finding.confidence,
+						author: finding.author,
+						// The finding's own status is what it was recorded as. The
+						// decision is what a human said afterwards, and its absence
+						// is the thing a resuming agent is looking for.
+						status: finding.status,
+						decision: decision === undefined
+							? undefined
+							: { outcome: decision.outcome, at: decision.at, author: decision.author },
+						evidence: finding.evidence.map(entry => ({
+							address: toWireAddress(entry.anchor.rva),
+							...(entry.endRva === undefined ? {} : { endAddress: toWireAddress(entry.endRva) }),
+							description: entry.description,
+							sourceCallIds: entry.sourceCallIds ?? [],
+						})),
+						provenance: finding.provenance,
+					};
+				}),
+			},
+			completeness: page.nextIndex === undefined ? 'complete' : 'partial',
+			...(page.nextIndex === undefined ? {} : {
+				nextCursor: encodeCursor(DelverAgentCapabilityId.ListFindings, project, page.nextIndex, filter, this.findingStamp(session.contentHash)),
+				omitted: { count: page.omittedCount, reason: 'More findings remain; continue with nextCursor.' },
+			}),
+			provenance: [{
+				source: 'finding',
+				detail: 'Findings retained in the portable project, with any human decision on each.',
+				contentHash: session.contentHash,
+				untrusted: true,
+			}],
+		};
+	}
+
+	/**
+	 * Stamp of the finding log for one image.
+	 *
+	 * Findings and their decisions are both append-only, so counting them is
+	 * enough to tell one page's view from another's — and a walk that spanned a
+	 * new decision would otherwise page over a list that had reordered under it.
+	 */
+	private findingStamp(contentHash: string): string {
+		const findings = this.projectService.findingsFor(contentHash);
+		const decided = findings.filter(finding => this.projectService.findingDecisionFor(contentHash, finding.id) !== undefined).length;
+		return collectionStamp(['findings', findings.length, decided]);
 	}
 
 	private async handleReportFindings(context: IHandlerContext): Promise<IHandlerOutput> {
@@ -3591,10 +3760,23 @@ function parseFunctionProposals(value: unknown): readonly IParsedFunctionProposa
 		if (unknownKeys.length > 0) {
 			throw proposalArgument(`proposals[${index}] has unknown field "${unknownKeys[0]}".`);
 		}
-		if (item.kind !== 'define' && item.kind !== 'undefine') {
-			throw proposalArgument(`proposals[${index}].kind must be "define" or "undefine".`);
+		if (item.kind !== 'define' && item.kind !== 'undefine' && item.kind !== 'data') {
+			throw proposalArgument(`proposals[${index}].kind must be "define", "undefine", or "data".`);
 		}
 		const rva = parseWireAddress(item.address);
+		if (item.kind === 'data') {
+			// The one kind whose end is mandatory. "Data starts here" with no end
+			// has no reading that is safe to guess at: the excluded run would be
+			// invented, and inventing it too large deletes real functions.
+			if (item.endAddress === undefined) {
+				throw proposalArgument(`proposals[${index}].endAddress is required for a "data" correction; an excluded range has to say where it ends.`);
+			}
+			const dataEnd = parseWireAddress(item.endAddress, 'end address');
+			if (dataEnd <= rva) {
+				throw proposalArgument(`proposals[${index}].endAddress must be greater than address; it is the exclusive end of the data range.`);
+			}
+			return { rva, kind: 'data', value: JSON.stringify({ kind: 'data', endRva: toWireAddress(dataEnd) }) } satisfies IParsedFunctionProposal;
+		}
 		if (item.kind === 'undefine') {
 			if (item.endAddress !== undefined) {
 				throw proposalArgument(`proposals[${index}].endAddress is meaningless for an "undefine" correction, which removes a function rather than sizing one.`);

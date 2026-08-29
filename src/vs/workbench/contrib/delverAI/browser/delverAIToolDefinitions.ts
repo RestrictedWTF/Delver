@@ -680,7 +680,7 @@ const PRESENTATIONS = new Map<string, IDelverToolPresentation>([
 		icon: Codicon.symbolMethod,
 		displayName: localize('delverTool.proposeFunction.displayName', "Delver Propose Function"),
 		userDescription: localize('delverTool.proposeFunction.userDescription', "Propose function-bounds corrections for review"),
-		usage: 'Use this to correct function detection you can *see* is wrong, never to guess at addresses. `kind: "define"` says code starts at this address and detection missed it — justify it from a call or jump target, a prologue you disassembled, an exception-table or export entry, or a reference the sweep could not follow. `kind: "undefine"` says the detected function at this address is not a function at all — justify it from data you decoded there, or from a body that decodes as nonsense. Read the disassembly or the cross-references first; an address that merely has no callers is not evidence of anything. `endAddress` is optional and exclusive: supply it only when you actually know where the function ends, because a wrong extent is worse than none. A define must be in an executable section. This is review-only: it appends a provisional correction, changes nothing, and re-runs no analysis. Once an analyst accepts one, the analysis server re-derives instructions, blocks, and cross-references from the bytes plus the corrected seeds — so an accepted correction can move far more than the one address it names.',
+		usage: 'Use this to correct function detection you can *see* is wrong, never to guess at addresses. `kind: "define"` says code starts at this address and detection missed it — justify it from a call or jump target, a prologue you disassembled, an exception-table or export entry, or a reference the sweep could not follow. `kind: "undefine"` says the detected function at this address is not a function at all — justify it from data you decoded there, or from a body that decodes as nonsense. Read the disassembly or the cross-references first; an address that merely has no callers is not evidence of anything. `endAddress` is optional and exclusive: supply it only when you actually know where the function ends, because a wrong extent is worse than none. `kind: "data"` says a run of bytes is not code at all — a jump table, a string pool, or embedded constants that a linear sweep decoded into invented functions. It needs `endAddress`, and unlike a define it is *expected* to sit in an executable section, since that is the mistake it corrects. Once accepted, the excluded bytes are not decoded, get no function start from any source, and originate no cross-reference; a reference *into* the range survives, because a pointer to a table is the evidence that made it data. A define must be in an executable section. This is review-only: it appends a provisional correction, changes nothing, and re-runs no analysis. Once an analyst accepts one, the analysis server re-derives instructions, blocks, and cross-references from the bytes plus the corrected seeds — so an accepted correction can move far more than the one address it names.',
 		inputSchema: objectSchema({
 			proposals: {
 				type: 'array',
@@ -694,15 +694,37 @@ const PRESENTATIONS = new Map<string, IDelverToolPresentation>([
 						address: addressProperty('Entry point of the function being defined, or of the detected function being removed.'),
 						kind: {
 							type: 'string',
-							enum: ['define', 'undefine'],
-							description: 'Whether a function starts here that detection missed, or the function detected here is not one.',
+							enum: ['define', 'undefine', 'data'],
+							description: 'Whether a function starts here that detection missed, the function detected here is not one, or this range is not code at all.',
 						},
-						endAddress: addressProperty('Optional exclusive end of a defined function; it must be greater than address, and it is not accepted for "undefine". Omit it unless you know where the function ends.'),
+						endAddress: addressProperty('Exclusive end. Optional for "define" — omit it unless you know where the function ends. Required for "data", which has to say where the excluded range stops. Not accepted for "undefine".'),
 					},
 					required: ['address', 'kind'],
 				},
 			},
 		}, ['proposals']),
+	}],
+	[DelverAgentCapabilityId.Reanalyze, {
+		icon: Codicon.refresh,
+		displayName: localize('delverTool.reanalyze.displayName', "Delver Reanalyze"),
+		userDescription: localize('delverTool.reanalyze.userDescription', "Re-derive analysis facts from the image bytes"),
+		usage: 'Re-derives instructions, functions, blocks and cross-references from the bytes plus the accepted corrections. Use it to confirm that what you are reading is current, or after an analyst accepts a correction you proposed. It authors nothing, decides nothing, and modifies no bytes — but it is not free, and it invalidates state you hold: every pagination cursor and every table index taken before the call belongs to a table that no longer exists, so discard them and start your walks again. Read `generation` to know which derivation your answers came from, and `decoding` before believing any count, since all of them are zero on an architecture the decoder does not support. Requires the original sample to be attached; an offline project has facts and no bytes to re-derive them from.',
+		inputSchema: objectSchema({}),
+	}],
+	[DelverAgentCapabilityId.ListFindings, {
+		icon: Codicon.checklist,
+		displayName: localize('delverTool.listFindings.displayName', "Delver List Findings"),
+		userDescription: localize('delverTool.listFindings.userDescription', "Read retained findings and their review outcomes"),
+		usage: `Read this before reporting anything on a target you have worked on before. Findings outlive the conversation that produced them; your own earlier session does not. \`status: "undecided"\` is the resumption filter — it is exactly the work a human has not yet answered, and re-reporting a finding an analyst already rejected is worse than silence. \`decision\` is absent until someone reviews the finding. ${PAGINATION_NOTE} ${UNTRUSTED_NOTE}`,
+		inputSchema: objectSchema({
+			cursor: cursorProperty(),
+			count: countProperty('findings', { default: 20, max: DELVER_AGENT_LIMITS.findings.batch }),
+			status: {
+				type: 'string',
+				enum: ['all', 'undecided', 'accepted', 'rejected'],
+				description: 'Which findings to return by review outcome. Defaults to "all".',
+			},
+		}),
 	}],
 	[DelverAgentCapabilityId.ReportFinding, {
 		icon: Codicon.warning,

@@ -257,6 +257,9 @@ the [P3 AI integration plan](ai-integration-plan.md).
 | **Python client** (`delver` package) | M |
 | Investigation notebooks (`.delvernb`) | L |
 | UI ops over the protocol (`report_finding`, `focus`, `annotate`) | S |
+| Findings readable back (`delver_list_findings`, status filter, undecided count) | S |
+| Data/code classification corrections (`kind: "data"` ranges excluded from the derivation) | M |
+| Forced reanalysis (`delver_reanalyze`, generation-stamped so stale cursors refuse) | S |
 | Untrusted-content handling + injection detection | M |
 | Eval harness on the golden corpus, in CI | M |
 

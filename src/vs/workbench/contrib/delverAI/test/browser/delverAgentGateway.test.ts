@@ -127,7 +127,7 @@ suite('Delver Agent Command Gateway', () => {
 			// walk past, and the previous `DELVER_AGENT_CAPABILITIES.length` was
 			// an identity that could never fail, since the tool list is built by
 			// mapping that same list.
-			toolCount: 35,
+			toolCount: 37,
 			// Pinned rather than counted. A capability with no presentation entry
 			// still ships — with a beaker icon, no usage text and an empty input
 			// schema — so the model is handed a tool it cannot call correctly.
@@ -137,6 +137,9 @@ suite('Delver Agent Command Gateway', () => {
 				DelverAgentCapabilityId.Capabilities,
 				DelverAgentCapabilityId.SessionInfo,
 				DelverAgentCapabilityId.ImageInfo,
+				// Genuinely argument-free: it re-derives the whole image or it
+				// does nothing, so there is no subject to name.
+				DelverAgentCapabilityId.Reanalyze,
 			],
 			jsonRoundTrip: {
 				name: DelverAgentCapabilityId.Capabilities,

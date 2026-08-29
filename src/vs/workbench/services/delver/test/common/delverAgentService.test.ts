@@ -8,7 +8,7 @@ import { CancellationToken, CancellationTokenSource } from '../../../../../base/
 import { Emitter } from '../../../../../base/common/event.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { AnalysisSessionId, IDelverAnalysisService, IDelverReadMemoryWire } from '../../../../../platform/delver/common/delverAnalysisService.js';
-import { createDelverFinding, IDelverFinding, IDelverFindingDraft } from '../../../../../platform/delver/common/findings.js';
+import { createDelverFinding, IDelverFinding, IDelverFindingDecision, IDelverFindingDraft } from '../../../../../platform/delver/common/findings.js';
 import { IDelverProjectSnapshot, IDelverRetainedXrefs } from '../../../../../platform/delver/common/delverProjectStoreService.js';
 import { IDelverToolCallRecord } from '../../../../../platform/delver/common/delverToolCall.js';
 import { IDelverNamedSignature, IDelverNamedSignatureDraft } from '../../../../../platform/delver/common/delverSignature.js';
@@ -35,6 +35,7 @@ import {
 	MomentKindWire,
 	IStringsResult,
 	IScanStringsResult,
+	ISetCorrectionsResult,
 	IXrefsResult,
 	IXrefWire,
 	ResolutionConfidenceWire,
@@ -280,6 +281,25 @@ class FakeSessionService implements Partial<IDelverSessionService> {
 		this.scanCalls.push(fromRva);
 		const window = this.scanWindows.find(entry => entry.from === fromRva);
 		return window?.result ?? { strings: [] };
+	}
+
+	/** How many times a caller asked for a re-derivation, and what it saw. */
+	reanalyzeCalls = 0;
+	reanalyzeResult: ISetCorrectionsResult = {
+		image_id: 'image-1',
+		function_count_before: 2,
+		function_count: 3,
+		instruction_count: 40,
+		corrections_applied: 1,
+		data_ranges_applied: 1,
+		decoding: { kind: 'decoded' },
+		generation: 7,
+	};
+
+	async reanalyze(): Promise<ISetCorrectionsResult> {
+		this.reanalyzeCalls++;
+		this.calls.push('reanalyze');
+		return this.reanalyzeResult;
 	}
 
 	async strings(): Promise<IStringsResult> {
@@ -610,6 +630,8 @@ class FakeProjectService implements Partial<IDelverProjectService> {
 		return this.historicalSignatures;
 	}
 
+	private readonly decisions: IDelverFindingDecision[] = [];
+
 	async reportFindings(_contentHash: string, drafts: readonly IDelverFindingDraft[]): Promise<readonly IDelverFinding[]> {
 		const reported = drafts.map((draft, index) => createDelverFinding(`finding-${this.findings.length + index + 1}`, 1000, draft));
 		this.findings.push(...reported);
@@ -621,7 +643,23 @@ class FakeProjectService implements Partial<IDelverProjectService> {
 	}
 
 	pendingFindings(contentHash: string): readonly IDelverFinding[] {
-		return this.findingsFor(contentHash);
+		return this.findingsFor(contentHash).filter(finding => this.findingDecisionFor(contentHash, finding.id) === undefined);
+	}
+
+	findingDecisionFor(contentHash: string, findingId: string): IDelverFindingDecision | undefined {
+		return this.decisions.find(decision => decision.contentHash === contentHash && decision.findingId === findingId);
+	}
+
+	/** Test-only shortcut past the review UI; the service only ever reads decisions. */
+	decide(contentHash: string, findingId: string, outcome: 'accepted' | 'rejected'): void {
+		this.decisions.push({
+			id: `decision-${this.decisions.length + 1}`,
+			findingId,
+			contentHash,
+			at: 2000,
+			author: { kind: 'human', id: 'analyst' },
+			outcome,
+		});
 	}
 }
 
@@ -3562,6 +3600,50 @@ suite('DelverAgentService', () => {
 		});
 	});
 
+	test('accepts a data-range correction where a define would be refused, and refuses an unbounded one', async () => {
+		// The asymmetry is the point. A `define` outside executable memory is a
+		// mistake; a `data` range inside it is the whole use — a sweep decoded a
+		// jump table into invented functions, and saying so means naming bytes
+		// in a section marked executable. A mapped-executable test on `data`
+		// would refuse every case worth making and pass none.
+		const { service, session, interpretation } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		session.functionsResult = { functions: [...FUNCTIONS] };
+		const caller = { kind: 'model' as const, id: 'correction-agent' };
+
+		const result = await service.invoke({
+			capability: 'delver_propose_function',
+			caller,
+			args: { proposals: [{ address: '0x1180', kind: 'data', endAddress: '0x11C0' }] },
+		}, CancellationToken.None);
+
+		assert.deepStrictEqual({
+			result: result.data,
+			stored: interpretation.proposals.map(edit => edit.value),
+			// An excluded run with no end would have to be guessed at, and
+			// guessing it too large silently deletes real functions.
+			noEnd: await errorCode(service, {
+				capability: 'delver_propose_function', caller,
+				args: { proposals: [{ address: '0x1180', kind: 'data' }] },
+			}),
+			endBeforeStart: await errorCode(service, {
+				capability: 'delver_propose_function', caller,
+				args: { proposals: [{ address: '0x1180', kind: 'data', endAddress: '0x1180' }] },
+			}),
+			appended: interpretation.proposals.length,
+		}, {
+			result: {
+				proposals: [{ seq: 1, address: '0x1180', op: 'functionBounds', status: 'proposed', author: caller }],
+				pendingCount: 1,
+			},
+			// Canonical lower-case, whatever spelling the caller used.
+			stored: ['{"kind":"data","endRva":"0x11c0"}'],
+			noEnd: 'INVALID_ARGUMENT',
+			endBeforeStart: 'INVALID_ARGUMENT',
+			appended: 1,
+		});
+	});
+
 	test('commits a maximum-size comment batch without echoing values past the result budget', async () => {
 		const { service, session, interpretation } = createService(store);
 		session.activeSession = LIVE_SESSION;
@@ -3688,6 +3770,116 @@ suite('DelverAgentService', () => {
 				pendingCount: 2,
 			},
 		});
+	});
+
+	test('re-derives on request, and says which derivation the answers now belong to', async () => {
+		// Every other route to a re-derivation runs through accepting a
+		// correction, so a caller who only wanted to know whether its answers
+		// were current had to author an edit to find out. What it gets back is
+		// the generation, because that is what makes its held cursors refusable
+		// rather than silently answered from a table that has been rebuilt.
+		const { service, session } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		session.functionsResult = { functions: [...FUNCTIONS] };
+
+		const result = await service.invoke({
+			capability: 'delver_reanalyze',
+			caller: { kind: 'model', id: 'correction-agent' },
+			args: {},
+		}, CancellationToken.None);
+
+		session.activeSession = OFFLINE_SESSION;
+		assert.deepStrictEqual({
+			data: result.data,
+			completeness: result.completeness,
+			calls: session.reanalyzeCalls,
+			// An offline project has facts and no bytes to re-derive them from,
+			// and saying so with the attachment code is what lets an agent ask
+			// for the sample instead of concluding the image changed.
+			offline: await errorCode(service, { capability: 'delver_reanalyze', args: {} }),
+		}, {
+			data: {
+				functionCountBefore: 2,
+				functionCount: 3,
+				instructionCount: 40,
+				correctionsApplied: 1,
+				dataRangesApplied: 1,
+				decoding: 'decoded',
+				generation: 7,
+				functionCountObservedBefore: FUNCTIONS.length,
+			},
+			completeness: 'complete',
+			calls: 1,
+			offline: 'TARGET_NOT_ATTACHED',
+		});
+	});
+
+	test('reads findings back, and separates the undecided ones from the reviewed', async () => {
+		// The resumption path. `delver_report_finding` could write and nothing
+		// could read, so an agent reconnecting to a target it had already worked
+		// had no way to learn its own conclusions except from a conversation
+		// that no longer existed. What it needs first is not the whole log but
+		// the part a human has not answered.
+		const { service, session, project } = createService(store);
+		session.activeSession = OFFLINE_SESSION;
+		project.namedPath = OFFLINE_SESSION.projectPath;
+
+		const draft = (title: string, address: string) => ({
+			title, description: `Why ${title} matters, at length enough to pass validation.`,
+			severity: 'suspicious', confidence: 0.5,
+			evidence: [{ address, description: 'Range supporting the claim.' }],
+		});
+		await service.invoke({
+			capability: 'delver_report_finding',
+			caller: { kind: 'model', id: 'mcp:analyst' },
+			args: { findings: [draft('Reviewed claim', '0x1000'), draft('Open claim', '0x2000')] },
+		}, CancellationToken.None);
+		project.decide(OFFLINE_SESSION.contentHash, 'finding-1', 'rejected');
+
+		const listed = async (status?: string) => {
+			const result = await service.invoke({
+				capability: 'delver_list_findings',
+				caller: { kind: 'model', id: 'mcp:analyst' },
+				args: status === undefined ? {} : { status },
+			}, CancellationToken.None);
+			const data = result.data as {
+				readonly total: number;
+				readonly undecidedTotal: number;
+				readonly findings: readonly { readonly id: string; readonly title: string; readonly decision?: { readonly outcome: string } }[];
+			};
+			return {
+				total: data.total,
+				undecidedTotal: data.undecidedTotal,
+				findings: data.findings.map(finding => [finding.title, finding.decision?.outcome ?? 'undecided']),
+			};
+		};
+
+		assert.deepStrictEqual({ all: await listed(), undecided: await listed('undecided'), rejected: await listed('rejected') }, {
+			all: {
+				total: 2, undecidedTotal: 1,
+				findings: [['Reviewed claim', 'rejected'], ['Open claim', 'undecided']],
+			},
+			undecided: { total: 1, undecidedTotal: 1, findings: [['Open claim', 'undecided']] },
+			rejected: { total: 1, undecidedTotal: 1, findings: [['Reviewed claim', 'rejected']] },
+		});
+	});
+
+	test('refuses a findings filter it does not implement rather than silently listing everything', async () => {
+		// An unrecognised status answered as "all" is the worst outcome here: it
+		// looks like a complete answer to a question that was never asked, and
+		// the agent acts on findings a human already rejected.
+		const { service, session, project } = createService(store);
+		session.activeSession = OFFLINE_SESSION;
+		project.namedPath = OFFLINE_SESSION.projectPath;
+
+		await assert.rejects(
+			service.invoke({
+				capability: 'delver_list_findings',
+				caller: { kind: 'model', id: 'mcp:analyst' },
+				args: { status: 'pending' },
+			}, CancellationToken.None),
+			/status must be/,
+		);
 	});
 
 	test('retains an evidence-backed finding with dispatcher and model provenance', async () => {

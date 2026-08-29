@@ -303,7 +303,45 @@ so corrected facts stay comparable to uncorrected ones.
 and reports the function count before and after; the session service pushes the
 accepted set during open, before any caller sees the session.
 
-**Exit:** met, for function starts only.
+**Data and code classification is done too.** An analyst or an agent can assert
+that a run of bytes is data, not code. A `DataRangeCorrection { rva, end_rva }`
+is a half-open range excluded from the derivation: the bytes are not decoded, no
+function start is admitted inside it from any source — seed, call target or sweep
+— and it originates no cross-reference. A cross-reference *targeting* the range
+survives, because a pointer into a table is the evidence that made it data.
+Strings are unaffected. The linear sweep steps over the range to its exclusive
+end rather than a byte at a time, which is the `rva+1` trap in its second form:
+incrementing would guess a function at every excluded byte.
+
+It reuses `EditOp.FunctionBounds` at the same `(contentHash, rva)` anchor rather
+than adding an op, with canonical JSON `{"kind":"data","endRva":"0x..."}`. "A
+function starts here", "the function detected here is not one", and "these bytes
+are not code at all" are three mutually exclusive answers to one question about
+one address, and sharing one slot is what makes them exclusive rather than merely
+inconsistent — at no cost in store migration, review-view op cases, or
+interpretation view fields. `endRva` is mandatory for `data` where it is optional
+for `define`, because an unbounded "data starts here" would have to be guessed at
+and a guess that runs too far silently deletes real functions. A `data` range is
+deliberately *not* checked against executable mapping, unlike a `define`: the
+range is usually inside an executable section, which is the mistake being
+corrected, so that test would refuse every useful case.
+
+Conflicts keep the whole-set refusal. `Corrections<'a> { functions, data_ranges }`
+is a borrowed view with `From<&[FunctionCorrection]>` impls, so existing call
+sites compile untouched, and `EmptyDataRange`, `OverlappingDataRanges` (nesting
+counts; abutting at an exclusive end does not) and `DefineInsideDataRange` join
+the existing variants. An `undefine` inside a range is allowed — redundant, not
+contradictory. On the wire, `data_ranges` joins `OpenImageParams` and
+`SetCorrectionsParams`, and `SetCorrectionsResult` reports `data_ranges_applied`
+apart from `corrections_applied`, because one data range can silence many
+detected functions and a single total could not say which kind of assertion did
+it. In TypeScript `functionCorrectionsFor` became `authoredCorrectionsFor`
+returning `{ functions, dataRanges }`, `delver_propose_function` accepts
+`kind: "data"`, and Review labels the row "Treat X through Y as data, not code".
+[ADR 0015](../history/adr/0015-authored-corrections-re-derive-facts.md) is
+amended with the decision.
+
+**Exit:** met, for function starts and for data ranges.
 
 The exit statement — *a user can approve one disclosed correction, inspect its
 exact effect, and recover the prior state* — is met by four distinct pieces:
@@ -314,8 +352,10 @@ exact effect, and recover the prior state* — is met by four distinct pieces:
   nothing to the derivation, because `functionCorrectionsFor` reads the
   materialized view.
 - **Disclosed.** `analysis/setCorrections` returns `function_count_before`,
-  `function_count`, `instruction_count`, and `corrections_applied` — the effect
-  stated in the only terms the server can state it.
+  `function_count`, `instruction_count`, `corrections_applied`, and
+  `data_ranges_applied` — the effect stated in the only terms the server can
+  state it. The two applied counts are separate because one data range can
+  silence many detected functions.
 - **Exact effect.** The facts are re-derived, not patched: instructions, function
   starts, basic blocks, the xref table, and the listing index all come from
   `derive`, which is the single place the analysis and the listing are produced
@@ -325,25 +365,40 @@ exact effect, and recover the prior state* — is met by four distinct pieces:
   compensation is an accepted edit, so it re-derives on the spot, and because
   nothing was mutated the previous facts return exactly.
 
+**Forced reanalysis is done.** `delver_reanalyze` is the thirty-seventh
+capability, and it takes no arguments: it re-derives the whole image or it does
+nothing, so there is no subject to name. Until now `analysis/setCorrections` was
+pushed only by the session service — at open, and when an accepted
+`functionBounds` edit landed — so a caller who merely wanted to know whether its
+answers were still current had to author a correction to force the
+re-derivation. It authors nothing and modifies no bytes, but it is a write and
+priced as one, because it invalidates state the caller holds: every pagination
+cursor and every table index taken before the call belongs to a table that no
+longer exists. The result therefore reports `generation`, which is what lets a
+stale cursor be refused rather than silently answered from the new table, and
+`decoding`, without which every count in it is an unqualified zero on an
+architecture the decoder does not support. It requires an attached sample and
+says so with `TARGET_NOT_ATTACHED`; an offline project has facts and no bytes to
+re-derive them from. `functionCountObservedBefore` is restated from a listing
+taken before the call rather than from the server's own `function_count_before`,
+so the two agreeing is evidence and not a tautology. Forced *recompilation* was
+already there and is unchanged: `delver_decompile` takes `refresh: true`.
+
 What S5 still does not have, all verified absent rather than assumed:
 
-- **Undefining *code* and *data*, as distinct from undefining a function.**
-  `Undefine` withdraws a function start only; the instructions stay in the index
-  and inbound call xrefs stay in the table, because a call is still a fact about
-  the image. There is no operation that says "these bytes are not code" or "these
-  bytes are data", and no edit op for one.
+- **Undefining *code*, as distinct from undefining a function or declaring a
+  range data.** `Undefine` withdraws a function start only; the instructions stay
+  in the index and inbound call xrefs stay in the table, because a call is still
+  a fact about the image. A `data` range does say "these bytes are not code", but
+  its subject is a range the author draws, not the decoded extent of something
+  the analysis already found — there is still no operation that withdraws the
+  code claim over an existing function's own instructions.
 - **Adjusting the bounds of an existing function, as an operation.** A `define`
   carrying an explicit exclusive end does pin an extent at an address detection
   already found — that much works, and suppresses sweep guesses inside the range.
   What does not exist is an operation whose subject is an existing function:
   moving a start is an `undefine` plus a `define` that the log records as two
   unrelated corrections at two addresses, and nothing ties them together.
-- **Forced reanalysis.** `analysis/setCorrections` is pushed by the session
-  service — at open, and when an accepted `functionBounds` edit lands. No
-  capability lets a caller ask for a re-derivation, so there is no way to say
-  "analyse this again" without authoring a correction. Forced *recompilation* is
-  the one piece of this bullet that exists: `delver_decompile` takes
-  `refresh: true`, which bypasses the cache and re-runs the backend.
 - **Byte and assembly patching.** Nothing in the correction path reads or
   modifies target bytes, and there is no write path to a target at all. ADR 0015
   excludes it explicitly: a patch changes the bytes, so facts derived from them
@@ -363,8 +418,28 @@ records. Add resumable budgets, artifact/report export, and notebooks. Oversized
 pseudocode and exports must be retrievable through lossless chunks or durable
 artifacts rather than prefix truncation.
 
+**Findings can be read back.** Until now they were write-only to an agent:
+`delver_report_finding` wrote and nothing read, so the half of the exit criterion
+about resuming from unresolved work was entirely absent — an agent could only
+recover its own earlier findings by replaying the chat that produced them.
+`delver_list_findings` is the thirty-sixth capability. It pages like every other
+inventory capability, with a revision-bound cursor and a `filter` over the
+`status` argument, which is `all`, `undecided`, `accepted` or `rejected`. An
+unrecognised value is refused with `INVALID_ARGUMENT` rather than quietly
+answered as `all`, because a fabricated complete answer to a question nobody
+asked is the worse failure. Each finding is paired with `findingDecisionFor`, so
+`decision` is absent exactly when a human has not reviewed it, and
+`undecidedTotal` is reported alongside `total` — the unresolved work is a count
+the caller can act on rather than something it has to page for. The cursor's
+state stamp is `['findings', count, decidedCount]`: both logs are append-only, so
+counting them is enough to tell one view of them from another. Results are marked
+`untrusted: true`, since finding text can quote sample-derived strings.
+
 **Exit:** a large investigation resumes from unresolved work without replaying
-chat history and exports a report whose claims link back to evidence.
+chat history and exports a report whose claims link back to evidence. Not met.
+Reading findings back is the first half of the resume half; investigations, work
+items, summaries, resumable budgets, report export and notebooks are still
+absent, and nothing exports a report at all.
 
 ## Transport closure
 

@@ -305,7 +305,7 @@ suite('Delver AI Tool Definitions', () => {
 			compositeFieldRequired: ['offset', 'name', 'type'],
 			typeExplainsTransactionalDecompilerApplication: true,
 			correctionRequired: ['address', 'kind'],
-			correctionKinds: ['define', 'undefine'],
+			correctionKinds: ['define', 'undefine', 'data'],
 			correctionDemandsEvidence: true,
 			correctionSaysReviewOnly: true,
 			findingBatchMaximum: 50,

@@ -1,6 +1,6 @@
 # 0015 — An authored correction changes what analysis derives from, not what it derived
 
-**Status:** accepted
+**Status:** accepted, amended 2026-08-29
 **Date:** 2026-08-28
 **Affects:** `CLAUDE.md` invariants 3 and 5 ·
 [0006](0006-proposal-resolution-in-the-edit-log.md) ·
@@ -9,7 +9,7 @@
 `delver-analysis/src/corrections.rs` · `delver-analysis/src/lib.rs` ·
 `server-analysis/src/image.rs` · `server-analysis/src/main.rs` ·
 `delver-protocol/src/message.rs` ·
-`services/delver/common/delverFunctionCorrections.ts`
+`services/delver/common/delverFunctionCorrections.ts` (`authoredCorrectionsFor`)
 
 ## Context
 
@@ -99,6 +99,70 @@ Two findings from building it, which the shape above does not imply:
 
 Corrections name addresses, never bytes. **Byte-level patching is not part of
 this decision**: nothing here reads or modifies the target's bytes.
+
+## Amendment — 2026-08-29: a third correction kind, "data, not code"
+
+The decision above covered function starts. The same shape now carries the S5
+operation it left absent: an analyst or an agent can assert that a run of bytes
+is **data, not code**. A `DataRangeCorrection { rva, end_rva }` is a half-open
+range excluded from the derivation, and everything the decision states about
+function corrections holds for it unchanged — it lives in the authored log, it is
+proposed and reviewed and compensated by the same machinery, and nothing is
+written into the fact store.
+
+**No new `EditOp`.** A data range reuses `EditOp.FunctionBounds` at the same
+`(contentHash, rva)` anchor, with canonical JSON `{"kind":"data","endRva":"0x..."}`
+beside the existing `define` and `undefine`. "A function starts here", "the
+function detected here is not one", and "these bytes are not code at all" are
+three mutually exclusive answers to one question about one address. Sharing a
+single slot is what makes them exclusive rather than merely inconsistent: a
+second answer at that anchor supersedes the first instead of sitting alongside
+it. It also cost nothing — no store migration, no new op case in the review view,
+no new field on the interpretation view.
+
+**`endRva` is mandatory for `data`**, where it is optional for `define`. An
+unbounded "data starts here" would have to be guessed at, and a guess that runs
+too far silently deletes real functions.
+
+**A `data` range is deliberately not checked against executable mapping**, unlike
+a `define`. A range an analyst calls data is usually *inside* an executable
+section — that is exactly the mistake being corrected — so a mapped-executable
+test would refuse every useful case.
+
+What an excluded range means, precisely: the bytes are not decoded; **no function
+start is admitted from any source** within it, seed, call target or sweep alike;
+and it originates **no** cross-reference. A cross-reference *targeting* the range
+survives, because a pointer into a table is the evidence that made it data in the
+first place. Strings are unaffected.
+
+The linear sweep steps **over** an excluded range to its exclusive end rather
+than incrementing a byte at a time. This is the `rva+1` trap the decision above
+already records for `Undefine`, in its second form: incrementing would guess a
+function at every excluded byte.
+
+Conflicts follow the same whole-set refusal. `Corrections<'a> { functions,
+data_ranges }` is a borrowed view with `From<&[FunctionCorrection]>` impls, so
+existing call sites compile untouched, and three new variants join the existing
+ones: `EmptyDataRange`, `OverlappingDataRanges` (a nested range counts as an
+overlap; ranges abutting at an exclusive end do not), and `DefineInsideDataRange`.
+An `Undefine` inside a data range is allowed — it is redundant, not
+contradictory. A conflicting set is refused whole and nothing is applied.
+
+On the wire, `DataRangeCorrectionWire` carries the range, `data_ranges` joins
+`OpenImageParams` and `SetCorrectionsParams`, and `SetCorrectionsResult` reports
+`data_ranges_applied` **apart from** `corrections_applied`. One data range can
+silence many detected functions, so a single total could not say which kind of
+assertion produced the change, which is the disclosure requirement this decision
+exists to satisfy.
+
+In TypeScript, `functionCorrectionsFor` became `authoredCorrectionsFor` and
+returns `{ functions, dataRanges }`; `delver_propose_function` accepts
+`kind: "data"`; and the Review view labels the row "Treat X through Y as data,
+not code".
+
+**Byte patching is still excluded**, for the reason the decision already gives:
+these corrections name addresses, and nothing in this path reads or modifies the
+target's bytes.
 
 ## Alternatives
 
