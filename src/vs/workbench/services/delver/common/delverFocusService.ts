@@ -10,6 +10,7 @@ import { ILocation, IRange } from '../../../../platform/delver/common/address.js
 import { IMoment, STATIC_MOMENT } from '../../../../platform/delver/common/moment.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
+import { IDelverSessionService } from './delverSessionService.js';
 
 export const IDelverFocusService = createDecorator<IDelverFocusService>('delverFocusService');
 
@@ -25,6 +26,19 @@ export interface IDelverFocus {
 	readonly selection?: IRange;
 	/** Exact discontiguous ranges represented by the focused semantic item. */
 	readonly selections?: readonly IRange[];
+
+	/**
+	 * The bytes this focus was set against, when a target was open.
+	 *
+	 * An address is meaningless without the image it indexes: `0x1400012a0` in
+	 * one sample and in another are unrelated positions that a reader cannot
+	 * tell apart. Focus therefore carries the content hash it was set under, so
+	 * a consumer that has its own idea of the open target — the agent
+	 * dispatcher answering "where am I?" is the one that matters — can refuse a
+	 * position from other bytes instead of stamping it with the current
+	 * project's identity and resolving it against the current function list.
+	 */
+	readonly contentHash?: string;
 }
 
 /**
@@ -127,6 +141,14 @@ const HISTORY_LIMIT = 200;
  */
 export const FOCUS_HISTORY_ORIGIN = 'history';
 
+/**
+ * Origin reported when a target change discards the focus.
+ *
+ * Views distinguish it because there is nothing to navigate to: the position
+ * they were showing belongs to a binary that is no longer open.
+ */
+export const FOCUS_SESSION_ORIGIN = 'session';
+
 export class DelverFocusService extends Disposable implements IDelverFocusService {
 	readonly _serviceBrand: undefined;
 
@@ -141,6 +163,17 @@ export class DelverFocusService extends Disposable implements IDelverFocusServic
 
 	/** Set while replaying history, so back/forward do not append entries. */
 	private navigating = false;
+
+	/** Bytes every current focus and history entry belongs to. */
+	private boundContentHash: string | undefined;
+
+	constructor(
+		@IDelverSessionService private readonly sessionService: IDelverSessionService,
+	) {
+		super();
+		this.boundContentHash = this.sessionService.activeSession?.contentHash;
+		this._register(this.sessionService.onDidChangeActiveSession(session => this.bind(session?.contentHash)));
+	}
 
 	get focus(): IDelverFocus {
 		return this._focus;
@@ -165,6 +198,9 @@ export class DelverFocusService extends Disposable implements IDelverFocusServic
 			selections: update.selections === undefined
 				? (update.location === undefined ? previous.selections : undefined)
 				: (update.selections ?? undefined),
+			// Stamped, never carried over from `previous`: a focus always
+			// belongs to the target that is open at the moment it is set.
+			contentHash: this.boundContentHash,
 		};
 
 		if (isSameFocus(previous, next)) {
@@ -193,6 +229,34 @@ export class DelverFocusService extends Disposable implements IDelverFocusServic
 		}
 		this.index++;
 		this.replay();
+	}
+
+	/**
+	 * Rebinds to a new target, discarding everything that pointed into the old
+	 * one.
+	 *
+	 * Focus survived a session change before this existed, and the result was
+	 * not a stale-looking answer but a confident wrong one: `delver_current_context`
+	 * returned the previous sample's address stamped with the new sample's
+	 * content hash, resolved against the new sample's function list. Clearing
+	 * is the only safe reset — a position in other bytes cannot be translated,
+	 * and history cannot be replayed into a binary its entries never indexed.
+	 */
+	private bind(contentHash: string | undefined): void {
+		if (contentHash === this.boundContentHash) {
+			return;
+		}
+		this.boundContentHash = contentHash;
+		this.history = [];
+		this.index = -1;
+
+		const previous = this._focus;
+		const next: IDelverFocus = { moment: STATIC_MOMENT };
+		if (isSameFocus(previous, next)) {
+			return;
+		}
+		this._focus = next;
+		this._onDidChangeFocus.fire({ focus: next, previous, origin: FOCUS_SESSION_ORIGIN, reason: FocusReason.TargetEvent });
 	}
 
 	private replay(): void {
@@ -232,6 +296,7 @@ function isSameFocus(a: IDelverFocus, b: IDelverFocus): boolean {
 	return (
 		a.moment.kind === b.moment.kind &&
 		a.moment.epoch === b.moment.epoch &&
+		a.contentHash === b.contentHash &&
 		sameLocation(a.location, b.location) &&
 		sameRange(a.selection, b.selection) &&
 		sameRanges(a.selections, b.selections)

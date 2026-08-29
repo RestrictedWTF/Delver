@@ -12,7 +12,7 @@ import { IThemeService } from '../../../../platform/theme/common/themeService.js
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
-import { DELVER_PSEUDOCODE_EDITOR_ID, DelverPseudocodeInput } from './delverPseudocodeInput.js';
+import { DELVER_PSEUDOCODE_EDITOR_ID, DelverPseudocodeInput } from '../../../services/delver/browser/delverPseudocodeInput.js';
 import { DelverPseudocodeWidget } from './delverPseudocodeWidget.js';
 
 /** Thin editor host for a torn-off pseudocode surface. */

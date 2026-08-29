@@ -6,7 +6,7 @@
 import { FlowKindWire, IFunctionWire, IListingRowWire } from './protocol.generated.js';
 
 /** Versioned listing normalization used by {@link fingerprintFunctionListing}. */
-export const FUNCTION_LISTING_FINGERPRINT_NORMALIZATION = 'delver-listing-v1';
+export const FUNCTION_LISTING_FINGERPRINT_NORMALIZATION = 'delver-listing-v2';
 
 /** A relocation-normalized function fingerprint produced by an analysis provider. */
 export interface INormalizedFunctionFingerprint {

@@ -29,6 +29,10 @@ export interface IDelverTargetService {
 
 	/**
 	 * Detaches from the active target and releases the provider.
+	 *
+	 * Resolves once the host of the provider has released it, rather than once
+	 * the request is sent: the provider holds the sample mapped, and shutdown
+	 * has to be able to wait for that release to be asked for.
 	 */
-	detach(): void;
+	detach(): Promise<void>;
 }

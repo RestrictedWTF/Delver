@@ -14,10 +14,10 @@ import { ServicesAccessor } from '../../../../platform/instantiation/common/inst
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IProgressService, ProgressLocation } from '../../../../platform/progress/common/progress.js';
 import { IQuickInputService, IQuickPickItem } from '../../../../platform/quickinput/common/quickInput.js';
-import { DelverAgentCapabilityId, IDelverAgentService } from '../../../services/delver/common/delverAgentService.js';
-import { DelverAgentError, DelverAgentErrorCode, IDelverAgentResult, toWireAddress } from '../../../services/delver/common/delverAgentTypes.js';
-import { MenuDelverSelectionContext, whenSelectionIs } from '../../../services/delver/common/delverSelection.js';
-import { DELVER_TARGET_ATTACHED, IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
+import { DelverAgentCapabilityId, IDelverAgentService } from '../common/delverAgentService.js';
+import { DelverAgentError, DelverAgentErrorCode, IDelverAgentResult, toWireAddress } from '../common/delverAgentTypes.js';
+import { MenuDelverSelectionContext, whenSelectionIs } from '../common/delverSelection.js';
+import { DELVER_TARGET_ATTACHED, IDelverSessionService } from '../common/delverSessionService.js';
 import { LISTING_ACTIVE } from './delverListingContext.js';
 import { activeListing } from './delverActiveListing.js';
 

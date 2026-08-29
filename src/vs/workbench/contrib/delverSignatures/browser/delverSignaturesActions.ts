@@ -29,9 +29,9 @@ import { EditorsOrder } from '../../../common/editor.js';
 import { TreeViewItemHandleArg } from '../../../common/views.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
-import { DELVER_NAVIGATION_ORIGIN } from '../../delverListing/browser/delverListingContext.js';
-import { DelverListingInput } from '../../delverListing/browser/delverListingInput.js';
-import { DELVER_GENERATE_SIGNATURE_COMMAND, IGeneratedSignatureSaveOutcome, ISignatureGenerationInvocation, validateSignatureName } from '../../delverListing/browser/delverSignatureActions.js';
+import { DELVER_NAVIGATION_ORIGIN } from '../../../services/delver/browser/delverListingContext.js';
+import { DelverListingInput } from '../../../services/delver/browser/delverListingInput.js';
+import { DELVER_GENERATE_SIGNATURE_COMMAND, IGeneratedSignatureSaveOutcome, ISignatureGenerationInvocation, validateSignatureName } from '../../../services/delver/browser/delverSignatureActions.js';
 import { DELVER_SIGNATURES_COPY_IDAPYTHON_COMMAND, DELVER_SIGNATURES_COPY_PATTERN_COMMAND, DELVER_SIGNATURES_DELETE_COMMAND, DELVER_SIGNATURES_EXPORT_IDAPYTHON_COMMAND, DELVER_SIGNATURES_GO_TO_COMMAND, DELVER_SIGNATURES_REGENERATE_REVISION_COMMAND, DELVER_SIGNATURES_RENAME_COMMAND, DELVER_SIGNATURES_SAVED_HANDLE_PREFIX, DELVER_SIGNATURES_SCAN_REVISIONS_COMMAND, DELVER_SIGNATURES_SEARCH_COMMAND, DELVER_SIGNATURES_VIEW_ID, delverRevisionSignatureHandle, IDelverRevisionSignatureResult, IDelverRevisionSignatureScanState, IDelverSignatureSearchState, IDelverSignaturesStateService } from './delverSignaturesState.js';
 
 const MAX_REVISION_SIGNATURE_SCAN = 100;
@@ -72,7 +72,12 @@ export class SearchBytePatternAction extends Action2 {
 		const quickInputService = accessor.get(IQuickInputService);
 		const notificationService = accessor.get(INotificationService);
 		const progressService = accessor.get(IProgressService);
+		const sessionService = accessor.get(IDelverSessionService);
 		const viewsService = accessor.get(IViewsService);
+		const contentHash = sessionService.activeSession?.contentHash;
+		if (!contentHash) {
+			return;
+		}
 		let pattern = typeof requestedPattern === 'string' ? requestedPattern : undefined;
 		if (pattern === undefined) {
 			pattern = await quickInputService.input({
@@ -102,6 +107,9 @@ export class SearchBytePatternAction extends Action2 {
 				},
 				caller: { kind: 'human', id: 'delver-signatures' },
 			}, cancellation.token), () => cancellation.cancel());
+			if (sessionService.activeSession?.contentHash !== contentHash) {
+				return;
+			}
 			const search = byteSearchPresentation(result);
 			stateService.setSearch(search, append === true);
 			await viewsService.openView(DELVER_SIGNATURES_VIEW_ID, true);
@@ -328,20 +336,14 @@ export class ScanEarlierSignaturesAction extends Action2 {
 			if (sessionService.activeSession?.contentHash !== session.contentHash) {
 				return;
 			}
+			const omittedCount = historical.length - selected.length;
 			stateService.setRevisionScan({
 				targetContentHash: session.contentHash,
 				results,
-				omittedCount: historical.length - selected.length,
+				omittedCount,
 			});
 			await viewsService.openView(DELVER_SIGNATURES_VIEW_ID, true);
-			const uniqueCount = results.filter(result => result.status === 'unique').length;
-			notificationService.info(localize(
-				'delverEarlierSignatureScanComplete',
-				"Scanned {0} earlier signatures: {1} uniquely located, {2} need attention.",
-				results.length,
-				uniqueCount,
-				results.length - uniqueCount,
-			));
+			notificationService.info(revisionSignatureScanSummary(results, omittedCount));
 		} catch (error) {
 			if (!(error instanceof DelverAgentError && error.code === DelverAgentErrorCode.Cancelled)) {
 				notificationService.error(error instanceof Error ? error.message : String(error));
@@ -567,6 +569,49 @@ export function revisionSignaturePresentation(historical: IDelverHistoricalSigna
 		matches: search.matches,
 		...(search.completeness === 'partial' ? { detail: localize('delverEarlierSignatureMoreMatches', "More matches remain beyond the displayed evidence.") } : {}),
 	};
+}
+
+/**
+ * Wording for the toast that closes an earlier-revision scan.
+ *
+ * The scan tests at most {@link MAX_REVISION_SIGNATURE_SCAN} patterns, so the
+ * number it ran is not always the number that existed. Reporting only the
+ * former turns a partial scan into an apparent verdict on the whole revision
+ * history — and "not found" is exactly the conclusion an analyst draws from a
+ * signature that was never tested. When anything was left out, the count of
+ * omitted patterns is stated alongside the total.
+ */
+export function revisionSignatureScanSummary(results: readonly IDelverRevisionSignatureResult[], omittedCount: number): string {
+	const uniqueCount = results.filter(result => result.status === 'unique').length;
+	const attentionCount = results.length - uniqueCount;
+	if (omittedCount <= 0) {
+		return localize(
+			'delverEarlierSignatureScanComplete',
+			"Scanned {0} earlier signatures: {1} uniquely located, {2} need attention.",
+			results.length,
+			uniqueCount,
+			attentionCount,
+		);
+	}
+	if (omittedCount === 1) {
+		return localize(
+			'delverEarlierSignatureScanPartialOne',
+			"Scanned {0} of {1} earlier signatures: {2} uniquely located, {3} need attention. 1 signature was not scanned.",
+			results.length,
+			results.length + omittedCount,
+			uniqueCount,
+			attentionCount,
+		);
+	}
+	return localize(
+		'delverEarlierSignatureScanPartial',
+		"Scanned {0} of {1} earlier signatures: {2} uniquely located, {3} need attention. {4} signatures were not scanned.",
+		results.length,
+		results.length + omittedCount,
+		uniqueCount,
+		attentionCount,
+		omittedCount,
+	);
 }
 
 /** Produces a fail-closed IDAPython script for locating and naming one function. */

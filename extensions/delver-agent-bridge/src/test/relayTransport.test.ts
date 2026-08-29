@@ -45,12 +45,12 @@ describe('Delver relay transport', () => {
 		});
 	});
 
-	it('closes on queue overflow and write callback failure', () => {
+	it('closes on queue overflow and write callback failure', async () => {
 		const overflowProcess = new TestRelayProcess();
 		overflowProcess.writeResults.push(false);
 		const overflow = new RelayProcessTransport(overflowProcess, 3);
 		overflow.write(Buffer.from('ab'));
-		assert.throws(() => overflow.write(Buffer.from('cd')), /write queue is full/);
+		await assert.rejects(overflow.writeAsync(Buffer.from('cd')), /write queue is full/);
 
 		const failedProcess = new TestRelayProcess();
 		const failed = new RelayProcessTransport(failedProcess);
@@ -63,6 +63,40 @@ describe('Delver relay transport', () => {
 		}, {
 			overflowTerminations: 1,
 			failedTerminations: 1,
+		});
+	});
+
+	it('routes a synchronous queue failure into the write promise instead of the caller', async () => {
+		const overflowProcess = new TestRelayProcess();
+		overflowProcess.writeResults.push(false);
+		const overflow = new RelayProcessTransport(overflowProcess, 3);
+		overflow.write(Buffer.from('ab'));
+		let escapedOverflow: unknown;
+		try {
+			overflow.write(Buffer.from('cd'));
+		} catch (error) {
+			escapedOverflow = error;
+		}
+
+		const closedProcess = new TestRelayProcess();
+		const closed = new RelayProcessTransport(closedProcess);
+		closed.terminate();
+		let escapedAfterClose: unknown;
+		try {
+			closed.write(Buffer.from('late'));
+		} catch (error) {
+			escapedAfterClose = error;
+		}
+		await assert.rejects(closed.writeAsync(Buffer.from('late')), /transport is closed/);
+
+		assert.deepStrictEqual({
+			escapedOverflow,
+			escapedAfterClose,
+			overflowTerminations: overflowProcess.terminateCount,
+		}, {
+			escapedOverflow: undefined,
+			escapedAfterClose: undefined,
+			overflowTerminations: 1,
 		});
 	});
 });

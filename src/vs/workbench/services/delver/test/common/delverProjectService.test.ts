@@ -35,8 +35,8 @@ class FakeProjectStore implements Partial<IDelverProjectStoreService> {
 	readonly appendedDecisions: IDelverFindingDecisionWire[] = [];
 	readonly appendedFindings: IDelverFindingWire[] = [];
 	readonly appendedToolCalls: IDelverToolCallRecordWire[] = [];
-	readonly upsertedSignatures: IDelverNamedSignatureWire[] = [];
-	readonly deletedSignatures: { contentHash: string; signatureId: string }[] = [];
+	readonly appendedSignatures: { signature: IDelverNamedSignatureWire; author: IAuthor }[] = [];
+	readonly retiredSignatures: { contentHash: string; signatureId: string; author: IAuthor }[] = [];
 	readonly migrationMappings: IDelverFunctionMigrationMapping[] = [];
 	snapshot = snapshot();
 	revisions: IDelverProjectRevision[] = [{
@@ -61,11 +61,11 @@ class FakeProjectStore implements Partial<IDelverProjectStoreService> {
 	async appendToolCalls(_projectId: string, calls: readonly IDelverToolCallRecordWire[]): Promise<void> {
 		this.appendedToolCalls.push(...calls);
 	}
-	async upsertSignatures(_projectId: string, signatures: readonly IDelverNamedSignatureWire[]): Promise<void> {
-		this.upsertedSignatures.push(...signatures);
+	async appendSignatures(_projectId: string, signatures: readonly IDelverNamedSignatureWire[], author: IAuthor): Promise<void> {
+		this.appendedSignatures.push(...signatures.map(signature => ({ signature, author })));
 	}
-	async deleteSignature(_projectId: string, contentHash: string, signatureId: string): Promise<boolean> {
-		this.deletedSignatures.push({ contentHash, signatureId });
+	async retireSignature(_projectId: string, contentHash: string, signatureId: string, author: IAuthor): Promise<boolean> {
+		this.retiredSignatures.push({ contentHash, signatureId, author });
 		return true;
 	}
 	async storeFunctionMigrationMappings(_projectId: string, mappings: readonly IDelverFunctionMigrationMapping[]): Promise<void> {
@@ -226,7 +226,7 @@ suite('DelverProjectService findings', () => {
 		assert.deepStrictEqual({
 			ids: [first.id, replaced.id],
 			retained: service.signaturesFor(HASH).map(signature => ({ name: signature.name, score: signature.qualityScore })),
-			persisted: store.upsertedSignatures.map(signature => ({ id: signature.id, name: signature.name, score: signature.qualityScore })),
+			persisted: store.appendedSignatures.map(record => ({ id: record.signature.id, name: record.signature.name, score: record.signature.qualityScore })),
 			events,
 		}, {
 			ids: [first.id, first.id],
@@ -239,7 +239,7 @@ suite('DelverProjectService findings', () => {
 		});
 	});
 
-	test('renames and deletes signatures while preserving retained evidence', async () => {
+	test('renames and retires signatures under a named author while preserving retained evidence', async () => {
 		const { service, store } = createService();
 		disposables.add(service);
 		const events: string[] = [];
@@ -254,14 +254,16 @@ suite('DelverProjectService findings', () => {
 		assert.deepStrictEqual({
 			stableId: [first.id, renamed.id],
 			retained: service.signaturesFor(HASH).map(signature => ({ id: signature.id, name: signature.name, pattern: signature.pattern })),
-			persistedNames: store.upsertedSignatures.map(signature => signature.name),
-			deleted: store.deletedSignatures,
+			persistedNames: store.appendedSignatures.map(record => record.signature.name),
+			authors: [...new Set(store.appendedSignatures.map(record => `${record.author.kind}:${record.author.id}`))],
+			retired: store.retiredSignatures,
 			events,
 		}, {
 			stableId: [first.id, first.id],
 			retained: [{ id: first.id, name: 'decrypt_payload', pattern: '55 48 89 e5' }],
 			persistedNames: ['decrypt_config', 'parse_header', 'decrypt_payload'],
-			deleted: [{ contentHash: HASH, signatureId: second.id }],
+			authors: ['human:local'],
+			retired: [{ contentHash: HASH, signatureId: second.id, author: { kind: 'human', id: 'local' } }],
 			events: [first.id, second.id, first.id, second.id],
 		});
 		await assert.rejects(() => service.deleteSignature(HASH, second.id), /no longer exists/);

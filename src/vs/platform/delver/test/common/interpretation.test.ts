@@ -110,6 +110,60 @@ suite('InterpretationLog', () => {
 		);
 	});
 
+	test('data types and function prototypes materialize as independent authored fields', () => {
+		const log = new InterpretationLog();
+		log.append({ author: ANALYST, anchor: at(0x1000n), op: EditOp.Rename, value: 'parse_header' });
+		log.append({ author: ANALYST, anchor: at(0x1000n), op: EditOp.DataType, value: 'IMAGE_DOS_HEADER' });
+		log.append({ author: ANALYST, anchor: at(0x1000n), op: EditOp.FunctionPrototype, value: 'int parse_header(const uint8_t *data, size_t size)' });
+		log.append({ author: ANALYST, anchor: at(0x1000n), op: EditOp.DataType, value: '' });
+
+		assert.deepStrictEqual({
+			current: log.at(at(0x1000n)),
+			dataType: log.valueAt(at(0x1000n), EditOp.DataType),
+			prototype: log.valueAt(at(0x1000n), EditOp.FunctionPrototype),
+			history: log.log.map(edit => ({ op: edit.op, value: edit.value })),
+		}, {
+			current: { name: 'parse_header', functionPrototype: 'int parse_header(const uint8_t *data, size_t size)' },
+			dataType: '',
+			prototype: 'int parse_header(const uint8_t *data, size_t size)',
+			history: [
+				{ op: 'rename', value: 'parse_header' },
+				{ op: 'dataType', value: 'IMAGE_DOS_HEADER' },
+				{ op: 'functionPrototype', value: 'int parse_header(const uint8_t *data, size_t size)' },
+				{ op: 'dataType', value: '' },
+			],
+		});
+	});
+
+	test('a function correction is its own authored field and survives a replay', () => {
+		// The correction is authored, not a fact: it lands beside the name and the
+		// comment at the same anchor, displaces neither, and is cleared by an
+		// append like everything else here.
+		const log = new InterpretationLog();
+		log.append({ author: ANALYST, anchor: at(0x1400n), op: EditOp.Rename, value: 'decode_stage2' });
+		log.append({ author: ANALYST, anchor: at(0x1400n), op: EditOp.FunctionBounds, value: '{"kind":"define","endRva":"0x1480"}' });
+		log.append({ author: ANALYST, anchor: at(0x2000n), op: EditOp.FunctionBounds, value: '{"kind":"undefine"}' });
+		log.append({ author: ANALYST, anchor: at(0x2000n), op: EditOp.FunctionBounds, value: '' });
+
+		const replayed = InterpretationLog.from(log.log);
+		assert.deepStrictEqual({
+			defined: replayed.at(at(0x1400n)),
+			cleared: replayed.at(at(0x2000n)),
+			value: replayed.valueAt(at(0x1400n), EditOp.FunctionBounds),
+			history: replayed.log.map(edit => ({ op: edit.op, value: edit.value })),
+		}, {
+			defined: { name: 'decode_stage2', functionBounds: '{"kind":"define","endRva":"0x1480"}' },
+			cleared: undefined,
+			value: '{"kind":"define","endRva":"0x1480"}',
+			history: [
+				{ op: 'rename', value: 'decode_stage2' },
+				{ op: 'functionBounds', value: '{"kind":"define","endRva":"0x1480"}' },
+				{ op: 'functionBounds', value: '{"kind":"undefine"}' },
+				{ op: 'functionBounds', value: '' },
+			],
+		});
+	});
+
 	test('replaying the log reconstructs the same state', () => {
 		// The log is the truth and the materialized view is a cache; this is what
 		// makes the cache safe to discard, and what loading a stored log relies on.
@@ -224,6 +278,34 @@ suite('InterpretationLog', () => {
 			'Interpretation edit 1 is not a proposal',
 			'Proposal 2 has already been decided',
 		]);
+	});
+
+	test('a store-allocated sequence is adopted, and a repeated one is refused', () => {
+		// The sequence belongs to whatever can see every stored edit. A log that
+		// is a replay of a store must take the number back from it rather than
+		// mint its own, and must refuse a number it already holds instead of
+		// quietly folding a second edit onto the first.
+		const log = new InterpretationLog();
+		const pending = log.prepare({ author: ANALYST, anchor: at(0x1000n), op: EditOp.Rename, value: 'decrypt_config' });
+		log.adopt({ seq: 41, ...pending });
+		let repeated = 'adopted';
+		try {
+			log.adopt({ seq: 41, ...pending });
+		} catch (error) {
+			repeated = (error as Error).message;
+		}
+
+		assert.deepStrictEqual({
+			name: log.nameAt(at(0x1000n)),
+			next: log.nextSequence,
+			history: log.log.map(edit => edit.seq),
+			repeated,
+		}, {
+			name: 'decrypt_config',
+			next: 42,
+			history: [41],
+			repeated: 'Interpretation sequence 41 is already recorded',
+		});
 	});
 
 	test('replay restores pending proposals and decisions', () => {

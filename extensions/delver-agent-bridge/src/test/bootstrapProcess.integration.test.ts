@@ -279,7 +279,7 @@ class TrackedRelayProcess implements IRelayProcess {
 	onStderr(listener: (data: Buffer) => void): () => void { return this.delegate.onStderr(listener); }
 	onExit(listener: (code: number | null) => void): () => void { return this.delegate.onExit(listener); }
 	onError(listener: (error: Error) => void): () => void { return this.delegate.onError(listener); }
-	terminate(): void { this.delegate.terminate(); }
+	terminate(force = false): void { this.delegate.terminate(force); }
 
 	whenExited(): Promise<void> {
 		return withTimeout(this.exitedPromise, 'A Delver relay process did not exit.');

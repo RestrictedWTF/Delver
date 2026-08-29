@@ -22,7 +22,8 @@ export interface IRelayProcess {
 	onStderr(listener: (data: Buffer) => void): () => void;
 	onExit(listener: (code: number | null) => void): () => void;
 	onError(listener: (error: Error) => void): () => void;
-	terminate(): void;
+	/** Requests exit; `force` escalates past a signal the child is free to ignore. */
+	terminate(force?: boolean): void;
 }
 
 export interface IRelayAttempt {
@@ -395,8 +396,21 @@ export function parseRelayPeerRecord(value: unknown, platform: NodeJS.Platform):
 	};
 }
 
-class NodeRelayProcess implements IRelayProcess {
-	constructor(private readonly child: childProcess.ChildProcessWithoutNullStreams) { }
+/** Adapts one spawned relay child to the stdio contract without unhandled stream failures. */
+export class NodeRelayProcess implements IRelayProcess {
+	private readonly errorListeners = new Set<(error: Error) => void>();
+
+	constructor(private readonly child: childProcess.ChildProcessWithoutNullStreams) {
+		// A stdio failure is routine — the peer goes away mid-write and the pipe
+		// reports EPIPE. Without a listener on every stream that becomes an
+		// unhandled 'error' event, which terminates the extension host instead of
+		// this one relay. Every failure is reported to the relay's own error path
+		// so the affected operation fails and the owner can tear the relay down.
+		this.child.on('error', error => this.reportError(error));
+		this.child.stdin.on('error', error => this.reportError(error));
+		this.child.stdout.on('error', error => this.reportError(error));
+		this.child.stderr.on('error', error => this.reportError(error));
+	}
 
 	write(data: Buffer, callback: (error?: Error | null) => void): boolean {
 		return this.child.stdin.write(data, callback);
@@ -427,13 +441,23 @@ class NodeRelayProcess implements IRelayProcess {
 	}
 
 	onError(listener: (error: Error) => void): () => void {
-		this.child.on('error', listener);
-		return () => this.child.removeListener('error', listener);
+		this.errorListeners.add(listener);
+		return () => this.errorListeners.delete(listener);
 	}
 
-	terminate(): void {
+	terminate(force = false): void {
+		if (force) {
+			this.child.kill('SIGKILL');
+			return;
+		}
 		if (!this.child.killed) {
 			this.child.kill();
+		}
+	}
+
+	private reportError(error: Error): void {
+		for (const listener of [...this.errorListeners]) {
+			listener(error);
 		}
 	}
 }

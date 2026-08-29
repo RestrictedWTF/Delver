@@ -6,8 +6,10 @@
 import { createDecorator } from '../../instantiation/common/instantiation.js';
 import { IDelverFindingDecisionWire, IDelverFindingWire } from './findings.js';
 import { IInterpretationEditWire } from './delverInterpretationStoreService.js';
+import { IAuthor } from './interpretation.js';
 import { IDelverToolCallRecordWire } from './delverToolCall.js';
 import { IDelverNamedSignatureWire } from './delverSignature.js';
+import { IXrefWire } from './protocol.generated.js';
 
 export const IDelverProjectStoreService = createDecorator<IDelverProjectStoreService>('delverProjectStoreService');
 
@@ -91,6 +93,25 @@ export interface IDelverFunctionMigrationMapping {
 	readonly provenance?: string;
 }
 
+/**
+ * One address lookup answered from a project's retained cross-reference table.
+ *
+ * `complete` is the guard against the failure this table exists to prevent: a
+ * partially retained table read as if it were whole answers a confident
+ * `total: 0` for an address whose references simply were not exported. It is
+ * false both when the retained table is known to be partial and when nothing
+ * was retained at all, so a caller that only ever checks `complete` before
+ * trusting `total` cannot get the distinction wrong.
+ */
+export interface IDelverRetainedXrefs {
+	readonly xrefs: readonly IXrefWire[];
+	/** Matching references before `maxXrefs` was applied. */
+	readonly total: number;
+	readonly truncated: boolean;
+	/** False when the retained table itself is known to be incomplete. */
+	readonly complete: boolean;
+}
+
 /** SQLite-backed project persistence hosted in the shared process. */
 export interface IDelverProjectStoreService {
 	readonly _serviceBrand: undefined;
@@ -107,8 +128,51 @@ export interface IDelverProjectStoreService {
 	appendFindings(projectId: string, findings: readonly IDelverFindingWire[]): Promise<void>;
 	appendFindingDecisions(projectId: string, decisions: readonly IDelverFindingDecisionWire[]): Promise<void>;
 	appendToolCalls(projectId: string, calls: readonly IDelverToolCallRecordWire[]): Promise<void>;
-	upsertSignatures(projectId: string, signatures: readonly IDelverNamedSignatureWire[]): Promise<void>;
-	deleteSignature(projectId: string, contentHash: string, signatureId: string): Promise<boolean>;
+	/**
+	 * Appends one authored record per signature, superseding the current one.
+	 *
+	 * Nothing is rewritten: a rename or a re-proof leaves the earlier record and
+	 * its retained pattern, proof and `sourceCallId` in place, which is what a
+	 * later `cross-revision-stable` match reads back as evidence. A signature
+	 * identical to the current record appends nothing, so re-saving a project
+	 * does not bury its history under copies of itself.
+	 */
+	appendSignatures(projectId: string, signatures: readonly IDelverNamedSignatureWire[], author: IAuthor): Promise<void>;
+
+	/**
+	 * Appends an authored tombstone, so the signature stops being current.
+	 *
+	 * Returns false when nothing was current to retire. The superseded records
+	 * stay on disk — retiring a name is a decision, not an erasure.
+	 */
+	retireSignature(projectId: string, contentHash: string, signatureId: string, author: IAuthor): Promise<boolean>;
+	/**
+	 * Replaces the cross-references retained for one revision.
+	 *
+	 * `complete` records whether the export covered the whole table. Passing
+	 * false for a table that was only partly walked is what keeps a later
+	 * offline lookup from reporting an authoritative zero for an address the
+	 * export never reached.
+	 */
+	saveXrefs(projectId: string, xrefs: readonly IXrefWire[], complete: boolean, revisionId?: string): Promise<void>;
+
+	/**
+	 * Answers one address from the retained table without loading it.
+	 *
+	 * A real module has millions of references, so this is a query bounded by
+	 * `maxXrefs`, not a load: `total` counts every match before the bound.
+	 */
+	loadXrefs(projectId: string, rva: string, direction: 'to' | 'from', maxXrefs: number, revisionId?: string): Promise<IDelverRetainedXrefs>;
+
+	/**
+	 * Whether a revision has a retained table at all.
+	 *
+	 * This separates "retained, and this address genuinely has no references"
+	 * from "nothing was ever retained, so no answer exists" — two states that
+	 * `loadXrefs` otherwise reports with the same empty result and the same
+	 * `total: 0`, distinguished only by `complete`.
+	 */
+	hasRetainedXrefs(projectId: string, revisionId?: string): Promise<boolean>;
 	copyInterpretations(sourceProjectId: string, destinationProjectId: string): Promise<number>;
 	close(projectId: string): Promise<void>;
 }

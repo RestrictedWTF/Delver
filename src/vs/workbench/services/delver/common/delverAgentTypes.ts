@@ -134,6 +134,11 @@ export interface IDelverAgentResult<T = unknown> {
 export interface IDelverAgentRequest {
 	readonly capability: string;
 	readonly args?: Readonly<Record<string, unknown>>;
+	/**
+	 * Optional fail-closed binding supplied by a transport session. `null`
+	 * means the session was bound while no project was active.
+	 */
+	readonly expectedProject?: Pick<IDelverAgentProjectIdentity, 'contentHash' | 'revisionId'> | null;
 	/** Identity of the caller, recorded on any authored write. */
 	readonly caller?: IDelverAgentCaller;
 }
@@ -180,6 +185,8 @@ export const DELVER_AGENT_LIMITS = {
 	/** How many distinct call paths one search may return. */
 	callPaths: { default: 8, max: 64 },
 	functions: { default: 100, max: 1000 },
+	globals: { default: 100, max: 1000 },
+	globalAccesses: { default: 100, max: 2000 },
 	xrefs: { default: 100, max: 2000 },
 	strings: { default: 100, max: 1000 },
 	imports: { default: 100, max: 1000 },
@@ -189,6 +196,11 @@ export const DELVER_AGENT_LIMITS = {
 		max: 100,
 		renameCharacters: 256,
 		commentCharacters: 16 * 1024,
+		declarationCharacters: 2048,
+		/** Fields in one proposed composite. Matches the worker's own cap. */
+		compositeFields: 1000,
+		/** Total size of one proposed composite. Matches the worker's own cap. */
+		compositeSizeBytes: 1024 * 1024,
 		tagsPerAddress: 32,
 		tagCharacters: 64,
 	},
@@ -286,6 +298,17 @@ export function parseOptionalWireAddress(value: unknown, what = 'address'): bigi
  * capability, and a fingerprint of the filter arguments therefore all travel
  * inside the cursor, so every one of those mistakes is detectable rather than
  * merely unlikely.
+ *
+ * The last of those hazards is the one that fires without anybody doing
+ * anything wrong: some sequences are ordered or filtered by *authored* state,
+ * which the analyst can change while the walk is in progress. Accepting a
+ * rename moves a function into or out of a `nameContains` result; saving a
+ * signature inserts a row into a name-sorted list and shifts every later index
+ * by one. Neither touches the content hash or the revision, so the cursor
+ * still validates and the next page silently skips or repeats rows — and the
+ * model reports an inventory that was never true at any instant. A cursor over
+ * such a sequence therefore also carries a stamp of the collection state it
+ * was minted against.
  */
 interface IDelverAgentCursorPayload {
 	readonly h: string;
@@ -294,6 +317,18 @@ interface IDelverAgentCursorPayload {
 	readonly o: number;
 	/** Fingerprint of the filter arguments this page was produced under. */
 	readonly f?: string;
+	/** Stamp of the mutable collection this page was sliced from. */
+	readonly s?: string;
+	/**
+	 * Address a re-scanning walk resumes at, as a `"0x..."` string.
+	 *
+	 * Present only once a walk has run past the end of a materialized list and
+	 * into territory that has to be produced on demand. `o` indexes a list; this
+	 * indexes an image, and the two phases cannot share a field because one is
+	 * an offset into something already held and the other is a position in
+	 * something not yet looked at.
+	 */
+	readonly v?: string;
 }
 
 /**
@@ -310,24 +345,63 @@ export function filterFingerprint(values: Readonly<Record<string, unknown>>): st
 	return entries.join('&');
 }
 
-export function encodeCursor(capability: string, project: IDelverAgentProjectIdentity, startIndex: number, filter = ''): string {
+/**
+ * Stamp of a collection whose membership or order the analyst can change.
+ *
+ * `''` means the sequence is derived from facts alone and cannot shift under
+ * the walk. Anything else is compared verbatim on the next page, so a cheap
+ * monotonic counter is enough — the stamp never has to describe *what*
+ * changed, only that something did.
+ */
+export function collectionStamp(parts: readonly (string | number)[]): string {
+	return parts.join(':');
+}
+
+export function encodeCursor(capability: string, project: IDelverAgentProjectIdentity, startIndex: number, filter = '', state = '', scanRva = ''): string {
 	const payload: IDelverAgentCursorPayload = {
 		h: project.contentHash,
 		...(project.revisionId === undefined ? {} : { r: project.revisionId }),
 		c: capability,
 		o: startIndex,
 		...(filter === '' ? {} : { f: filter }),
+		...(state === '' ? {} : { s: state }),
+		...(scanRva === '' ? {} : { v: scanRva }),
 	};
 	return encodeBase64(VSBuffer.fromString(JSON.stringify(payload)));
 }
 
 /**
+ * The scan position a cursor carries, when it has run past a materialized list.
+ *
+ * Read *after* `decodeCursor` has accepted the cursor, so this never has to
+ * repeat the identity, capability, filter and collection checks — it answers
+ * only "which phase of the walk is this", and only for a cursor already known
+ * to belong here.
+ */
+export function decodeScanRva(cursor: unknown): string | undefined {
+	if (typeof cursor !== 'string' || cursor === '') {
+		return undefined;
+	}
+	try {
+		const payload = JSON.parse(decodeBase64(cursor).toString()) as IDelverAgentCursorPayload;
+		if (typeof payload.v !== 'string') {
+			return undefined;
+		}
+		// Re-parsed rather than trusted: a cursor is opaque to the caller but it
+		// is still caller-supplied bytes, and this one becomes a scan position.
+		return toWireAddress(parseWireAddress(payload.v, 'cursor scan position'));
+	} catch {
+		return undefined;
+	}
+}
+
+/**
  * Decodes a cursor, rejecting one issued for other bytes, another capability,
- * or a different filter.
+ * a different filter, or a collection that has changed underneath the walk.
  *
  * Returns the index to resume at. An absent cursor starts at zero.
  */
-export function decodeCursor(cursor: unknown, capability: string, project: IDelverAgentProjectIdentity, filter = ''): number {
+export function decodeCursor(cursor: unknown, capability: string, project: IDelverAgentProjectIdentity, filter = '', state = ''): number {
 	if (cursor === undefined || cursor === null || cursor === '') {
 		return 0;
 	}
@@ -348,6 +422,12 @@ export function decodeCursor(cursor: unknown, capability: string, project: IDelv
 	}
 	if ((payload.f ?? '') !== filter) {
 		throw new DelverAgentError(DelverAgentErrorCode.StaleRevision, 'That cursor was issued for different filter arguments. Repeat the original filter, or restart the walk without a cursor.');
+	}
+	if ((payload.s ?? '') !== state) {
+		throw new DelverAgentError(
+			DelverAgentErrorCode.StaleRevision,
+			'Authored state changed since that cursor was issued, so the remaining rows no longer line up with it. Restart the walk without a cursor; any rows you already collected may be missing or duplicated.',
+		);
 	}
 	if (!Number.isSafeInteger(payload.o) || payload.o < 0) {
 		throw new DelverAgentError(DelverAgentErrorCode.StaleRevision, 'The pagination cursor carries an invalid position.');

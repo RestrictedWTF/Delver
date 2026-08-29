@@ -12,8 +12,9 @@ import { localize } from '../../../../nls.js';
 import { IContextKey, IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
 import { IDelverAnalysisService } from '../../../../platform/delver/common/delverAnalysisService.js';
+import { isImageAnchor } from '../../../../platform/delver/common/interpretation.js';
 import { IRange } from '../../../../platform/delver/common/address.js';
-import { FlowKindWire, IFunctionWire, ISectionWire, IStringWire, StringEncodingWire } from '../../../../platform/delver/common/protocol.generated.js';
+import { FlowKindWire, IFunctionWire, ISectionWire, StringEncodingWire } from '../../../../platform/delver/common/protocol.generated.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { WorkbenchTable } from '../../../../platform/list/browser/listService.js';
 import { editorBackground } from '../../../../platform/theme/common/colorRegistry.js';
@@ -30,22 +31,20 @@ import {
 import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
 import { DELVER_SELECTION_NONE, IDelverSelectionService, MenuDelverSelectionContext } from '../../../services/delver/common/delverSelection.js';
 import {
-	DELVER_LISTING_FOCUSED,
 	DELVER_LISTING_PINNED,
 	DELVER_NAVIGATION_ORIGIN,
 	shouldFollowWhilePinned,
-} from './delverListingContext.js';
+} from '../../../services/delver/browser/delverListingContext.js';
 import { IListingInterpretationPresentation, listingInterpretationPresentation } from './delverListingInterpretation.js';
-import { DelverListingModel, IListingRow, IListingStaticRow } from './delverListingModel.js';
+import { anchoredScrollTop, IVisibleRows, LISTING_LINE_HEIGHT, ListingLineMap, ListingRowLines } from './delverListingLines.js';
+import { DelverListingModel, IListingRow, IListingStaticRow, instructionOf, stringOf } from './delverListingModel.js';
 import { mouseHistoryDirection } from '../../../services/delver/common/delverMouseNavigation.js';
 import { isInstructionHighlighted } from './delverListingHighlights.js';
 import { listingAddressLabel, listingMetadataRow } from './delverListingMetadata.js';
-import { activeListing, IDelverListingHost, setActiveListing, touchActiveListing } from './delverActiveListing.js';
+import { IDelverListingHost, setActiveListing, touchActiveListing } from '../../../services/delver/browser/delverActiveListing.js';
 
 /** Identifies this view on the focus bus, so it can ignore its own echo. */
 const FOCUS_ORIGIN = 'delver.editor.listing';
-
-const ROW_HEIGHT = 22;
 
 /**
  * The disassembly listing, as a plain widget.
@@ -77,7 +76,6 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 
 	private _pinned = false;
 	private readonly pinnedContext: IContextKey<boolean>;
-	private readonly listingFocusedContext: IContextKey<boolean>;
 
 	/**
 	 * Function entry addresses, in the `"0x..."` form rows carry.
@@ -89,10 +87,18 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 	private functions: readonly IFunctionWire[] = [];
 	private highlightedRanges: readonly IRange[] = [];
 	private sections: readonly ISectionWire[] = [];
-	private stringRowsByRva = new Map<bigint, number>();
 
 	/** Absolute ordinal of the row at the top of the viewport. */
 	private topRow = 0;
+
+	/**
+	 * Line ordinals of the buffered rows, kept in step with the table's splices.
+	 *
+	 * The only thing allowed to turn a scroll offset into a row index. Rows are
+	 * not a uniform height, so dividing pixels by a line height yields a *line*,
+	 * and a line is not a row.
+	 */
+	private lineMap: ListingLineMap | undefined;
 
 	/** Last size the workbench gave this pane. */
 	private dimension: Dimension | undefined;
@@ -109,7 +115,6 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 	) {
 		super();
 		this.pinnedContext = DELVER_LISTING_PINNED.bindTo(contextKeyService);
-		this.listingFocusedContext = DELVER_LISTING_FOCUSED.bindTo(contextKeyService);
 	}
 
 	get pinned(): boolean {
@@ -137,10 +142,7 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 		// side-by-side groups are both visible at once. Focus can, and it works
 		// the same whether this widget sits in an editor tab or a workspace zone.
 		const focusTracker = this._register(dom.trackFocus(this.container));
-		this._register(focusTracker.onDidFocus(() => {
-			touchActiveListing(this);
-			this.syncListingActiveContext();
-		}));
+		this._register(focusTracker.onDidFocus(() => touchActiveListing(this)));
 	}
 
 	/**
@@ -201,13 +203,11 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 
 			const metadata = listingMetadataRow(handle.targetPath, info);
 			const prefixRows: readonly IListingStaticRow[] = [{ kind: 'metadata', ...metadata }];
-			const stringValues = [...strings.strings].sort(compareStringRvas);
-			const suffixRows: readonly IListingStaticRow[] = stringValues.map(value => ({ kind: 'string', value }));
-			const firstStringRow = prefixRows.length + handle.image.instruction_count;
-			this.stringRowsByRva = new Map(stringValues.map((value, index) => [BigInt(value.rva), firstStringRow + index] as const));
 
 			this.message.style.display = 'none';
-			this.createTable(handle, prefixRows, suffixRows);
+			// Strings are server rows now, placed at their own addresses, so the
+			// listing's row count is instructions *and* strings.
+			this.createTable(handle, prefixRows, handle.image.instruction_count + strings.strings.length);
 		} catch (error) {
 			this.message.textContent = localize(
 				'delverListingDetailsFailed',
@@ -221,7 +221,7 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 		}
 	}
 
-	private createTable(handle: IDelverSession, prefixRows: readonly IListingStaticRow[], suffixRows: readonly IListingStaticRow[]): void {
+	private createTable(handle: IDelverSession, prefixRows: readonly IListingStaticRow[], serverRows: number): void {
 		const store = new DisposableStore();
 		this.sessionDisposables.value = store;
 
@@ -235,28 +235,21 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 				listingWindow: async (startRow, count) =>
 					(await this.analysisService.listingWindow(handle.sessionId!, startRow, count)).rows,
 			},
-			handle.image!.instruction_count,
+			serverRows,
 			prefixRows,
-			suffixRows,
 		);
 		store.add(model);
 		this.model = model;
 		this.highlightedRanges = this.focusService.focus.selections ?? [];
 
-		// Authored labels share their instruction's element. This preserves the
-		// listing's exact row-to-address identity while giving the optional label
-		// a fixed height. Comments remain on the instruction line.
-		const heightFor = (row: IListingRow) => row.static?.kind === 'metadata'
-			? ROW_HEIGHT * row.static.lines.length
-			: row.data === undefined
-				? ROW_HEIGHT
-				: ROW_HEIGHT * this.presentationFor(row.data.rva).heightInLines;
+		const linesInRow: ListingRowLines = row => this.linesInRow(row);
 		const delegate = new class implements ITableVirtualDelegate<IListingRow> {
 			readonly headerRowHeight = 0;
 			getHeight(row: IListingRow): number {
-				return heightFor(row);
+				return LISTING_LINE_HEIGHT * linesInRow(row);
 			}
 		}();
+		this.lineMap = new ListingLineMap(model.rows, linesInRow);
 
 		const table = store.add(this.instantiationService.createInstance(
 			WorkbenchTable,
@@ -319,6 +312,20 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 				this.focusService.forward();
 			}
 		}, true));
+		// A click has to put DOM focus in the table. Without it `activeElement`
+		// stays on `<body>`, and `delverListingFocused` — bound to the context key
+		// service scoped to this editor group — is invisible to keybinding
+		// resolution, which evaluates `when` against the focused element. Every
+		// binding gated on a live listing then loses to whatever upstream claims
+		// the same key: Ctrl+Z became the text editor's undo, F2 and `;` did
+		// nothing, and Alt+Left switched editor tabs.
+		//
+		// Bubble phase, so the list has already decided what the click selected.
+		store.add(dom.addDisposableListener(this.tableContainer, dom.EventType.MOUSE_DOWN, () => {
+			if (!dom.isAncestorOfActiveElement(this.tableContainer)) {
+				table.domFocus();
+			}
+		}));
 		store.add(dom.addDisposableListener(this.tableContainer, dom.EventType.AUXCLICK, event => {
 			if (mouseHistoryDirection(event.button) !== undefined) {
 				event.preventDefault();
@@ -334,9 +341,15 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 		store.add(model.onDidChangeRows(range => {
 			// The table copied these elements when they were spliced in, so
 			// updating the model's array is invisible to it and `rerender()`
-			// would just redraw the stale placeholders. Replacing the range with
-			// the same number of rows leaves total height — and so the scroll
-			// position — untouched.
+			// would just redraw the stale placeholders. Replacing the range is
+			// the redraw. It is not height-neutral: the row count is unchanged,
+			// but a one-line placeholder can resolve to a two-line function
+			// entry, so total height grows and the scroll offset is left
+			// pointing at different content than it did before.
+			const lineMap = this.lineMap;
+			const scrollTop = table.scrollTop;
+			const oldLineCount = lineMap?.lineCount ?? 0;
+			const changedRangeEndPixel = lineMap?.pixelOfRow(range.start + range.count) ?? 0;
 			const selection = table.getSelection();
 			const focus = table.getFocus();
 			const wasApplyingFocus = this.applyingFocus;
@@ -348,6 +361,13 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 			} finally {
 				this.applyingFocus = wasApplyingFocus;
 			}
+			// A placeholder is one line; the instruction that replaces it may be a
+			// two-line function entry. Every row below it moves, so the line map
+			// has to follow the same range the table just spliced.
+			lineMap?.refresh(range.start, range.count);
+			if (lineMap !== undefined) {
+				table.scrollTop = anchoredScrollTop(scrollTop, changedRangeEndPixel, oldLineCount, lineMap.lineCount);
+			}
 		}));
 
 		store.add(model.onDidMoveBuffer(() => {
@@ -356,6 +376,7 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 			// assume a uniform row height — which stopped being true the moment
 			// function headers became two lines tall.
 			table.splice(0, table.length, model.rows);
+			this.lineMap?.reset(model.rows);
 			if (!this.anchoringBuffer) {
 				const index = model.indexOf(this.topRow);
 				if (index !== -1) {
@@ -368,7 +389,7 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 		// `ListView.rerender()` is a no-op when dynamic-height support is off,
 		// which this table deliberately uses. Replace the affected row instead.
 		store.add(this.interpretationService.onDidChange(event => {
-			if (event.edit.anchor.contentHash === handle.contentHash) {
+			if (event.edit.anchor.contentHash === handle.contentHash && isImageAnchor(event.edit.anchor)) {
 				this.refreshInterpretationAt(event.edit.anchor.rva);
 			}
 		}));
@@ -385,10 +406,15 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 			if (event.element) {
 				this.publishSelection(event.element);
 			}
+			// Forwarded for the same reason the selection is published: the row
+			// under the cursor is not always the one the focus bus points at, and
+			// the actions must edit what the menu names.
+			const address = instructionOf(event.element)?.rva ?? stringOf(event.element)?.rva;
 			this.contextMenuService.showContextMenu({
 				getAnchor: () => event.anchor,
 				menuId: MenuDelverSelectionContext,
 				contextKeyService: this.contextKeyService,
+				menuActionOptions: address === undefined ? undefined : { arg: address, shouldForwardArgs: true },
 			});
 		}));
 		store.add(this.focusService.onDidChangeFocus(e => {
@@ -417,21 +443,55 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 		table.splice(index, 1, [model.rows[index]]);
 		table.setFocus(focus);
 		table.setSelection(selection);
+		// Authoring a label makes this row two lines tall, or one again when the
+		// label goes away. Either way every row below it moves.
+		this.lineMap?.refresh(index, 1);
+	}
+
+	/**
+	 * How many lines a row occupies — the listing's one row-height rule.
+	 *
+	 * Authored labels share their instruction's element. This preserves the
+	 * listing's exact row-to-address identity while giving the optional label a
+	 * fixed line of its own; comments stay on the instruction line. The table's
+	 * virtual delegate and {@link lineMap} both measure through here, so a pixel
+	 * offset and a row ordinal can never drift apart.
+	 */
+	private linesInRow(row: IListingRow): number {
+		if (row.static?.kind === 'metadata') {
+			return row.static.lines.length;
+		}
+		return row.data === undefined ? 1 : this.presentationFor(row.data.rva).heightInLines;
+	}
+
+	/**
+	 * The buffer rows currently on screen.
+	 *
+	 * The only pixel→row conversion in the listing. `scrollTop` divided by a
+	 * line height is a *line* ordinal, and rows are not one line each, so the
+	 * quotient has to be resolved through the line map before anything treats it
+	 * as a row.
+	 */
+	private visibleRows(): IVisibleRows | undefined {
+		const table = this.table;
+		const lines = this.lineMap;
+		if (!table || !lines || lines.rowCount === 0) {
+			return undefined;
+		}
+		// `renderHeight` is the list's own viewport, which excludes the message
+		// bar; the pane dimension only stands in before the first layout.
+		const height = table.renderHeight > 0 ? table.renderHeight : (this.dimension?.height ?? 0);
+		return lines.rowsInViewport(table.scrollTop, Math.max(LISTING_LINE_HEIGHT, height));
 	}
 
 	private updateVisibleRange(): void {
-		const table = this.table;
 		const model = this.model;
-		if (!table || !model) {
+		const visible = this.visibleRows();
+		if (!model || !visible) {
 			return;
 		}
-		// Approximate: interpretation lines are taller, so this over-estimates how
-		// many rows are on screen. Over-estimating only prefetches a little wide,
-		// which is the harmless direction to be wrong in.
-		const first = model.bufferStart + Math.floor(table.scrollTop / ROW_HEIGHT);
-		const visibleRows = Math.max(1, Math.ceil((this.dimension?.height ?? 0) / ROW_HEIGHT));
-		this.topRow = first;
-		model.setVisibleRange(first, first + visibleRows);
+		this.topRow = model.bufferStart + visible.first;
+		model.setVisibleRange(this.topRow, model.bufferStart + visible.last);
 	}
 
 	private presentationFor(rva: string): IListingInterpretationPresentation {
@@ -459,14 +519,12 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 			return;
 		}
 		const focused = table.getFocusedElements()[0] ?? table.getSelectedElements()[0];
-		this.followTarget(focused?.data?.branch_target);
+		this.followTarget(instructionOf(focused)?.branch_target);
 	}
 
 	private isPseudocodeHighlighted(row: IListingRow): boolean {
-		if (!row.data) {
-			return false;
-		}
-		return isInstructionHighlighted(row.data, this.highlightedRanges);
+		const instruction = instructionOf(row);
+		return instruction !== undefined && isInstructionHighlighted(instruction, this.highlightedRanges);
 	}
 
 	private updatePseudocodeHighlights(ranges: readonly IRange[]): void {
@@ -476,17 +534,17 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 		this.highlightedRanges = ranges;
 		const table = this.table;
 		const model = this.model;
-		if (!table || !model || table.length === 0) {
+		const visible = this.visibleRows();
+		if (!table || !model || !visible || table.length === 0) {
 			return;
 		}
 		const selection = table.getSelection();
 		const focus = table.getFocus();
-		// WorkbenchTable does not expose ListView's visible-index getters. The
-		// listing already uses this conservative estimate for page prefetching;
-		// interpretation headers only make it overdraw a few additional rows.
-		const first = Math.max(0, Math.floor(table.scrollTop / ROW_HEIGHT) - 2);
-		const visibleRows = Math.ceil((this.dimension?.height ?? ROW_HEIGHT) / ROW_HEIGHT) + 4;
-		const last = Math.min(table.length - 1, first + visibleRows);
+		// WorkbenchTable does not expose ListView's visible-index getters, so the
+		// rows to repaint come from the line map — the same conversion the page
+		// prefetch uses. A row either side covers a partially scrolled edge.
+		const first = Math.max(0, visible.first - 1);
+		const last = Math.min(Math.min(table.length, model.rows.length) - 1, visible.last + 1);
 		const wasApplyingFocus = this.applyingFocus;
 		this.applyingFocus = true;
 		try {
@@ -530,19 +588,6 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 	}
 
 	/** Broadcasts the selected row's address to the rest of the workbench. */
-	/**
-	 * Mirrors "is any listing live" into a context key.
-	 *
-	 * Derived from the shared active-listing stack rather than from this
-	 * widget's own focus, so two listings agree: whichever widget updates the
-	 * key last computes the same answer. Deliberately not driven by blur —
-	 * clicking a toolbar button or opening the context menu moves DOM focus out
-	 * of the table, and disabling every action at that moment would make them
-	 * unusable by mouse.
-	 */
-	private syncListingActiveContext(): void {
-		this.listingFocusedContext.set(activeListing() !== undefined);
-	}
 
 	/**
 	 * Reports what kind of object the selected row is.
@@ -563,19 +608,16 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 			});
 			return;
 		}
-		if (row.static?.kind === 'string') {
-			this.selectionService.setSelection({ kind: 'string', address: row.static.value.rva });
+		const text = stringOf(row);
+		if (text) {
+			this.selectionService.setSelection({ kind: 'string', address: text.rva });
 			return;
 		}
 		this.selectionService.setSelection(DELVER_SELECTION_NONE);
 	}
 
 	private publishFocus(row: IListingRow | undefined): void {
-		const address = row?.data
-			? BigInt(row.data.rva)
-			: row?.static?.kind === 'string'
-				? BigInt(row.static.value.rva)
-				: undefined;
+		const address = row?.data ? BigInt(row.data.rva) : undefined;
 		if (this.applyingFocus || address === undefined) {
 			return;
 		}
@@ -601,15 +643,15 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 		}
 		const application = ++this.focusApplication;
 		const address = location.address;
-		let listingRow = this.stringRowsByRva.get(address);
-		if (listingRow === undefined) {
-			const rva = `0x${address.toString(16).toUpperCase()}`;
-			const instructionRow = await this.analysisService.rowForAddress(session.sessionId, rva, true);
-			if (instructionRow === undefined) {
-				return;
-			}
-			listingRow = model.instructionRow(instructionRow);
+		// One lookup for every address. The server's row space covers strings as
+		// well as instructions, so a string reached from the strings view resolves
+		// here the same way a branch target does.
+		const rva = `0x${address.toString(16).toUpperCase()}`;
+		const serverRow = await this.analysisService.rowForAddress(session.sessionId, rva, true);
+		if (serverRow === undefined) {
+			return;
 		}
+		const listingRow = model.listingRow(serverRow);
 
 		// An older address lookup must not move a replacement table or override a
 		// newer focus. This also catches a project being closed while RPC was in
@@ -687,7 +729,6 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 	 */
 	setVisible(visible: boolean): void {
 		this.activeRegistration.value = visible ? setActiveListing(this) : undefined;
-		this.syncListingActiveContext();
 		if (visible && this.table && this.dimension) {
 			this.layoutTable();
 			this.table.rerender();
@@ -716,13 +757,13 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 		this.sessionDisposables.clear();
 		this.table = undefined;
 		this.model = undefined;
+		this.lineMap = undefined;
 		this.publishedSession = undefined;
 		this.session = undefined;
 		this.functionStarts = new Set();
 		this.functions = [];
 		this.highlightedRanges = [];
 		this.sections = [];
-		this.stringRowsByRva.clear();
 	}
 }
 
@@ -752,13 +793,11 @@ class AddressRenderer implements ITableRenderer<IListingRow, ICellTemplate> {
 			? this.addressLabel(row.data.rva)
 			: staticRow?.kind === 'metadata'
 				? staticRow.lines.map(() => staticRow.address).join('\n')
-				: staticRow?.kind === 'string'
-					? this.addressLabel(staticRow.value.rva)
-					: '';
+				: '';
 		// The address belongs beside the instruction, not beside an authored label.
 		template.element.classList.toggle('delver-listing-second-line', this.linesBeforeInstruction(row) > 0);
 		template.element.classList.toggle('delver-listing-metadata-row', row.static?.kind === 'metadata');
-		template.element.classList.toggle('delver-listing-data-row', row.static?.kind === 'string');
+		template.element.classList.toggle('delver-listing-data-row', row.data?.kind === 'string');
 	}
 
 	disposeTemplate(): void { }
@@ -818,26 +857,29 @@ class InstructionRenderer implements ITableRenderer<IListingRow, IInstructionTem
 
 	renderElement(row: IListingRow, _index: number, template: IInstructionTemplate): void {
 		template.row.classList.toggle('delver-listing-metadata-row', row.static?.kind === 'metadata');
-		template.row.classList.toggle('delver-listing-data-row', row.static?.kind === 'string');
+		template.row.classList.toggle('delver-listing-data-row', row.data?.kind === 'string');
 
-		if (row.static) {
+		const text = stringOf(row);
+		if (row.static || text) {
 			template.target = undefined;
 			template.label.textContent = '';
 			template.tags.textContent = '';
 			template.mnemonic.classList.remove('delver-listing-pending', 'delver-listing-flow');
 			template.operands.classList.remove('delver-listing-link');
 			template.row.classList.remove('delver-listing-function-start', 'delver-listing-pseudocode-highlight');
-			if (row.static.kind === 'metadata') {
-				template.mnemonic.textContent = '';
-				template.operands.textContent = row.static.lines.join('\n');
-				template.comment.textContent = '';
-			} else {
-				const utf16 = row.static.value.encoding === StringEncodingWire.Utf16Le;
+			if (text) {
+				const utf16 = text.encoding === StringEncodingWire.Utf16Le;
 				template.mnemonic.textContent = utf16 ? 'dw' : 'db';
-				template.operands.textContent = JSON.stringify(row.static.value.text);
+				// Quoted through JSON: this came out of the image and is attacker-
+				// controlled, so control characters must not reach the DOM raw.
+				template.operands.textContent = JSON.stringify(text.text);
 				template.comment.textContent = utf16
 					? localize('delverListingUtf16String', "UTF-16 string")
 					: localize('delverListingAsciiString', "ASCII string");
+			} else if (row.static?.kind === 'metadata') {
+				template.mnemonic.textContent = '';
+				template.operands.textContent = row.static.lines.join('\n');
+				template.comment.textContent = '';
 			}
 			return;
 		}
@@ -869,15 +911,19 @@ class InstructionRenderer implements ITableRenderer<IListingRow, IInstructionTem
 		template.row.classList.toggle('delver-listing-function-start', this.isFunctionStart(row.data.rva));
 		template.row.classList.toggle('delver-listing-pseudocode-highlight', this.isHighlighted(row));
 
+		const instruction = instructionOf(row);
+		if (!instruction) {
+			return;
+		}
 		template.mnemonic.classList.remove('delver-listing-pending');
-		template.mnemonic.textContent = row.data.mnemonic;
-		template.operands.textContent = row.data.operands;
-		template.mnemonic.classList.toggle('delver-listing-flow', isBranch(row.data.flow));
+		template.mnemonic.textContent = instruction.mnemonic;
+		template.operands.textContent = instruction.operands;
+		template.mnemonic.classList.toggle('delver-listing-flow', isBranch(instruction.flow));
 
 		// A statically known target is a link, and looks like one. An indirect
 		// call has no target this instruction can name, so it stays plain rather
 		// than inviting a click that would go nowhere.
-		template.target = row.data.branch_target;
+		template.target = instruction.branch_target;
 		template.operands.classList.toggle('delver-listing-link', template.target !== undefined);
 	}
 
@@ -890,12 +936,6 @@ function isBranch(flow: FlowKindWire): boolean {
 	return flow === FlowKindWire.Call
 		|| flow === FlowKindWire.Jump
 		|| flow === FlowKindWire.ConditionalJump;
-}
-
-function compareStringRvas(left: IStringWire, right: IStringWire): number {
-	const leftRva = BigInt(left.rva);
-	const rightRva = BigInt(right.rva);
-	return leftRva < rightRva ? -1 : leftRva > rightRva ? 1 : 0;
 }
 
 function sameRanges(left: readonly IRange[], right: readonly IRange[]): boolean {

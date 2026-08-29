@@ -26,10 +26,10 @@ import {
 import { IFingerprintedFunction, IFunctionRevisionMatch, matchFunctionRevisions } from '../../../../platform/delver/common/functionRevisionMatcher.js';
 import { delverToolCallFromWire, delverToolCallToWire, IDelverToolCallRecord } from '../../../../platform/delver/common/delverToolCall.js';
 import { DELVER_SIGNATURE_LIMITS, delverNamedSignatureFromWire, delverNamedSignatureToWire, IDelverNamedSignature, IDelverNamedSignatureDraft } from '../../../../platform/delver/common/delverSignature.js';
-import { IDelverProjectDecompilation, IDelverProjectHandle, IDelverProjectRevision, IDelverProjectSnapshot, IDelverProjectSnapshotUpdate, IDelverProjectStoreService } from '../../../../platform/delver/common/delverProjectStoreService.js';
+import { IDelverProjectDecompilation, IDelverProjectHandle, IDelverProjectRevision, IDelverProjectSnapshot, IDelverProjectSnapshotUpdate, IDelverProjectStoreService, IDelverRetainedXrefs } from '../../../../platform/delver/common/delverProjectStoreService.js';
 import { editFromWire, editToWire } from '../../../../platform/delver/common/delverInterpretationStoreService.js';
-import { Anchor, EditOp, EditValue, IAuthor, InterpretationLog } from '../../../../platform/delver/common/interpretation.js';
-import { IFunctionsResult } from '../../../../platform/delver/common/protocol.generated.js';
+import { Anchor, anchorKey, EditOp, EditValue, IAuthor, InterpretationLog } from '../../../../platform/delver/common/interpretation.js';
+import { IFunctionsResult, IXrefWire } from '../../../../platform/delver/common/protocol.generated.js';
 import { IDialogService, IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
@@ -37,6 +37,17 @@ import { IDelverInterpretationService } from './delverInterpretationService.js';
 
 export const IDelverProjectService = createDecorator<IDelverProjectService>('delverProjectService');
 const LOCAL_REVIEWER: IAuthor = { kind: 'human', id: 'local' };
+
+/**
+ * Pages the cross-reference export will walk before giving up.
+ *
+ * The server returns up to 65,536 references per page, so this reaches a table
+ * of roughly 33 million — an order of magnitude past the largest module anyone
+ * analyses, and there so a pathological or hostile image cannot make saving a
+ * project run forever. Hitting it retains what was walked and records the table
+ * as incomplete; it never silently passes a short table off as a whole one.
+ */
+const XREF_EXPORT_MAX_PAGES = 512;
 
 /** The session information required to create or update a portable project. */
 export interface IDelverProjectSession {
@@ -135,14 +146,19 @@ export interface IDelverProjectService {
 	/** Exact retained dispatcher call, when it belongs to these bytes. */
 	toolCall(contentHash: string, callId: string): IDelverToolCallRecord | undefined;
 
-	/** Creates or replaces one named signature, preserving its stable id by case-insensitive name. */
-	saveSignature(contentHash: string, draft: IDelverNamedSignatureDraft): Promise<IDelverNamedSignature>;
+	/**
+	 * Records one named signature, superseding any earlier one of the same name.
+	 *
+	 * The earlier record is kept, not overwritten: its pattern and the tool call
+	 * that proved it are the evidence a later cross-revision match reads.
+	 */
+	saveSignature(contentHash: string, draft: IDelverNamedSignatureDraft, author?: IAuthor): Promise<IDelverNamedSignature>;
 
 	/** Renames one named signature while preserving its stable id and retained proof. */
-	renameSignature(contentHash: string, signatureId: string, name: string): Promise<IDelverNamedSignature>;
+	renameSignature(contentHash: string, signatureId: string, name: string, author?: IAuthor): Promise<IDelverNamedSignature>;
 
-	/** Permanently removes one named signature from this target revision. */
-	deleteSignature(contentHash: string, signatureId: string): Promise<void>;
+	/** Retires one named signature from this target revision, keeping its record. */
+	deleteSignature(contentHash: string, signatureId: string, author?: IAuthor): Promise<void>;
 
 	/** Named signatures retained for one target revision, sorted by name. */
 	signaturesFor(contentHash: string): readonly IDelverNamedSignature[];
@@ -158,6 +174,19 @@ export interface IDelverProjectService {
 
 	/** Snapshot for the active named project, when it was opened or saved. */
 	projectSnapshot(contentHash: string): IDelverProjectSnapshot | undefined;
+
+	/**
+	 * Answers one address from the project's retained cross-reference table.
+	 *
+	 * This is what lets a `.delverdb` opened without its sample still say who
+	 * references an address. Undefined means these bytes have no open project
+	 * at all — distinct from a project whose retained table is genuinely empty,
+	 * which answers with `total: 0` and `complete: true`.
+	 */
+	retainedXrefs(contentHash: string, address: string, direction: 'to' | 'from', maxXrefs: number): Promise<IDelverRetainedXrefs | undefined>;
+
+	/** Whether the project for these bytes retained a cross-reference table at all. */
+	hasRetainedXrefs(contentHash: string): Promise<boolean>;
 }
 
 /** Renderer coordinator for the shared-process SQLite project store. */
@@ -224,6 +253,7 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 			}
 
 			await this.storeService.saveSnapshot(active.handle.projectId, await this.snapshotFor(session));
+			await this.retainXrefs(active.handle.projectId, session, active.revisionId);
 			await this.storeService.appendInterpretations(
 				active.handle.projectId,
 				this.interpretationService.logFor(session.contentHash).map(editToWire),
@@ -240,9 +270,10 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 				active.handle.projectId,
 				(this.findingDecisions.get(session.contentHash) ?? []).map(delverFindingDecisionToWire),
 			);
-			await this.storeService.upsertSignatures(
+			await this.storeService.appendSignatures(
 				active.handle.projectId,
 				this.signaturesFor(session.contentHash).map(delverNamedSignatureToWire),
+				LOCAL_REVIEWER,
 			);
 			active.snapshot = await this.storeService.loadSnapshot(active.handle.projectId, active.revisionId);
 			this.pendingDecompilations.delete(session.contentHash);
@@ -282,6 +313,7 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 				sourcePath: updated.targetPath,
 			}, snapshot);
 			revisionId = revision.revisionId;
+			await this.retainXrefs(active.handle.projectId, updated, revisionId);
 			await this.storeService.storeFunctionMigrationMappings(active.handle.projectId, matches.map(match => ({
 				sourceRevisionId: active.revisionId,
 				sourceRva: match.source.rva,
@@ -323,9 +355,10 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 				active.handle.projectId,
 				(this.findingDecisions.get(updated.contentHash) ?? []).map(delverFindingDecisionToWire),
 			);
-			await this.storeService.upsertSignatures(
+			await this.storeService.appendSignatures(
 				active.handle.projectId,
 				this.signaturesFor(updated.contentHash).map(delverNamedSignatureToWire),
+				LOCAL_REVIEWER,
 			);
 		} catch (error) {
 			await this.dialogService.error(
@@ -360,6 +393,7 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 				sourcePath: session.targetPath,
 			});
 			await this.storeService.saveSnapshot(handle.projectId, snapshot);
+			await this.retainXrefs(handle.projectId, session, handle.metadata.currentRevisionId);
 			await this.storeService.appendInterpretations(
 				handle.projectId,
 				this.interpretationService.logFor(session.contentHash).map(editToWire),
@@ -376,9 +410,10 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 				handle.projectId,
 				(this.findingDecisions.get(session.contentHash) ?? []).map(delverFindingDecisionToWire),
 			);
-			await this.storeService.upsertSignatures(
+			await this.storeService.appendSignatures(
 				handle.projectId,
 				this.signaturesFor(session.contentHash).map(delverNamedSignatureToWire),
+				LOCAL_REVIEWER,
 			);
 
 			const previous = this.active;
@@ -612,7 +647,7 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 		return this.toolCallsFor(contentHash).find(call => call.callId === callId);
 	}
 
-	saveSignature(contentHash: string, draft: IDelverNamedSignatureDraft): Promise<IDelverNamedSignature> {
+	saveSignature(contentHash: string, draft: IDelverNamedSignatureDraft, author: IAuthor = LOCAL_REVIEWER): Promise<IDelverNamedSignature> {
 		return this.signatureRecords.queue(contentHash, async () => {
 			const retained = [...this.signaturesFor(contentHash)];
 			const existingIndex = retained.findIndex(signature => signature.name.toLowerCase() === draft.name.toLowerCase());
@@ -629,7 +664,7 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 			}
 			const active = this.active?.contentHash === contentHash ? this.active : undefined;
 			if (active) {
-				await this.storeService.upsertSignatures(active.handle.projectId, [delverNamedSignatureToWire(signature)]);
+				await this.storeService.appendSignatures(active.handle.projectId, [delverNamedSignatureToWire(signature)], author);
 			}
 			if (existingIndex < 0) {
 				retained.push(signature);
@@ -646,7 +681,7 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 		});
 	}
 
-	renameSignature(contentHash: string, signatureId: string, name: string): Promise<IDelverNamedSignature> {
+	renameSignature(contentHash: string, signatureId: string, name: string, author: IAuthor = LOCAL_REVIEWER): Promise<IDelverNamedSignature> {
 		return this.signatureRecords.queue(contentHash, async () => {
 			if (name.length === 0 || name.length > DELVER_SIGNATURE_LIMITS.nameCharacters || name.trim() !== name) {
 				throw new Error('Invalid signature name');
@@ -663,7 +698,7 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 			const renamed = delverNamedSignatureFromWire({ ...retained[existingIndex], name, updatedAt: Date.now() });
 			const active = this.active?.contentHash === contentHash ? this.active : undefined;
 			if (active) {
-				await this.storeService.upsertSignatures(active.handle.projectId, [delverNamedSignatureToWire(renamed)]);
+				await this.storeService.appendSignatures(active.handle.projectId, [delverNamedSignatureToWire(renamed)], author);
 			}
 			retained[existingIndex] = renamed;
 			retained.sort(compareSignatureNames);
@@ -676,7 +711,7 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 		});
 	}
 
-	deleteSignature(contentHash: string, signatureId: string): Promise<void> {
+	deleteSignature(contentHash: string, signatureId: string, author: IAuthor = LOCAL_REVIEWER): Promise<void> {
 		return this.signatureRecords.queue(contentHash, async () => {
 			const retained = [...this.signaturesFor(contentHash)];
 			const existingIndex = retained.findIndex(signature => signature.id === signatureId);
@@ -684,7 +719,7 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 				throw new Error('Signature no longer exists');
 			}
 			const active = this.active?.contentHash === contentHash ? this.active : undefined;
-			if (active && !await this.storeService.deleteSignature(active.handle.projectId, contentHash, signatureId)) {
+			if (active && !await this.storeService.retireSignature(active.handle.projectId, contentHash, signatureId, author)) {
 				throw new Error('Signature no longer exists in the project');
 			}
 			retained.splice(existingIndex, 1);
@@ -801,7 +836,7 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 				return;
 			}
 			const alreadyProposed = this.interpretationService.pendingProposals(contentHash).some(proposal =>
-				proposal.anchor.rva === targetAnchor.rva
+				anchorKey(proposal.anchor) === anchorKey(targetAnchor)
 				&& proposal.op === op
 				&& proposal.author.kind === author.kind
 				&& proposal.author.id === author.id
@@ -826,6 +861,61 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 
 	projectSnapshot(contentHash: string): IDelverProjectSnapshot | undefined {
 		return this.active?.contentHash === contentHash ? this.active.snapshot : undefined;
+	}
+
+	async retainedXrefs(contentHash: string, address: string, direction: 'to' | 'from', maxXrefs: number): Promise<IDelverRetainedXrefs | undefined> {
+		const active = this.active;
+		if (active?.contentHash !== contentHash) {
+			return undefined;
+		}
+		return this.storeService.loadXrefs(active.handle.projectId, address, direction, maxXrefs, active.revisionId);
+	}
+
+	async hasRetainedXrefs(contentHash: string): Promise<boolean> {
+		const active = this.active;
+		if (active?.contentHash !== contentHash) {
+			return false;
+		}
+		return this.storeService.hasRetainedXrefs(active.handle.projectId, active.revisionId);
+	}
+
+	/**
+	 * Retains the analysis server's cross-reference table for one revision.
+	 *
+	 * Called beside `saveSnapshot` rather than folded into it because the table
+	 * is a real SQLite table and not one of the five opaque payloads
+	 * ([ADR 0012](../../../../../../Docs/history/adr/0012-retained-xref-table-in-portable-projects.md)).
+	 *
+	 * A session with no live bytes exports nothing and, crucially, *writes*
+	 * nothing: re-saving an offline project must leave the table it was opened
+	 * with intact rather than replacing it with an empty one.
+	 *
+	 * The walk is bounded. If it stops early the table is still retained, but
+	 * recorded as incomplete, so a later lookup reports `partial` instead of an
+	 * authoritative zero for an address the export never reached.
+	 */
+	private async retainXrefs(projectId: string, session: IDelverProjectSession, revisionId?: string): Promise<void> {
+		if (!session.sessionId) {
+			return;
+		}
+		const xrefs: IXrefWire[] = [];
+		let start = 0;
+		let complete = false;
+		for (let page = 0; page < XREF_EXPORT_MAX_PAGES; page++) {
+			const result = await this.analysisService.xrefIndex(session.sessionId, start, 0);
+			xrefs.push(...result.xrefs);
+			if (result.next_start === undefined) {
+				complete = true;
+				break;
+			}
+			// A page that returns nothing while still claiming a continuation
+			// would spin forever; treat it as the end of what can be retained.
+			if (result.xrefs.length === 0) {
+				break;
+			}
+			start = result.next_start;
+		}
+		await this.storeService.saveXrefs(projectId, xrefs, complete, revisionId);
 	}
 
 	private async snapshotFor(session: IDelverProjectSession): Promise<IDelverProjectSnapshotUpdate> {

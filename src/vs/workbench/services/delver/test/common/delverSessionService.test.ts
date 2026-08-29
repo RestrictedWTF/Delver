@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as assert from 'assert';
+import { DeferredPromise } from '../../../../../base/common/async.js';
 import { CancellationError } from '../../../../../base/common/errors.js';
 import { Event } from '../../../../../base/common/event.js';
 import { URI } from '../../../../../base/common/uri.js';
@@ -13,7 +14,10 @@ import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/tes
 import { getSingletonServiceDescriptors } from '../../../../../platform/instantiation/common/extensions.js';
 import { IDelverAnalysisService } from '../../../../../platform/delver/common/delverAnalysisService.js';
 import { DelverFindingOutcome, IDelverFinding, IDelverFindingDecision, IDelverFindingDraft } from '../../../../../platform/delver/common/findings.js';
-import { IDelverProjectSnapshot } from '../../../../../platform/delver/common/delverProjectStoreService.js';
+import { Emitter } from '../../../../../base/common/event.js';
+import { IFunctionCorrectionWire } from '../../../../../platform/delver/common/protocol.generated.js';
+import { Anchor, anchorKey, EditOp, EditStatus, IEdit, IInterpretationAt } from '../../../../../platform/delver/common/interpretation.js';
+import { IDelverProjectSnapshot, IDelverRetainedXrefs } from '../../../../../platform/delver/common/delverProjectStoreService.js';
 import { IDelverToolCallRecord } from '../../../../../platform/delver/common/delverToolCall.js';
 import { IDelverNamedSignature, IDelverNamedSignatureDraft } from '../../../../../platform/delver/common/delverSignature.js';
 import { MockContextKeyService } from '../../../../../platform/keybinding/test/common/mockKeybindingService.js';
@@ -34,12 +38,32 @@ class FakeAnalysisService implements Partial<IDelverAnalysisService> {
 	readonly closed: string[] = [];
 	contentHash: string | undefined = 'a'.repeat(64);
 	readonly openErrors = new Set<string>();
+	/** Correction sets pushed to the server, in the order they were applied. */
+	readonly correctionSets: { readonly sessionId: string; readonly corrections: readonly IFunctionCorrectionWire[] }[] = [];
+	/** Held to stop an open mid-flight, when a pair exists but is not adopted. */
+	openGate: DeferredPromise<void> | undefined;
+	readonly openReachedGate = new DeferredPromise<void>();
 	private next = 1;
+
+	async setCorrections(sessionId: string, corrections: readonly IFunctionCorrectionWire[]) {
+		this.correctionSets.push({ sessionId, corrections });
+		return {
+			image_id: sessionId,
+			function_count_before: 0,
+			function_count: corrections.length,
+			instruction_count: 0,
+			corrections_applied: corrections.length,
+		};
+	}
 
 	async openImage(config: { kind: 'file'; path: string }) {
 		this.opened.push(config.path);
 		if (this.openErrors.has(config.path)) {
 			throw new Error('target unavailable');
+		}
+		if (this.openGate) {
+			await this.openReachedGate.complete();
+			await this.openGate.p;
 		}
 		return {
 			sessionId: `session-${this.next++}`,
@@ -50,6 +74,11 @@ class FakeAnalysisService implements Partial<IDelverAnalysisService> {
 				function_count: 2,
 				xref_count: 3,
 				string_count: 4,
+				bytes_read: '0x1000',
+				coverage_complete: true,
+				decoding: { kind: 'decoded' as const },
+				fully_parsed: true,
+				unreadable_ranges: [],
 			},
 		};
 	}
@@ -67,11 +96,33 @@ class FakeInterpretationService implements Partial<IDelverInterpretationService>
 	readonly loaded: string[] = [];
 	loadError: Error | undefined;
 
+	/** Accepted corrections this image should be re-derived against. */
+	readonly corrections = new Map<string, IEdit[]>();
+	private readonly _onDidChange = new Emitter<{ readonly edit: IEdit }>();
+	readonly onDidChange = this._onDidChange.event;
+
+	/** Records an accepted edit and announces it, as the real service does. */
+	accept(edit: IEdit): void {
+		const log = this.corrections.get(edit.anchor.contentHash) ?? [];
+		log.push(edit);
+		this.corrections.set(edit.anchor.contentHash, log);
+		this._onDidChange.fire({ edit });
+	}
+
 	async load(contentHash: string): Promise<void> {
 		this.loaded.push(contentHash);
 		if (this.loadError) {
 			throw this.loadError;
 		}
+	}
+
+	logFor(contentHash: string): readonly IEdit[] {
+		return this.corrections.get(contentHash) ?? [];
+	}
+
+	at(anchor: Anchor): IInterpretationAt | undefined {
+		const edit = this.logFor(anchor.contentHash).find(candidate => anchorKey(candidate.anchor) === anchorKey(anchor));
+		return edit === undefined ? undefined : { functionBounds: String(edit.value) };
 	}
 }
 
@@ -148,6 +199,9 @@ class FakeProjectLifecycleDelegate implements IDelverProjectService {
 	projectSnapshot(contentHash: string): IDelverProjectSnapshot | undefined {
 		return this.openedProject?.contentHash === contentHash ? this.openedProject.snapshot : undefined;
 	}
+
+	async retainedXrefs(): Promise<IDelverRetainedXrefs | undefined> { return undefined; }
+	async hasRetainedXrefs(): Promise<boolean> { return false; }
 }
 
 class FakeDialogService extends TestDialogService {
@@ -218,6 +272,85 @@ suite('DelverSessionService', () => {
 		);
 	});
 
+	test('re-derives an opened image against its accepted corrections, before anyone sees it', async () => {
+		// The facts live in the analysis server, so a correction only the
+		// renderer knew about would leave every xref, block and call graph
+		// computed as though it had not been made. It is pushed during open, not
+		// after, so no caller reads the uncorrected facts of an image the analyst
+		// has already corrected.
+		const { service, analysis, interpretation } = createService(store);
+		const contentHash = 'a'.repeat(64);
+		interpretation.corrections.set(contentHash, [{
+			seq: 1,
+			at: 0,
+			author: { kind: 'human', id: 'analyst' },
+			anchor: { kind: 'image', contentHash, rva: 0x1400n },
+			op: EditOp.FunctionBounds,
+			value: JSON.stringify({ kind: 'define', endRva: '0x1480' }),
+			status: EditStatus.Accepted,
+		}]);
+
+		await service.openTarget('C:\\samples\\corrected.exe');
+
+		assert.deepStrictEqual(analysis.correctionSets.map(entry => entry.corrections), [[
+			{ rva: '0x1400', kind: 'define', end_rva: '0x1480' },
+		]]);
+	});
+
+	test('says nothing to the server about an image that has no corrections', async () => {
+		// A re-analysis that changes nothing is pure cost, and the common case is
+		// an image nobody has corrected.
+		const { service, analysis } = createService(store);
+
+		await service.openTarget('C:\\samples\\plain.exe');
+
+		assert.deepStrictEqual(analysis.correctionSets, []);
+	});
+
+	test('re-derives an open image when a correction is accepted, and not when one is only proposed', async () => {
+		// Without this a correction takes effect only on the next open: the
+		// analyst accepts it, the disclosure says what it did, and every fact
+		// they then read is still derived from the uncorrected seeds. A proposal
+		// changes nothing, so re-analysing on one would spend a full pass to
+		// arrive at exactly the facts already in hand.
+		const { service, analysis, interpretation } = createService(store);
+		const contentHash = 'a'.repeat(64);
+		await service.openTarget('C:\\samples\\live.exe');
+
+		const edit = (status: EditStatus, rva: bigint): IEdit => ({
+			seq: 1,
+			at: 0,
+			author: { kind: 'human', id: 'analyst' },
+			anchor: { kind: 'image', contentHash, rva },
+			op: EditOp.FunctionBounds,
+			value: JSON.stringify({ kind: 'undefine' }),
+			status,
+		});
+
+		const rederived: IDelverSession[] = [];
+		store.add(service.onDidRederiveFacts(session => rederived.push(session)));
+
+		interpretation.accept(edit(EditStatus.Proposed, 0x2000n));
+		const afterProposal = analysis.correctionSets.length;
+		interpretation.accept(edit(EditStatus.Accepted, 0x2000n));
+		// Yield so the un-awaited re-derivation runs.
+		await new Promise(resolve => setTimeout(resolve, 0));
+
+		assert.deepStrictEqual({
+			pushedOnProposal: afterProposal,
+			pushedAfterAccept: analysis.correctionSets.map(entry => entry.corrections),
+			// Announced after the server re-derived, not before. Without this
+			// the facts change and every view keeps showing the previous
+			// derivation — the one op whose whole purpose is re-derivation was
+			// the one op nothing watched.
+			announced: rederived.map(session => session.contentHash),
+		}, {
+			pushedOnProposal: 0,
+			pushedAfterAccept: [[{ rva: '0x2000', kind: 'undefine' }]],
+			announced: [contentHash],
+		});
+	});
+
 	test('opening a target publishes it with its content hash', async () => {
 		const { service, interpretation } = createService(store);
 		const seen: (string | undefined)[] = [];
@@ -240,6 +373,28 @@ suite('DelverSessionService', () => {
 		assert.deepStrictEqual(
 			{ saved, calls: projectLifecycle.saved, path: service.projectPath, dirty: service.isProjectDirty },
 			{ saved: true, calls: ['C:\\samples\\a.exe'], path: 'C:\\projects\\saved.delverdb', dirty: false },
+		);
+	});
+
+	test('a saved project path reaches the session, not only the entry', async () => {
+		// Panes, the workspace editor input and the agent all read the path off
+		// the session. Recording a Save As on the entry alone leaves every one
+		// of them naming the project the analyst just moved away from.
+		const { service } = createService(store);
+		await service.openTarget('C:\\samples\\a.exe');
+		const seen: (string | undefined)[] = [];
+		store.add(service.onDidChangeActiveSession(session => seen.push(session?.projectPath)));
+
+		service.markProjectSaved('C:\\projects\\a.delverdb');
+
+		assert.deepStrictEqual(
+			{ session: service.activeSession?.projectPath, path: service.projectPath, dirty: service.isProjectDirty, seen },
+			{
+				session: 'C:\\projects\\a.delverdb',
+				path: 'C:\\projects\\a.delverdb',
+				dirty: false,
+				seen: ['C:\\projects\\a.delverdb'],
+			},
 		);
 	});
 
@@ -379,6 +534,79 @@ suite('DelverSessionService', () => {
 			opened: ['C:\\samples\\wrong.exe'],
 			closed: ['session-1'],
 		});
+	});
+
+	test('locating a target rekeys the offline project session to the selected target', async () => {
+		const { service, analysis, projectLifecycle } = createService(store);
+		const hash = 'b'.repeat(64);
+		const projectPath = 'C:\\workspace\\offline.delverdb';
+		const locatedPath = 'C:\\workspace\\bin\\located.exe';
+		analysis.contentHash = hash;
+		projectLifecycle.openedProject = { ...openedProject(hash, 'C:\\missing\\offline.exe'), path: projectPath };
+		await service.openProject(projectPath);
+
+		const attached = await service.attachTarget(locatedPath);
+		await service.openTarget('C:\\workspace\\bin\\other.exe');
+		service.setActiveTarget(locatedPath);
+
+		assert.deepStrictEqual({
+			attached: { targetPath: attached.targetPath, projectPath: attached.projectPath },
+			active: { targetPath: service.activeSession?.targetPath, projectPath: service.activeSession?.projectPath },
+		}, {
+			attached: { targetPath: locatedPath, projectPath },
+			active: { targetPath: locatedPath, projectPath },
+		});
+	});
+
+	test('locating a target waits for an in-flight open', async () => {
+		// Locating starts a provider pair exactly as opening does, so it belongs
+		// in the same queue. Off the queue it decides against a session the open
+		// is about to replace, and the pair it started answers for nobody.
+		const { service, analysis } = createService(store);
+		analysis.openGate = new DeferredPromise<void>();
+		const open = service.openTarget('C:\\samples\\a.exe');
+		await analysis.openReachedGate.p;
+
+		const attach = service.attachTarget('C:\\samples\\b.exe').then(() => 'attached', error => error.message);
+		const duringOpen = [...analysis.opened];
+		analysis.openGate.complete();
+		await open;
+
+		assert.deepStrictEqual(
+			{ duringOpen, opened: analysis.opened, attach: await attach },
+			{
+				duringOpen: ['C:\\samples\\a.exe'],
+				opened: ['C:\\samples\\a.exe'],
+				attach: 'Open a Delver project before locating its target.',
+			},
+		);
+	});
+
+	test('locating a target releases a pair it cannot install', async () => {
+		// The candidate is analysed before it can be adopted, and the project it
+		// was located for can go away in between. Dropping it there orphans a
+		// provider pair that keeps the sample mapped for the rest of the session.
+		const { service, analysis, projectLifecycle } = createService(store);
+		const hash = 'b'.repeat(64);
+		analysis.contentHash = hash;
+		projectLifecycle.openedProject = openedProject(hash, 'C:\\missing\\offline.exe');
+		await service.openProject('C:\\projects\\offline.delverdb');
+
+		analysis.openGate = new DeferredPromise<void>();
+		const attach = service.attachTarget('C:\\samples\\located.exe').then(() => 'attached', error => error.message);
+		await analysis.openReachedGate.p;
+		await service.closeTarget();
+		analysis.openGate.complete();
+
+		assert.deepStrictEqual(
+			{ attach: await attach, opened: analysis.opened, closed: analysis.closed, active: service.activeSession },
+			{
+				attach: 'The project this target was located for is no longer open.',
+				opened: ['C:\\samples\\located.exe'],
+				closed: ['session-1'],
+				active: undefined,
+			},
+		);
 	});
 
 	test('a stale provider without a content hash closes with an actionable error', async () => {
@@ -663,6 +891,24 @@ suite('DelverSessionService', () => {
 		assert.deepStrictEqual(
 			{ veto: await veto, active: service.activeSession?.targetPath, dirty: service.isProjectDirty },
 			{ veto: true, active: 'C:\\samples\\a.exe', dirty: true },
+		);
+	});
+
+	test('shutdown releases every open target before the window goes', async () => {
+		// The provider pairs outlive the window unless something closes them,
+		// and a release the window does not wait for is a release that may
+		// never be sent — leaving a child with the sample still mapped.
+		const { service, analysis, lifecycle } = createService(store);
+		await service.openTarget('C:\\samples\\a.exe');
+		await service.openTarget('C:\\samples\\b.exe');
+
+		lifecycle.fireShutdown();
+		const joiners = lifecycle.shutdownJoiners.length;
+		await Promise.all(lifecycle.shutdownJoiners);
+
+		assert.deepStrictEqual(
+			{ joiners, closed: analysis.closed, active: service.activeSession },
+			{ joiners: 1, closed: ['session-1', 'session-2'], active: undefined },
 		);
 	});
 

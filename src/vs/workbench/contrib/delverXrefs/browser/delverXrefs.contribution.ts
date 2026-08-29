@@ -4,10 +4,11 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { onUnexpectedError } from '../../../../base/common/errors.js';
+import { Disposable } from '../../../../base/common/lifecycle.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
 import { IDelverAnalysisService } from '../../../../platform/delver/common/delverAnalysisService.js';
-import { EditOp } from '../../../../platform/delver/common/interpretation.js';
+import { EditOp, isImageAnchor } from '../../../../platform/delver/common/interpretation.js';
 import { IFunctionWire } from '../../../../platform/delver/common/protocol.generated.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
@@ -41,7 +42,7 @@ const FOCUS_ORIGIN = 'delver.view.xrefs';
  * Follows the focus bus rather than the listing directly, so it works for any
  * view that publishes a location.
  */
-class DelverXrefsViewContribution {
+export class DelverXrefsViewContribution extends Disposable {
 	constructor(
 		@IInstantiationService instantiationService: IInstantiationService,
 		@IDelverFocusService focusService: IDelverFocusService,
@@ -49,7 +50,8 @@ class DelverXrefsViewContribution {
 		@IDelverAnalysisService analysisService: IDelverAnalysisService,
 		@IDelverInterpretationService interpretationService: IDelverInterpretationService,
 	) {
-		const treeView = instantiationService.createInstance(TreeView, DELVER_XREFS_VIEW_ID, viewName.value);
+		super();
+		const treeView = this._register(instantiationService.createInstance(TreeView, DELVER_XREFS_VIEW_ID, viewName.value));
 		const dataProvider = new DelverXrefsTreeDataProvider();
 		treeView.dataProvider = dataProvider;
 
@@ -65,22 +67,22 @@ class DelverXrefsViewContribution {
 			collapsed: false,
 			order: 70,
 		};
-		registerDelverTreeSurface(DelverSurfaceId.Xrefs, DelverZone.Inspector, viewDescriptor);
+		this._register(registerDelverTreeSurface(DelverSurfaceId.Xrefs, DelverZone.Inspector, viewDescriptor));
 
-		viewsRegistry.registerViewWelcomeContent(DELVER_XREFS_VIEW_ID, {
+		this._register(viewsRegistry.registerViewWelcomeContent(DELVER_XREFS_VIEW_ID, {
 			content: localize(
 				'delverXrefsNoTargetWelcome',
 				"Open a target to inspect its references.\n[Open Target](command:delver.target.open)",
 			),
 			when: DELVER_TARGET_OPEN.toNegated(),
-		});
-		viewsRegistry.registerViewWelcomeContent(DELVER_XREFS_VIEW_ID, {
+		}));
+		this._register(viewsRegistry.registerViewWelcomeContent(DELVER_XREFS_VIEW_ID, {
 			content: localize(
 				'delverXrefsNoAddressWelcome',
 				"Select an address in the listing to see its incoming and outgoing references.",
 			),
 			when: DELVER_TARGET_OPEN,
-		});
+		}));
 
 		/** Guards against a slow lookup overwriting a newer one. */
 		let generation = 0;
@@ -116,15 +118,16 @@ class DelverXrefsViewContribution {
 			}
 		};
 
-		sessionService.onDidChangeActiveSession(() => {
+		this._register(sessionService.onDidChangeActiveSession(() => {
 			generation++;
 			dataProvider.setContent(undefined);
 			treeView.refresh().catch(onUnexpectedError);
 			void loadFunctions();
-		});
-		interpretationService.onDidChange(event => {
+		}));
+		this._register(interpretationService.onDidChange(event => {
 			const session = sessionService.activeSession;
-			if (!session || event.edit.op !== EditOp.Rename || event.edit.anchor.contentHash !== session.contentHash) {
+			if (!session || event.edit.op !== EditOp.Rename || event.edit.anchor.contentHash !== session.contentHash
+				|| !isImageAnchor(event.edit.anchor)) {
 				return;
 			}
 			const rva = event.edit.anchor.rva;
@@ -136,7 +139,7 @@ class DelverXrefsViewContribution {
 			}
 			dataProvider.setNames(names);
 			treeView.refresh().catch(onUnexpectedError);
-		});
+		}));
 
 		if (sessionService.activeSession) {
 			loadFunctions();
@@ -146,7 +149,7 @@ class DelverXrefsViewContribution {
 		// the focus, and this panel must then show references for where it just
 		// sent everyone — unlike a view that scrolls, answering a question about
 		// a new address cannot feed back into another focus change.
-		focusService.onDidChangeFocus(async e => {
+		this._register(focusService.onDidChangeFocus(async e => {
 			const session = sessionService.activeSession;
 			const location = e.focus.location;
 			const token = ++generation;
@@ -178,7 +181,7 @@ class DelverXrefsViewContribution {
 				onUnexpectedError(error);
 			}
 			treeView.refresh().catch(onUnexpectedError);
-		});
+		}));
 	}
 }
 

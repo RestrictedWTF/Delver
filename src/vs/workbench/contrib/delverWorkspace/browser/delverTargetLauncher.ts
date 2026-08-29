@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as dom from '../../../../base/browser/dom.js';
+import { DisposableStore, MutableDisposable } from '../../../../base/common/lifecycle.js';
 import { basename } from '../../../../base/common/path.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
@@ -39,6 +40,12 @@ export class DelverTargetLauncherView extends ViewPane {
 
 	private list!: HTMLElement;
 	private readonly recents: DelverRecentTargetsStore;
+	/**
+	 * The rows are rebuilt on every editor change, so their listeners belong to
+	 * the render rather than to the pane. Registered on the pane they accumulated
+	 * one dead listener per row per refresh, for as long as the sidebar lived.
+	 */
+	private readonly rowDisposables = this._register(new MutableDisposable<DisposableStore>());
 
 	constructor(
 		options: IViewletViewOptions,
@@ -80,6 +87,8 @@ export class DelverTargetLauncherView extends ViewPane {
 	}
 
 	private refresh(): void {
+		const store = new DisposableStore();
+		this.rowDisposables.value = store;
 		dom.clearNode(this.list);
 
 		const openPaths = new Set<string>();
@@ -90,14 +99,14 @@ export class DelverTargetLauncherView extends ViewPane {
 		}
 
 		if (openPaths.size > 0) {
-			this.appendSection(localize('delverLauncherOpenTargets', "Open Targets"), [...openPaths]);
+			this.appendSection(store, localize('delverLauncherOpenTargets', "Open Targets"), [...openPaths]);
 		}
 
 		// A target that is already open is not a "recent" one — showing it twice
 		// makes the two lists look like they disagree about what is loaded.
 		const recent = this.recents.list().filter(path => !openPaths.has(path));
 		if (recent.length > 0) {
-			this.appendSection(localize('delverLauncherRecent', "Recent"), recent);
+			this.appendSection(store, localize('delverLauncherRecent', "Recent"), recent);
 		}
 
 		if (openPaths.size === 0 && recent.length === 0) {
@@ -106,7 +115,7 @@ export class DelverTargetLauncherView extends ViewPane {
 		}
 	}
 
-	private appendSection(title: string, paths: readonly string[]): void {
+	private appendSection(store: DisposableStore, title: string, paths: readonly string[]): void {
 		const heading = dom.append(this.list, dom.$('.delver-launcher-heading'));
 		heading.textContent = title;
 		for (const path of paths) {
@@ -117,7 +126,7 @@ export class DelverTargetLauncherView extends ViewPane {
 			// rather than being the label.
 			row.textContent = basename(path);
 			row.title = path;
-			this._register(dom.addDisposableListener(row, dom.EventType.CLICK, () => {
+			store.add(dom.addDisposableListener(row, dom.EventType.CLICK, () => {
 				void this.editorService.openEditor(this.instantiationService.createInstance(DelverWorkspaceInput, path));
 			}));
 		}

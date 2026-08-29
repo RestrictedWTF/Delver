@@ -68,6 +68,31 @@ describe('Private DTP relay provisioner', () => {
 		await fixture.provisioner.dispose();
 	});
 
+	it('escalates to a forced kill and still completes closure when the child never exits', async () => {
+		const fixture = createFixture();
+		const pending = fixture.provisioner.provision(new AbortController().signal);
+		fixture.processes[0].emitStderr(READY);
+		await pending;
+
+		let settled = false;
+		const closed = fixture.provisioner.closeAll().then(() => { settled = true; });
+		await settlePromises();
+		assert.deepStrictEqual({ settled, timers: fixture.timers.pendingDelays() }, { settled: false, timers: [2_000] });
+
+		fixture.timers.runDelay(2_000);
+		await settlePromises();
+		assert.deepStrictEqual({
+			settled,
+			forced: fixture.processes[0].forcedTerminateCount,
+			timers: fixture.timers.pendingDelays(),
+		}, { settled: false, forced: 1, timers: [1_000] });
+
+		fixture.timers.runDelay(1_000);
+		await closed;
+		assert.deepStrictEqual({ cleanup: fixture.cleanupCounts[0], timers: fixture.timers.pendingDelays() }, { cleanup: 1, timers: [] });
+		await fixture.provisioner.dispose();
+	});
+
 	it('cancels active gateway work when the root closes', async () => {
 		const fixture = createFixture();
 		const pending = fixture.provisioner.provision(new AbortController().signal);

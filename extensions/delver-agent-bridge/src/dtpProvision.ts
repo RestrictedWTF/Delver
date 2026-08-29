@@ -12,6 +12,8 @@ import { RelayProcessTransport } from './relayTransport';
 import { DtpTokenLeaseStore } from './tokenLease';
 
 const DEFAULT_READY_TIMEOUT_MS = 5_000;
+const DEFAULT_FORCED_EXIT_TIMEOUT_MS = 2_000;
+const DEFAULT_ABANDON_EXIT_TIMEOUT_MS = 1_000;
 
 export interface IDtpRelayProvisionerOptions {
 	readonly executable: string;
@@ -71,6 +73,7 @@ export class DelverDtpRelayProvisioner {
 				transport,
 				connection,
 				closed => this.provisions.delete(closed),
+				this.options.timers ?? defaultTimers,
 			);
 			this.provisions.add(provision);
 			const handleAbort = () => provision?.dispose();
@@ -140,17 +143,23 @@ export class DelverDtpRelayProvision implements IBootstrapProvision {
 	private readonly removeProcessExitListener: () => void;
 	private readonly removeProcessErrorListener: () => void;
 	private removeStderrListener: () => void = () => { };
+	private exitTimer: object | undefined;
 	private processExited = false;
+	private processAbandoned = false;
+	private cleanupStarted = false;
 	private closed = false;
 
 	constructor(
 		readonly endpoint: string,
 		readonly endpointGeneration: string,
 		private readonly cleanup: () => Promise<void>,
-		process: IRelayProcess,
+		private readonly process: IRelayProcess,
 		private readonly transport: RelayProcessTransport,
 		private readonly connection: DelverDtpConnection,
 		private readonly onClosed: (provision: DelverDtpRelayProvision) => void = () => { },
+		private readonly timers: IRelayTimers = defaultTimers,
+		private readonly forcedExitTimeoutMs: number = DEFAULT_FORCED_EXIT_TIMEOUT_MS,
+		private readonly abandonExitTimeoutMs: number = DEFAULT_ABANDON_EXIT_TIMEOUT_MS,
 	) {
 		this.closedPromise = new Promise(resolve => this.resolveClosed = resolve);
 		this.removeTransportCloseListener = transport.onClose(() => this.beginClose());
@@ -215,12 +224,37 @@ export class DelverDtpRelayProvision implements IBootstrapProvision {
 		}
 		this.closeListeners.clear();
 		this.onClosed(this);
+		this.armExitEscalation();
 		this.finishCleanupAfterExit();
 	}
 
-	private finishCleanupAfterExit(): void {
-		if (!this.closed || !this.processExited) {
+	/**
+	 * Bounds the wait for the child to exit. A relay that ignores the graceful
+	 * signal is killed outright, and cleanup completes even if it never exits —
+	 * deactivation awaits `whenClosed()` and must not hang on a wedged child.
+	 */
+	private armExitEscalation(): void {
+		if (this.processExited || this.exitTimer) {
 			return;
+		}
+		this.exitTimer = this.timers.setTimeout(() => {
+			this.exitTimer = this.timers.setTimeout(() => {
+				this.exitTimer = undefined;
+				this.processAbandoned = true;
+				this.finishCleanupAfterExit();
+			}, this.abandonExitTimeoutMs);
+			this.process.terminate(true);
+		}, this.forcedExitTimeoutMs);
+	}
+
+	private finishCleanupAfterExit(): void {
+		if (this.cleanupStarted || !this.closed || (!this.processExited && !this.processAbandoned)) {
+			return;
+		}
+		this.cleanupStarted = true;
+		if (this.exitTimer) {
+			this.timers.clearTimeout(this.exitTimer);
+			this.exitTimer = undefined;
 		}
 		this.removeProcessExitListener();
 		this.removeProcessErrorListener();

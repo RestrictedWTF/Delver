@@ -25,7 +25,7 @@ import { DelverSignaturesTreeDataProvider } from './delverSignaturesView.js';
 const viewName = localize2('delverSignatures', "Signatures");
 
 /** Registers the signature search and durable evidence view. */
-class DelverSignaturesViewContribution extends Disposable {
+export class DelverSignaturesViewContribution extends Disposable {
 	constructor(
 		@IInstantiationService instantiationService: IInstantiationService,
 		@IDelverSessionService sessionService: IDelverSessionService,
@@ -33,7 +33,7 @@ class DelverSignaturesViewContribution extends Disposable {
 		@IDelverSignaturesStateService stateService: IDelverSignaturesStateService,
 	) {
 		super();
-		const treeView = instantiationService.createInstance(TreeView, DELVER_SIGNATURES_VIEW_ID, viewName.value);
+		const treeView = this._register(instantiationService.createInstance(TreeView, DELVER_SIGNATURES_VIEW_ID, viewName.value));
 		const dataProvider = new DelverSignaturesTreeDataProvider();
 		treeView.dataProvider = dataProvider;
 		const viewDescriptor: ITreeViewDescriptor = {
@@ -46,21 +46,21 @@ class DelverSignaturesViewContribution extends Disposable {
 			collapsed: false,
 			order: 75,
 		};
-		registerDelverTreeSurface(DelverSurfaceId.Signatures, DelverZone.Inspector, viewDescriptor);
+		this._register(registerDelverTreeSurface(DelverSurfaceId.Signatures, DelverZone.Inspector, viewDescriptor));
 
 		const viewsRegistry = Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry);
-		viewsRegistry.registerViewWelcomeContent(DELVER_SIGNATURES_VIEW_ID, {
+		this._register(viewsRegistry.registerViewWelcomeContent(DELVER_SIGNATURES_VIEW_ID, {
 			content: localize('delverSignaturesNoTarget', "Open a target or project to inspect signatures.\n[Open Target](command:delver.target.open) [Open Project](command:delver.project.open)"),
 			when: DELVER_TARGET_OPEN.toNegated(),
-		});
-		viewsRegistry.registerViewWelcomeContent(DELVER_SIGNATURES_VIEW_ID, {
+		}));
+		this._register(viewsRegistry.registerViewWelcomeContent(DELVER_SIGNATURES_VIEW_ID, {
 			content: localize('delverSignaturesAttachedWelcome', "Search for an IDA-style byte pattern, scan signatures from earlier project revisions, or select a listing instruction to generate one.\n[Search Byte Pattern...](command:delver.signatures.search) [Scan Earlier Signatures](command:delver.signatures.scanRevisions)"),
 			when: DELVER_TARGET_ATTACHED,
-		});
-		viewsRegistry.registerViewWelcomeContent(DELVER_SIGNATURES_VIEW_ID, {
+		}));
+		this._register(viewsRegistry.registerViewWelcomeContent(DELVER_SIGNATURES_VIEW_ID, {
 			content: localize('delverSignaturesOfflineWelcome', "No signatures are saved for this project revision. Attach its sample to search or generate signatures.\n[Locate Target...](command:delver.project.locateTarget)"),
 			when: ContextKeyExpr.and(DELVER_TARGET_OPEN, DELVER_TARGET_ATTACHED.toNegated()),
-		});
+		}));
 
 		const update = () => {
 			const session = sessionService.activeSession;

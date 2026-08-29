@@ -16,6 +16,7 @@ export class TestRelayProcess implements IRelayProcess {
 	readonly writeResults: boolean[] = [];
 	endCount = 0;
 	terminateCount = 0;
+	forcedTerminateCount = 0;
 
 	write(data: Buffer, callback: (error?: Error | null) => void): boolean {
 		this.writes.push({ data: Buffer.from(data), callback });
@@ -55,8 +56,11 @@ export class TestRelayProcess implements IRelayProcess {
 		return () => this.errorListeners.delete(listener);
 	}
 
-	terminate(): void {
+	terminate(force = false): void {
 		this.terminateCount++;
+		if (force) {
+			this.forcedTerminateCount++;
+		}
 	}
 
 	emitStdout(data: string | Buffer): void {

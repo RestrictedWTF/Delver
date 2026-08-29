@@ -34,6 +34,7 @@ suite('DelverListingMetadata', () => {
 	test('summarizes the available target and section metadata', () => {
 		const info: IGetImageInfoResult = {
 			arch: 'x86_64',
+			subsystem: { kind: 'console' },
 			content_hash: 'ab'.repeat(32),
 			entry: '0x1010',
 			export_count: 0,
@@ -42,6 +43,17 @@ suite('DelverListingMetadata', () => {
 			import_module_count: 1,
 			import_symbol_count: 2,
 			relocation_count: 3,
+			fully_parsed: true,
+			imports_failed: false,
+			imports_truncated: false,
+			exports_failed: false,
+			exports_truncated: false,
+			exception_directory_failed: false,
+			function_seeds_truncated: false,
+			relocations_failed: false,
+			relocations_truncated: false,
+			tls_failed: false,
+			section_names_unreadable: false,
 			sections: [textSection],
 		};
 

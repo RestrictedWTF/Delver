@@ -168,7 +168,49 @@ suite('DecompilerWorkerHost', () => {
 		assert.deepStrictEqual({ completed, kills }, { completed: true, kills: 0 });
 		host.dispose();
 	});
+
+	test('escalates to SIGKILL only after a worker ignores the closed input and the signal', async () => {
+		const process = createFakeProcess(helloResponse);
+		const signals: (NodeJS.Signals | number | undefined)[] = [];
+		process.child.kill = (signal?: NodeJS.Signals | number) => {
+			signals.push(signal);
+			(process.child as { killed: boolean }).killed = true;
+			return true;
+		};
+		const host = new DecompilerWorkerHost({ command: 'python', args: [], options: {} }, () => process.child, 30_000, 1);
+		await host.start();
+
+		await host.shutdown();
+
+		assert.deepStrictEqual(signals, [undefined, 'SIGKILL']);
+		host.dispose();
+	});
+
+	test('fails one request instead of the process when the worker input pipe breaks', async () => {
+		const process = createFakeProcess(helloResponse);
+		const host = new DecompilerWorkerHost({ command: 'python', args: [], options: {} }, () => process.child, 30_000, 1);
+		await host.start();
+		// A worker that died without being reaped still looks writable, and the
+		// broken pipe is reported on the stream rather than on the child. Before
+		// the stream had an `error` listener this took the shared process with it.
+		process.child.stdin.destroy();
+
+		await assert.rejects(host.request('decompileFunction', {}, CancellationToken.None), /input stream failed/);
+		host.dispose();
+	});
 });
+
+function helloResponse(request: IFakeRequest): IFakeResponse {
+	return {
+		protocolVersion: 1,
+		id: request.id,
+		result: {
+			protocolVersion: 1,
+			backend: { id: 'fake', label: 'Fake', version: '1' },
+			capabilities: { decompileFunction: true, cancel: true, persistentTargets: true, addressMappings: true, variables: true, intermediateRepresentations: [] },
+		},
+	};
+}
 
 interface IFakeRequest {
 	readonly id: string;

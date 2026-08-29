@@ -14,14 +14,17 @@ suite('Delver imports filtering', () => {
 	test('matches module names and symbol fields while preserving original RVAs', async () => {
 		const provider = new DelverImportsTreeDataProvider();
 		provider.setImports({
+			failed: false,
+			module_total: 2,
+			truncated: false,
 			modules: [
 				{
 					name: 'KERNEL32.dll', symbols: [
-						{ name: 'CreateFileW', iat_rva: '0x3000' },
-						{ name: 'ReadFile', iat_rva: '0x3008' },
-					]
+						{ name: 'CreateFileW', iat_rva: '0x3000', name_unreadable: false },
+						{ name: 'ReadFile', iat_rva: '0x3008', name_unreadable: false },
+					], name_unreadable: false, symbols_failed: false, symbols_truncated: false
 				},
-				{ name: 'WS2_32.dll', symbols: [{ ordinal: 7, iat_rva: '0x4000' }] },
+				{ name: 'WS2_32.dll', symbols: [{ ordinal: 7, iat_rva: '0x4000', name_unreadable: false }], name_unreadable: false, symbols_failed: false, symbols_truncated: false },
 			]
 		});
 
@@ -50,7 +53,10 @@ suite('Delver imports filtering', () => {
 	test('clearing a filter after zero matches restores the imports', async () => {
 		const provider = new DelverImportsTreeDataProvider();
 		provider.setImports({
-			modules: [{ name: 'KERNEL32.dll', symbols: [{ name: 'CreateFileW', iat_rva: '0x3000' }] }],
+			failed: false,
+			module_total: 1,
+			truncated: false,
+			modules: [{ name: 'KERNEL32.dll', symbols: [{ name: 'CreateFileW', iat_rva: '0x3000', name_unreadable: false }], name_unreadable: false, symbols_failed: false, symbols_truncated: false }],
 		});
 
 		provider.setFilter('does-not-exist');
@@ -66,7 +72,10 @@ suite('Delver imports filtering', () => {
 	test('filtered modules do not share expansion identity with normal modules', async () => {
 		const provider = new DelverImportsTreeDataProvider();
 		provider.setImports({
-			modules: [{ name: 'KERNEL32.dll', symbols: [{ name: 'CreateFileW', iat_rva: '0x3000' }] }],
+			failed: false,
+			module_total: 1,
+			truncated: false,
+			modules: [{ name: 'KERNEL32.dll', symbols: [{ name: 'CreateFileW', iat_rva: '0x3000', name_unreadable: false }], name_unreadable: false, symbols_failed: false, symbols_truncated: false }],
 		});
 		const normal = (await provider.getChildren())![0];
 

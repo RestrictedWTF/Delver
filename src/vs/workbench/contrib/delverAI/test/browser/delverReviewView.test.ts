@@ -4,11 +4,20 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as assert from 'assert';
+import { Event } from '../../../../../base/common/event.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { createDelverFinding } from '../../../../../platform/delver/common/findings.js';
 import { EditOp, EditStatus, IEdit } from '../../../../../platform/delver/common/interpretation.js';
 import { IDelverToolCallRecord } from '../../../../../platform/delver/common/delverToolCall.js';
-import { ITreeItem } from '../../../../common/views.js';
+import { ITreeItem, IViewDescriptorService } from '../../../../common/views.js';
+import { DelverSurfaceId } from '../../../../services/delver/browser/delverSurface.js';
+import { allDelverSurfaces } from '../../../../services/delver/browser/delverSurfaceRegistry.js';
+import { IDelverInterpretationService } from '../../../../services/delver/common/delverInterpretationService.js';
+import { IDelverProjectService } from '../../../../services/delver/common/delverProjectService.js';
+import { IDelverSessionService } from '../../../../services/delver/common/delverSessionService.js';
+import { ViewDescriptorService } from '../../../../services/views/browser/viewDescriptorService.js';
+import { workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
+import { DelverReviewViewContribution } from '../../browser/delverReview.contribution.js';
 import {
 	DelverReviewTreeDataProvider,
 	findingIdFromHandle,
@@ -32,7 +41,7 @@ suite('Delver Review View', () => {
 		const calls = await provider.getChildren(evidence[0]);
 
 		assert.deepStrictEqual({
-			roots: roots.map(item => ({ handle: item.handle, label: item.label?.label, description: item.description })),
+			roots: roots.map(item => ({ handle: item.handle, label: item.label?.label, description: item.description, contextValue: item.contextValue })),
 			proposal: summarize(proposals[0]),
 			finding: summarize(findings[0]),
 			evidence: summarize(evidence[0]),
@@ -41,8 +50,8 @@ suite('Delver Review View', () => {
 			findingId: findingIdFromHandle(findings[0].handle),
 		}, {
 			roots: [
-				{ handle: 'delver.review.proposals', label: 'Interpretation Proposals', description: '1' },
-				{ handle: 'delver.review.findings', label: 'Findings', description: '1' },
+				{ handle: 'delver.review.proposals', label: 'Interpretation Proposals', description: '1', contextValue: 'delver-review-proposals' },
+				{ handle: 'delver.review.findings', label: 'Findings', description: '1', contextValue: 'delver-review-findings' },
 			],
 			proposal: {
 				handle: 'delver.review.proposal.7',
@@ -102,6 +111,28 @@ suite('Delver Review View', () => {
 		});
 	});
 
+	test('says what a function correction will do instead of showing its JSON', async () => {
+		// A reviewer decides whether a function appears or disappears. Reading
+		// `{"kind":"undefine"}` off a tree row does not tell them which.
+		const provider = new DelverReviewTreeDataProvider();
+		provider.setPending([
+			boundsProposal(8, '{"kind":"define","endRva":"0x1ac0"}'),
+			boundsProposal(9, '{"kind":"define"}'),
+			boundsProposal(10, '{"kind":"undefine"}'),
+			boundsProposal(11, '{"kind":"define","endRva":'),
+		], []);
+
+		const roots = await provider.getChildren();
+		const rows = await provider.getChildren(roots[0]);
+
+		assert.deepStrictEqual(rows.map(row => row.label?.label), [
+			'Define function at 0x1AB0 (ends 0x1AC0)',
+			'Define function at 0x1AB0',
+			'Remove function at 0x1AB0',
+			'Unreadable function correction at 0x1AB0',
+		]);
+	});
+
 	test('has no roots when no work is pending', async () => {
 		const provider = new DelverReviewTreeDataProvider();
 		assert.deepStrictEqual(await provider.getChildren(), []);
@@ -116,6 +147,18 @@ function proposal(): IEdit {
 		anchor: { kind: 'image', contentHash: HASH, rva: 0x1000n },
 		op: EditOp.Rename,
 		value: 'parse_header',
+		status: EditStatus.Proposed,
+	};
+}
+
+function boundsProposal(seq: number, value: string): IEdit {
+	return {
+		seq,
+		at: 100,
+		author: { kind: 'model', id: 'model-a' },
+		anchor: { kind: 'image', contentHash: HASH, rva: 0x1ab0n },
+		op: EditOp.FunctionBounds,
+		value,
 		status: EditStatus.Proposed,
 	};
 }
@@ -138,6 +181,45 @@ function finding() {
 		provenance: { capability: 'delver_report_finding', callId: 'call-1' },
 	});
 }
+
+suite('Delver Review View contribution lifetime', () => {
+	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('disposing the contribution releases its tree view and its surface', () => {
+		const instantiationService = workbenchInstantiationService(undefined, disposables);
+		instantiationService.stub(IViewDescriptorService, disposables.add(instantiationService.createInstance(ViewDescriptorService)));
+		instantiationService.stub(IDelverSessionService, {
+			activeSession: undefined,
+			onDidChangeActiveSession: Event.None,
+		});
+		instantiationService.stub(IDelverInterpretationService, {
+			onDidChange: Event.None,
+			pendingProposals: () => [],
+		});
+		instantiationService.stub(IDelverProjectService, {
+			onDidChangeFindings: Event.None,
+			pendingFindings: () => [],
+			toolCallsFor: () => [],
+		});
+
+		// The tree view is covered by the suite's disposable tracker: it is
+		// created here and nothing else can release it, so a contribution that
+		// forgets to register it fails this test on teardown. The surface has to
+		// go with it — a `SyncDescriptor` left in the registry lets the workspace
+		// editor build a segment over a dead tree.
+		const contribution = instantiationService.createInstance(DelverReviewViewContribution);
+		const registeredWhileAlive = allDelverSurfaces().some(surface => surface.id === DelverSurfaceId.Review);
+		contribution.dispose();
+
+		assert.deepStrictEqual(
+			{
+				registeredWhileAlive,
+				registeredAfterDispose: allDelverSurfaces().some(surface => surface.id === DelverSurfaceId.Review),
+			},
+			{ registeredWhileAlive: true, registeredAfterDispose: false },
+		);
+	});
+});
 
 function toolCall(): IDelverToolCallRecord {
 	return {

@@ -212,6 +212,20 @@ describe('Bootstrap relay manager', () => {
 		assert.deepStrictEqual({ sessions: failed.sessions.length, terminations: failed.process.terminateCount }, { sessions: 0, terminations: 1 });
 	});
 
+	it('terminates the spawned relay when transport construction fails', async () => {
+		const fixture = createFixture({ maxBufferedInputBytes: 0 });
+		await assert.rejects(fixture.manager.start(), /could not be started/);
+
+		assert.strictEqual(await fixture.manager.whenClosed(), 'transportFailure');
+		assert.deepStrictEqual(summarizeCleanup(fixture), {
+			sessions: 0,
+			unpublishes: 0,
+			terminations: 1,
+			cleanup: 1,
+			timers: [],
+		});
+	});
+
 	it('contains a rejected late-publication cleanup after the first close reason', async () => {
 		const fixture = createFixture({ deferPublication: true, unpublishFails: true });
 		const rejectedStart = assert.rejects(fixture.manager.start(), /attestation timed out/);
@@ -233,6 +247,7 @@ interface IFixtureOptions {
 	readonly deferPublication?: boolean;
 	readonly deferUnpublish?: boolean;
 	readonly unpublishFails?: boolean;
+	readonly maxBufferedInputBytes?: number;
 }
 
 class TestBootstrapSession {
@@ -316,6 +331,7 @@ function createFixture(options: IFixtureOptions = {}) {
 		},
 		platform: 'win32',
 		timers,
+		maxBufferedInputBytes: options.maxBufferedInputBytes,
 		now: () => 1_000,
 	});
 	return {

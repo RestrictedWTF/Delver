@@ -159,6 +159,13 @@ export class DecompilerWorkerHost extends Disposable {
 		child.stderr.setEncoding('utf8');
 		child.stdout.on('data', chunk => this.acceptStandardOutput(String(chunk)));
 		child.stderr.on('data', chunk => this.standardError = `${this.standardError}${String(chunk)}`.slice(-32_768));
+		// A pipe that breaks emits on the stream, not on the child. Without these
+		// the routine EPIPE from writing to a dead worker is thrown out of the
+		// event loop and takes the whole shared process — every analysis session
+		// in it — down with one Ghidra that ran out of memory.
+		child.stdin.on('error', error => this.fail(streamFailure('input', error), child));
+		child.stdout.on('error', error => this.fail(streamFailure('output', error), child));
+		child.stderr.on('error', error => this.fail(streamFailure('diagnostic', error), child));
 		child.once('error', error => this.fail(error, child));
 		child.once('exit', code => this.fail(new Error(`Decompiler worker exited with code ${code}: ${this.standardError.trim() || 'no diagnostic output'}`), child, false));
 
@@ -228,11 +235,19 @@ export class DecompilerWorkerHost extends Disposable {
 	}
 
 	private write(request: IWorkerRequest): void {
+		const child = this.child;
+		if (!child) {
+			return;
+		}
 		// CPython's Windows pipe reader does not release a newline-terminated
 		// readline() while Node keeps the persistent stdin pipe open unless the
 		// delimiter is CRLF. EOF masked this in one-shot smoke tests.
 		const lineEnding = process.platform === 'win32' ? '\r\n' : '\n';
-		this.child?.stdin.write(`${JSON.stringify(request)}${lineEnding}`);
+		child.stdin.write(`${JSON.stringify(request)}${lineEnding}`, error => {
+			if (error) {
+				this.fail(streamFailure('input', error), child);
+			}
+		});
 	}
 
 	private async shutdownProcess(): Promise<void> {
@@ -252,7 +267,12 @@ export class DecompilerWorkerHost extends Disposable {
 			if (this.child === child && !child.killed) {
 				child.kill();
 			}
-			await completesWithin(exited, this.shutdownTimeoutMs);
+			if (!await completesWithin(exited, this.shutdownTimeoutMs)) {
+				// Last resort. A backend that ignored both the closed input and the
+				// terminate signal is not going to release its project lock either
+				// way, and the host cannot stay attached to it forever.
+				child.kill('SIGKILL');
+			}
 		}
 		this.fail(shutdownError, child);
 	}
@@ -317,6 +337,11 @@ export class DecompilerWorkerHost extends Disposable {
 			child.kill();
 		}
 	}
+}
+
+/** Describes a broken worker pipe as a failure of the request, not of the host. */
+function streamFailure(stream: 'input' | 'output' | 'diagnostic', error: Error): Error {
+	return new Error(`Decompiler worker ${stream} stream failed: ${error.message}`);
 }
 
 async function completesWithin(operation: Promise<void>, timeoutMs: number): Promise<boolean> {

@@ -25,16 +25,16 @@ import { IDelverSessionService } from '../../../services/delver/common/delverSes
 import { EditOp, EditStatus, IAuthor } from '../../../../platform/delver/common/interpretation.js';
 import { editInterpretationAt } from '../../../services/delver/browser/delverInterpretationEditing.js';
 import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
-import { DelverPseudocodeInput } from '../../delverPseudocode/browser/delverPseudocodeInput.js';
+import { DelverPseudocodeInput } from '../../../services/delver/browser/delverPseudocodeInput.js';
 import {
 	DELVER_CAN_GO_BACK,
 	DELVER_CAN_GO_FORWARD,
 	DELVER_LISTING_PINNED,
 	DELVER_NAVIGATION_ORIGIN,
 	LISTING_ACTIVE,
-} from './delverListingContext.js';
+} from '../../../services/delver/browser/delverListingContext.js';
 import { MenuDelverPrimaryChrome } from '../../../services/delver/browser/delverSurface.js';
-import { activeListing } from './delverActiveListing.js';
+import { activeListing } from '../../../services/delver/browser/delverActiveListing.js';
 
 const NAVIGATION_ORIGIN = DELVER_NAVIGATION_ORIGIN;
 

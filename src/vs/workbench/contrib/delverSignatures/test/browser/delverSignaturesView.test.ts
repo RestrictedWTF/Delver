@@ -4,11 +4,20 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as assert from 'assert';
+import { Event } from '../../../../../base/common/event.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { IDelverNamedSignature } from '../../../../../platform/delver/common/delverSignature.js';
+import { DelverSignaturePolicy, IDelverNamedSignature } from '../../../../../platform/delver/common/delverSignature.js';
+import { IViewDescriptorService } from '../../../../common/views.js';
+import { DelverSurfaceId } from '../../../../services/delver/browser/delverSurface.js';
+import { allDelverSurfaces } from '../../../../services/delver/browser/delverSurfaceRegistry.js';
 import { IDelverAgentResult } from '../../../../services/delver/common/delverAgentTypes.js';
-import { byteSearchPresentation, idaPythonMatcher, idaPythonMatcherBundle, revisionSignatureGenerationInvocation, revisionSignaturePresentation, revisionSignatureRegenerationRequest, validateByteSearchPattern } from '../../browser/delverSignaturesActions.js';
-import { delverRevisionSignatureHandle } from '../../browser/delverSignaturesState.js';
+import { IDelverProjectService } from '../../../../services/delver/common/delverProjectService.js';
+import { IDelverSessionService } from '../../../../services/delver/common/delverSessionService.js';
+import { ViewDescriptorService } from '../../../../services/views/browser/viewDescriptorService.js';
+import { workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
+import { DelverSignaturesViewContribution } from '../../browser/delverSignatures.contribution.js';
+import { byteSearchPresentation, idaPythonMatcher, idaPythonMatcherBundle, revisionSignatureGenerationInvocation, revisionSignaturePresentation, revisionSignatureRegenerationRequest, revisionSignatureScanSummary, validateByteSearchPattern } from '../../browser/delverSignaturesActions.js';
+import { delverRevisionSignatureHandle, IDelverRevisionSignatureResult, IDelverSignaturesStateService } from '../../browser/delverSignaturesState.js';
 import { DelverSignaturesTreeDataProvider } from '../../browser/delverSignaturesView.js';
 
 suite('Delver signatures view', () => {
@@ -72,6 +81,50 @@ suite('Delver signatures view', () => {
 			wildcards: [
 				{ label: 'Bytes 1–4', description: '0x1000 · a relative branch target', command: 'delver.signatures.goTo', arguments: ['0x1000'] },
 			],
+		});
+	});
+
+	test('names every saved signature policy distinctly', async () => {
+		const policies: readonly DelverSignaturePolicy[] = ['unique-now', 'relocation-stable', 'cross-revision-stable'];
+		const provider = new DelverSignaturesTreeDataProvider();
+		provider.setSignatures(policies.map((policy, index) => ({ ...signature(), id: `signature-${index}`, policy })));
+
+		const [saved] = await provider.getChildren();
+		const rows = await provider.getChildren(saved);
+		const strategies = await Promise.all(rows.map(async row => {
+			const evidence = await provider.getChildren(row);
+			return evidence.find(item => item.label?.label === 'Strategy')?.description;
+		}));
+
+		assert.deepStrictEqual(strategies, [
+			'primary · unique now · executable sections',
+			'primary · relocation stable · executable sections',
+			'primary · cross-revision stable · executable sections',
+		]);
+	});
+
+	test('reports omitted signatures in revision scan summaries', () => {
+		const base = {
+			revision: {
+				revisionId: 'revision-v1',
+				contentHash: 'a'.repeat(64),
+				displayName: 'sample-v1.exe',
+				createdAt: 1,
+			},
+			signature: signature(),
+			matches: [],
+		};
+		const unique: IDelverRevisionSignatureResult = { ...base, status: 'unique' };
+		const incomplete: IDelverRevisionSignatureResult = { ...base, status: 'incomplete' };
+
+		assert.deepStrictEqual({
+			complete: revisionSignatureScanSummary([unique, incomplete], 0),
+			oneOmitted: revisionSignatureScanSummary([unique], 1),
+			manyOmitted: revisionSignatureScanSummary([unique, incomplete], 3),
+		}, {
+			complete: 'Scanned 2 earlier signatures: 1 uniquely located, 1 need attention.',
+			oneOmitted: 'Scanned 1 of 2 earlier signatures: 1 uniquely located, 0 need attention. 1 signature was not scanned.',
+			manyOmitted: 'Scanned 2 of 5 earlier signatures: 1 uniquely located, 1 need attention. 3 signatures were not scanned.',
 		});
 	});
 
@@ -233,6 +286,44 @@ suite('Delver signatures view', () => {
 			finalSummary: true,
 		});
 		assert.throws(() => idaPythonMatcherBundle([{ ...signature(), variant: 'xref-site' }]), /At least one primary signature/);
+	});
+});
+
+suite('Delver signatures view contribution lifetime', () => {
+	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('disposing the contribution releases its tree view and its surface', () => {
+		const instantiationService = workbenchInstantiationService(undefined, disposables);
+		instantiationService.stub(IViewDescriptorService, disposables.add(instantiationService.createInstance(ViewDescriptorService)));
+		instantiationService.stub(IDelverSessionService, {
+			activeSession: undefined,
+			onDidChangeActiveSession: Event.None,
+		});
+		instantiationService.stub(IDelverProjectService, {
+			onDidChangeSignatures: Event.None,
+			signaturesFor: () => [],
+		});
+		instantiationService.stub(IDelverSignaturesStateService, {
+			onDidChange: Event.None,
+			search: undefined,
+			revisionScan: undefined,
+			clear: () => { },
+		});
+
+		// The tree view itself is covered by the suite's disposable tracker: it
+		// is created here and nothing else can release it, so a contribution
+		// that forgets to register it fails this test on teardown.
+		const contribution = instantiationService.createInstance(DelverSignaturesViewContribution);
+		const registeredWhileAlive = allDelverSurfaces().some(surface => surface.id === DelverSurfaceId.Signatures);
+		contribution.dispose();
+
+		assert.deepStrictEqual(
+			{
+				registeredWhileAlive,
+				registeredAfterDispose: allDelverSurfaces().some(surface => surface.id === DelverSurfaceId.Signatures),
+			},
+			{ registeredWhileAlive: true, registeredAfterDispose: false },
+		);
 	});
 });
 

@@ -40,6 +40,32 @@ suite('GhidraDecompilerProtocol', () => {
 		});
 	});
 
+	test('decodes a canonical accepted semantic snapshot', () => {
+		const semanticDependencies = {
+			schemaVersion: 1 as const,
+			dataTypes: [{ rva: '0x3000', declaration: 'uint32_t' }],
+			functionPrototypes: [{ rva: '0x1000', declaration: 'int entry(uint32_t flags)' }],
+		};
+		const result = decodeGhidraDecompilerOutput(JSON.stringify({
+			schemaVersion: 1,
+			functionRva: '0x1000',
+			text: 'int entry(uint32_t flags) { return flags; }',
+			lineMappings: [],
+			variables: [],
+			semanticDependencies,
+		}), 0x1000n);
+
+		// Normalized up, not echoed back: a v1 snapshot *is* a v2 one with no
+		// composites, and reading it as v1 would make every function saved
+		// before composites existed compare as stale on first open.
+		assert.deepStrictEqual(result.semanticDependencies, {
+			schemaVersion: 2,
+			composites: [],
+			dataTypes: semanticDependencies.dataTypes,
+			functionPrototypes: semanticDependencies.functionPrototypes,
+		});
+	});
+
 	test('rejects malformed and incompatible responses', () => {
 		const responses = [
 			'not json',
@@ -49,6 +75,9 @@ suite('GhidraDecompilerProtocol', () => {
 			JSON.stringify({ schemaVersion: 1, functionRva: '0x1000', text: '', lineMappings: [{ line: 0, ranges: [] }], variables: [] }),
 			JSON.stringify({ schemaVersion: 1, functionRva: '0x1000', text: '', lineMappings: [{ line: 1, ranges: [{ startRva: '0x20', endRva: '0x20' }] }], variables: [] }),
 			JSON.stringify({ schemaVersion: 1, functionRva: '0x1000', text: '', lineMappings: [], variables: [{ name: '' }] }),
+			JSON.stringify({ schemaVersion: 1, functionRva: '0x1000', text: '', lineMappings: [], variables: [], semanticDependencies: { schemaVersion: 2, dataTypes: [], functionPrototypes: [] } }),
+			JSON.stringify({ schemaVersion: 1, functionRva: '0x1000', text: '', lineMappings: [], variables: [], semanticDependencies: { schemaVersion: 1, dataTypes: [{ rva: '0x02', declaration: 'int' }], functionPrototypes: [] } }),
+			JSON.stringify({ schemaVersion: 1, functionRva: '0x1000', text: '', lineMappings: [], variables: [], semanticDependencies: { schemaVersion: 1, dataTypes: [{ rva: '0x20', declaration: 'int' }, { rva: '0x10', declaration: 'char' }], functionPrototypes: [] } }),
 		];
 
 		for (const response of responses) {

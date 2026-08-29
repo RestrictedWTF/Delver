@@ -5,6 +5,7 @@
 
 import { toErrorMessage } from '../../../../base/common/errorMessage.js';
 import { onUnexpectedError } from '../../../../base/common/errors.js';
+import { Disposable } from '../../../../base/common/lifecycle.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
@@ -40,12 +41,13 @@ const FOCUS_ORIGIN = 'delver.view.imports';
  * libraries and APIs a file reaches for says more in one glance than a thousand
  * instructions do.
  */
-class DelverImportsViewContribution {
+class DelverImportsViewContribution extends Disposable {
 	constructor(
 		@IInstantiationService instantiationService: IInstantiationService,
 		@IDelverSessionService sessionService: IDelverSessionService,
 	) {
-		const treeView = instantiationService.createInstance(TreeView, DELVER_IMPORTS_VIEW_ID, viewName.value);
+		super();
+		const treeView = this._register(instantiationService.createInstance(TreeView, DELVER_IMPORTS_VIEW_ID, viewName.value));
 		const dataProvider = new DelverImportsTreeDataProvider();
 		treeView.dataProvider = dataProvider;
 		registerDelverTreeFilterProvider(treeView, dataProvider);
@@ -60,9 +62,9 @@ class DelverImportsViewContribution {
 			collapsed: false,
 			order: 30,
 		};
-		registerDelverTreeSurface(DelverSurfaceId.Imports, DelverZone.Primary, viewDescriptor);
+		this._register(registerDelverTreeSurface(DelverSurfaceId.Imports, DelverZone.Primary, viewDescriptor));
 
-		Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViewWelcomeContent(
+		this._register(Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViewWelcomeContent(
 			DELVER_IMPORTS_VIEW_ID,
 			{
 				content: localize(
@@ -71,17 +73,17 @@ class DelverImportsViewContribution {
 				),
 				when: DELVER_TARGET_OPEN.toNegated(),
 			},
-		);
+		));
 
 		// Importing nothing is unusual and worth saying plainly — a statically
 		// linked or shellcode-style payload looks exactly like this.
-		Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViewWelcomeContent(
+		this._register(Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViewWelcomeContent(
 			DELVER_IMPORTS_VIEW_ID,
 			{
 				content: localize('delverImportsEmpty', "This image imports nothing."),
 				when: DELVER_TARGET_OPEN,
 			},
-		);
+		));
 
 		/** Guards against a slow lookup overwriting a newer session's answer. */
 		let generation = 0;
@@ -122,7 +124,7 @@ class DelverImportsViewContribution {
 			treeView.refresh().catch(onUnexpectedError);
 		};
 
-		sessionService.onDidChangeActiveSession(() => update());
+		this._register(sessionService.onDidChangeActiveSession(() => update()));
 
 		// A session may already be open when this contribution constructs.
 		if (sessionService.activeSession) {

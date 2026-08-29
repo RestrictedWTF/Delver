@@ -121,6 +121,23 @@ describe('Rendezvous registry', () => {
 		assert.throws(() => resolveRendezvousRegistryDirectory('linux', { XDG_STATE_HOME: 'relative' }, '/home/alice'));
 	});
 
+	it('rejects non-string identity fields a pattern test would silently coerce', () => {
+		const coercions = [
+			{ registryEntryId: 9_007_199_254_740_991 },
+			{ windowInstanceId: ['window_instance_0001'] },
+			{ rootFingerprint: ['a'.repeat(64)] },
+		];
+
+		assert.deepStrictEqual(coercions.map(coercion => {
+			try {
+				parseRendezvousRegistryEntry(Buffer.from(JSON.stringify({ ...ENTRY, ...coercion })), 'win32');
+				return 'accepted';
+			} catch {
+				return 'rejected';
+			}
+		}), ['rejected', 'rejected', 'rejected']);
+	});
+
 	it('fails closed on Windows without an audited directory ACL provider', async () => {
 		const root = await createTemporaryDirectory();
 		const registry = new FileRendezvousRegistry({ directory: path.join(root, 'entries'), platform: 'win32' });

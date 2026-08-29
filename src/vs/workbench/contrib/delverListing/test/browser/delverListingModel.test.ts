@@ -8,13 +8,13 @@ import { errorHandler, setUnexpectedErrorHandler } from '../../../../../base/com
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import {
 	FlowKindWire,
-	IListingRowWire,
-	StringEncodingWire,
+	IListingWindowRowWire,
 } from '../../../../../platform/delver/common/protocol.generated.js';
 import {
 	BUFFER_ROWS,
 	DelverListingModel,
 	IListingSource,
+	instructionOf,
 	IRowRange,
 	PAGE_ROWS,
 } from '../../browser/delverListingModel.js';
@@ -26,7 +26,7 @@ class RecordingSource implements IListingSource {
 
 	constructor(private readonly deferred = false) { }
 
-	async listingWindow(startRow: number, count: number): Promise<readonly IListingRowWire[]> {
+	async listingWindow(startRow: number, count: number): Promise<readonly IListingWindowRowWire[]> {
 		this.requests.push({ startRow, count });
 		const rows = Array.from({ length: count }, (_, i) => row(startRow + i));
 		if (!this.deferred) {
@@ -44,8 +44,9 @@ class RecordingSource implements IListingSource {
 	}
 }
 
-function row(ordinal: number): IListingRowWire {
+function row(ordinal: number): IListingWindowRowWire {
 	return {
+		kind: 'instruction',
 		row: ordinal,
 		rva: `0x${(0x1000 + ordinal).toString(16).toUpperCase()}`,
 		len: 1,
@@ -81,27 +82,22 @@ suite('DelverListingModel', () => {
 		await settle();
 
 		assert.deepStrictEqual(source.requests, [{ startRow: 0, count: PAGE_ROWS }]);
-		assert.strictEqual(model.rows[5].data?.mnemonic, 'nop');
+		assert.strictEqual(instructionOf(model.rows[5])?.mnemonic, 'nop');
 	});
 
-	test('metadata and strings are real rows around the instruction listing', async () => {
+	test('the metadata header sits above rows the server owns', async () => {
 		const source = new RecordingSource();
 		const metadata = { kind: 'metadata' as const, address: '.text:0x1000', lines: ['; first', '; second'] };
-		const stringRow = {
-			kind: 'string' as const,
-			value: { rva: '0x2000', encoding: StringEncodingWire.Ascii, text: 'hello' },
-		};
-		const model = store.add(new DelverListingModel(source, 3, [metadata], [stringRow]));
+		const model = store.add(new DelverListingModel(source, 4, [metadata]));
 
 		assert.strictEqual(model.totalRows, 5);
 		assert.deepStrictEqual(model.rows[0].static, metadata);
-		assert.strictEqual(model.instructionRow(0), 1);
-		assert.deepStrictEqual(model.rows[4].static, stringRow);
+		assert.strictEqual(model.listingRow(0), 1);
 
 		model.setVisibleRange(0, 4);
 		await settle();
 
-		assert.deepStrictEqual(source.requests, [{ startRow: 0, count: 3 }]);
+		assert.deepStrictEqual(source.requests, [{ startRow: 0, count: 4 }]);
 		assert.strictEqual(model.rows[1].data?.row, 0);
 	});
 

@@ -5,6 +5,7 @@
 
 import { toErrorMessage } from '../../../../base/common/errorMessage.js';
 import { onUnexpectedError } from '../../../../base/common/errors.js';
+import { Disposable } from '../../../../base/common/lifecycle.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
@@ -31,12 +32,13 @@ export const DELVER_OVERVIEW_VIEW_ID = 'delver.view.overview';
 
 const viewName = localize2('delverOverview', "Overview");
 
-class DelverOverviewViewContribution {
+class DelverOverviewViewContribution extends Disposable {
 	constructor(
 		@IInstantiationService instantiationService: IInstantiationService,
 		@IDelverSessionService sessionService: IDelverSessionService,
 	) {
-		const treeView = instantiationService.createInstance(TreeView, DELVER_OVERVIEW_VIEW_ID, viewName.value);
+		super();
+		const treeView = this._register(instantiationService.createInstance(TreeView, DELVER_OVERVIEW_VIEW_ID, viewName.value));
 		const dataProvider = new DelverOverviewTreeDataProvider();
 		treeView.dataProvider = dataProvider;
 
@@ -50,9 +52,9 @@ class DelverOverviewViewContribution {
 			collapsed: false,
 			order: 10,
 		};
-		registerDelverTreeSurface(DelverSurfaceId.Overview, DelverZone.Navigator, viewDescriptor);
+		this._register(registerDelverTreeSurface(DelverSurfaceId.Overview, DelverZone.Navigator, viewDescriptor));
 
-		Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViewWelcomeContent(
+		this._register(Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViewWelcomeContent(
 			DELVER_OVERVIEW_VIEW_ID,
 			{
 				content: localize(
@@ -61,7 +63,7 @@ class DelverOverviewViewContribution {
 				),
 				when: DELVER_TARGET_OPEN.toNegated(),
 			},
-		);
+		));
 
 		/** Guards against a slow lookup overwriting a newer session's answer. */
 		let generation = 0;
@@ -102,7 +104,7 @@ class DelverOverviewViewContribution {
 			treeView.refresh().catch(onUnexpectedError);
 		};
 
-		sessionService.onDidChangeActiveSession(() => update());
+		this._register(sessionService.onDidChangeActiveSession(() => update()));
 
 		if (sessionService.activeSession) {
 			update();

@@ -5,7 +5,7 @@
 
 import { ContextKeyExpr, RawContextKey } from '../../../../platform/contextkey/common/contextkey.js';
 import { ActiveEditorContext } from '../../../common/contextkeys.js';
-import { FocusReason } from '../../../services/delver/common/delverFocusService.js';
+import { FocusReason } from '../common/delverFocusService.js';
 import { DELVER_LISTING_EDITOR_ID } from './delverListingInput.js';
 
 /**

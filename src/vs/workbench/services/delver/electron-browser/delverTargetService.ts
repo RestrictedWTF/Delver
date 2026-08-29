@@ -4,10 +4,13 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Emitter } from '../../../../base/common/event.js';
+import { Disposable, toDisposable } from '../../../../base/common/lifecycle.js';
+import { localize } from '../../../../nls.js';
 import { IDelverProcessService, IDelverTargetSnapshot } from '../../../../platform/delver/common/delverProcessService.js';
 import { IDelverTarget, TargetConfig } from '../../../../platform/delver/common/target.js';
 import { addressSpaceFromWire, capabilitiesFromWire, descriptorFromWire } from '../../../../platform/delver/common/wire.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
+import { ILifecycleService } from '../../lifecycle/common/lifecycle.js';
 import { IDelverTargetService } from '../common/delverTargetService.js';
 
 class DelverTarget implements IDelverTarget {
@@ -23,14 +26,14 @@ class DelverTarget implements IDelverTarget {
 	}
 
 	dispose() {
-		this.processService.detach();
+		this.processService.detach().catch(() => undefined);
 	}
 }
 
-export class DelverTargetService implements IDelverTargetService {
+export class DelverTargetService extends Disposable implements IDelverTargetService {
 	readonly _serviceBrand: undefined;
 
-	private readonly _onDidChangeActiveTarget = new Emitter<IDelverTarget | undefined>();
+	private readonly _onDidChangeActiveTarget = this._register(new Emitter<IDelverTarget | undefined>());
 	readonly onDidChangeActiveTarget = this._onDidChangeActiveTarget.event;
 
 	private _activeTarget: IDelverTarget | undefined;
@@ -47,8 +50,21 @@ export class DelverTargetService implements IDelverTargetService {
 
 	constructor(
 		@IDelverProcessService private readonly processService: IDelverProcessService,
+		@ILifecycleService lifecycleService: ILifecycleService,
 	) {
-		processService.onDidChangeActiveTarget(snapshot => this.apply(snapshot));
+		super();
+		this._register(processService.onDidChangeActiveTarget(snapshot => this.apply(snapshot)));
+		// The provider outlives this window. The shared process hosting it
+		// survives a reload, so a child nobody released stays attached and keeps
+		// the sample mapped — on Windows that locks the file under analysis, and
+		// the analyst cannot rebuild or delete it. Joined rather than fired and
+		// forgotten, because the window is gone before an unjoined request lands.
+		this._register(lifecycleService.onWillShutdown(event => event.join(
+			this.detach(),
+			{ id: 'join.delverTarget', label: localize('join.delverTarget', "Releasing the analysis target") },
+		)));
+		// Same release for the teardown paths shutdown does not cover.
+		this._register(toDisposable(() => { this.processService.detach().catch(() => undefined); }));
 	}
 
 	get activeTarget(): IDelverTarget | undefined {
@@ -59,8 +75,8 @@ export class DelverTargetService implements IDelverTargetService {
 		return this.apply(await this.processService.attach(config))!;
 	}
 
-	detach(): void {
-		this.processService.detach();
+	async detach(): Promise<void> {
+		await this.processService.detach();
 	}
 
 	/**

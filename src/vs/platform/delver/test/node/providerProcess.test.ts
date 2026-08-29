@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from '../../../../base/common/path.js';
 import { BufferWriter, serialize } from '../../../../base/parts/ipc/common/ipc.js';
-import { DelverProviderProcess } from '../../node/providerProcess.js';
+import { DelverProviderProcess, escalateProviderExit, IProviderExitSteps } from '../../node/providerProcess.js';
 import { TargetCapability } from '../../common/capabilities.js';
 import { buildMinimalPe } from './minimalPe.js';
 
@@ -100,5 +100,52 @@ suite('DelverProviderProcess', () => {
 			writer.dispose();
 			target.dispose();
 		}
+	});
+});
+
+/** Records the escalation without a child process to wedge. */
+function recordingSteps(exitsAfterAttempts: number): IProviderExitSteps & { readonly kills: (string | undefined)[] } {
+	const kills: (string | undefined)[] = [];
+	let attempts = 0;
+	return {
+		kills,
+		requestShutdown: () => new Promise<void>(() => {
+			// A wedged provider never answers, and it never fails either.
+		}),
+		exitedWithin: async () => ++attempts >= exitsAfterAttempts,
+		kill: signal => { kills.push(signal); },
+	};
+}
+
+suite('provider exit escalation', () => {
+
+	ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('a wedged provider is killed and then killed unignorably', async () => {
+		// The whole point: the old code chained the kill off the `shutdown`
+		// reply, so a provider that was alive but not answering was never
+		// killed at all — and a live provider keeps the sample mmapped, which
+		// on Windows locks the file the analyst is working on.
+		const steps = recordingSteps(Number.POSITIVE_INFINITY);
+
+		await escalateProviderExit(steps, 1, 1);
+
+		assert.deepStrictEqual(steps.kills, [undefined, 'SIGKILL']);
+	});
+
+	test('a provider that leaves on request is never signalled', async () => {
+		const steps = recordingSteps(1);
+
+		await escalateProviderExit(steps, 1, 1);
+
+		assert.deepStrictEqual(steps.kills, []);
+	});
+
+	test('a provider that leaves on the first signal is not escalated further', async () => {
+		const steps = recordingSteps(2);
+
+		await escalateProviderExit(steps, 1, 1);
+
+		assert.deepStrictEqual(steps.kills, [undefined]);
 	});
 });

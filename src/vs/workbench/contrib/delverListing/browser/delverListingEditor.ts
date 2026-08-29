@@ -12,7 +12,7 @@ import { IThemeService } from '../../../../platform/theme/common/themeService.js
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
-import { DELVER_LISTING_EDITOR_ID, DelverListingInput } from './delverListingInput.js';
+import { DELVER_LISTING_EDITOR_ID, DelverListingInput } from '../../../services/delver/browser/delverListingInput.js';
 import { DelverListingWidget } from './delverListingWidget.js';
 
 /**

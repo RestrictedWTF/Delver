@@ -5,6 +5,7 @@
 
 import { toErrorMessage } from '../../../../base/common/errorMessage.js';
 import { onUnexpectedError } from '../../../../base/common/errors.js';
+import { Disposable } from '../../../../base/common/lifecycle.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
@@ -36,12 +37,13 @@ const viewName = localize2('delverSections', "Sections");
  * its own command, and runs its own provider to answer, is a second copy of the
  * same image and a second thing for the user to remember.
  */
-class DelverSectionsViewContribution {
+class DelverSectionsViewContribution extends Disposable {
 	constructor(
 		@IInstantiationService instantiationService: IInstantiationService,
 		@IDelverSessionService sessionService: IDelverSessionService,
 	) {
-		const treeView = instantiationService.createInstance(TreeView, DELVER_SECTIONS_VIEW_ID, viewName.value);
+		super();
+		const treeView = this._register(instantiationService.createInstance(TreeView, DELVER_SECTIONS_VIEW_ID, viewName.value));
 		const dataProvider = instantiationService.createInstance(DelverSectionsTreeDataProvider);
 		treeView.dataProvider = dataProvider;
 
@@ -59,17 +61,17 @@ class DelverSectionsViewContribution {
 			collapsed: true,
 			order: 30,
 		};
-		registerDelverTreeSurface(DelverSurfaceId.Sections, DelverZone.Navigator, viewDescriptor);
+		this._register(registerDelverTreeSurface(DelverSurfaceId.Sections, DelverZone.Navigator, viewDescriptor));
 
 		// Without this the container opens onto empty trees and reads as broken
 		// rather than as waiting for a target.
-		viewsRegistry.registerViewWelcomeContent(DELVER_SECTIONS_VIEW_ID, {
+		this._register(viewsRegistry.registerViewWelcomeContent(DELVER_SECTIONS_VIEW_ID, {
 			content: localize(
 				'delverSectionsWelcome',
 				"No target open.\n[Open Target](command:delver.target.open)",
 			),
 			when: DELVER_TARGET_OPEN.toNegated(),
-		});
+		}));
 
 		/** Guards against a slow lookup overwriting a newer session's answer. */
 		let generation = 0;
@@ -111,7 +113,7 @@ class DelverSectionsViewContribution {
 			treeView.refresh().catch(onUnexpectedError);
 		};
 
-		sessionService.onDidChangeActiveSession(() => update());
+		this._register(sessionService.onDidChangeActiveSession(() => update()));
 
 		// A session may already be open when this contribution constructs.
 		if (sessionService.activeSession) {

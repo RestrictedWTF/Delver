@@ -6,6 +6,7 @@
 import { Codicon } from '../../../../base/common/codicons.js';
 import { toErrorMessage } from '../../../../base/common/errorMessage.js';
 import { onUnexpectedError } from '../../../../base/common/errors.js';
+import { Disposable } from '../../../../base/common/lifecycle.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
@@ -83,12 +84,13 @@ function exportItem(symbol: IExportWire, index: number): ITreeItem {
 	};
 }
 
-class DelverExportsViewContribution {
+class DelverExportsViewContribution extends Disposable {
 	constructor(
 		@IInstantiationService instantiationService: IInstantiationService,
 		@IDelverSessionService sessionService: IDelverSessionService,
 	) {
-		const treeView = instantiationService.createInstance(TreeView, DELVER_EXPORTS_VIEW_ID, viewName.value);
+		super();
+		const treeView = this._register(instantiationService.createInstance(TreeView, DELVER_EXPORTS_VIEW_ID, viewName.value));
 		const dataProvider = new DelverExportsTreeDataProvider();
 		treeView.dataProvider = dataProvider;
 
@@ -103,9 +105,9 @@ class DelverExportsViewContribution {
 			collapsed: true,
 			order: 40,
 		};
-		registerDelverTreeSurface(DelverSurfaceId.Exports, DelverZone.Primary, viewDescriptor);
+		this._register(registerDelverTreeSurface(DelverSurfaceId.Exports, DelverZone.Primary, viewDescriptor));
 
-		Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViewWelcomeContent(
+		this._register(Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViewWelcomeContent(
 			DELVER_EXPORTS_VIEW_ID,
 			{
 				content: localize(
@@ -114,18 +116,18 @@ class DelverExportsViewContribution {
 				),
 				when: DELVER_TARGET_OPEN.toNegated(),
 			},
-		);
+		));
 
 		// An executable exporting nothing is the normal case and a real answer.
 		// Reporting it as "no target open" told the user the tool had lost the
 		// file they were looking at.
-		Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViewWelcomeContent(
+		this._register(Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViewWelcomeContent(
 			DELVER_EXPORTS_VIEW_ID,
 			{
 				content: localize('delverExportsEmpty', "This image exports nothing."),
 				when: DELVER_TARGET_OPEN,
 			},
-		);
+		));
 
 		/** Guards against a slow lookup overwriting a newer session's answer. */
 		let generation = 0;
@@ -171,7 +173,7 @@ class DelverExportsViewContribution {
 			treeView.refresh().catch(onUnexpectedError);
 		};
 
-		sessionService.onDidChangeActiveSession(() => update());
+		this._register(sessionService.onDidChangeActiveSession(() => update()));
 
 		if (sessionService.activeSession) {
 			update();

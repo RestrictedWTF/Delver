@@ -104,6 +104,15 @@ suite('Delver Agent Command Gateway', () => {
 			capability: response.ok && response.result.capability,
 			firstTool: response.tools?.[0],
 			toolCount: response.tools?.length,
+			// Not a count of tools against capabilities — the tool list is built
+			// by mapping the capability list, so comparing their lengths is an
+			// identity that cannot fail. What can fail is a capability with no
+			// presentation entry: it still ships, but with a beaker icon, no
+			// usage text and an empty input schema, so the model is handed a
+			// tool it cannot call correctly.
+			toolsTakingNoArguments: response.tools?.filter(tool =>
+				Object.keys((tool.inputSchema as { properties?: object }).properties ?? {}).length === 0)
+				.map(tool => tool.name),
 			jsonRoundTrip: JSON.parse(JSON.stringify(response.tools?.[0])),
 		}, {
 			ok: true,
@@ -114,7 +123,21 @@ suite('Delver Agent Command Gateway', () => {
 				description: 'Lists the analysis capabilities, output limits, and backend state available right now. Starts no analysis and opens no target. Call this first whenever you do not already know what is open. It is the only Delver tool that is useful with nothing open, and it deliberately starts no analysis, opens no target, and never starts a decompiler. Use `available` on each entry to decide what to call next, and `errorCodes` to interpret failures.',
 				inputSchema: { type: 'object', properties: {} },
 			},
-			toolCount: 26,
+			// A literal, deliberately: it is the assertion a new capability has to
+			// walk past, and the previous `DELVER_AGENT_CAPABILITIES.length` was
+			// an identity that could never fail, since the tool list is built by
+			// mapping that same list.
+			toolCount: 35,
+			// Pinned rather than counted. A capability with no presentation entry
+			// still ships — with a beaker icon, no usage text and an empty input
+			// schema — so the model is handed a tool it cannot call correctly.
+			// It would land in this list. The three below are deliberate: they
+			// genuinely take no arguments.
+			toolsTakingNoArguments: [
+				DelverAgentCapabilityId.Capabilities,
+				DelverAgentCapabilityId.SessionInfo,
+				DelverAgentCapabilityId.ImageInfo,
+			],
 			jsonRoundTrip: {
 				name: DelverAgentCapabilityId.Capabilities,
 				title: 'Delver Capabilities',

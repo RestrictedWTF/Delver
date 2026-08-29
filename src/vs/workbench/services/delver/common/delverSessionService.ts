@@ -15,13 +15,15 @@ import {
 	AnalysisSessionId,
 	IDelverAnalysisService,
 } from '../../../../platform/delver/common/delverAnalysisService.js';
-import { IFunctionsResult, IGetExportsResult, IGetImageInfoResult, IGetImportsResult, IOpenImageResult, IStringsResult } from '../../../../platform/delver/common/protocol.generated.js';
+import { FunctionCorrectionKindWire, IFunctionsResult, IGetExportsResult, IGetImageInfoResult, IGetImportsResult, IOpenImageResult, IScanStringsResult, IStringsResult } from '../../../../platform/delver/common/protocol.generated.js';
 import { isContentHash } from '../../../../platform/delver/common/delverInterpretationStoreService.js';
 import { IContextKey, IContextKeyService, RawContextKey } from '../../../../platform/contextkey/common/contextkey.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IDelverInterpretationService } from './delverInterpretationService.js';
+import { EditOp, EditStatus, IEdit } from '../../../../platform/delver/common/interpretation.js';
+import { functionCorrectionsFor } from './delverFunctionCorrections.js';
 import { IDelverProjectService } from './delverProjectService.js';
 import { ILifecycleService } from '../../lifecycle/common/lifecycle.js';
 
@@ -69,6 +71,17 @@ export interface IDelverSessionService {
 
 	readonly activeSession: IDelverSession | undefined;
 	readonly onDidChangeActiveSession: Event<IDelverSession | undefined>;
+
+	/**
+	 * Fires when an open image's facts have been derived again.
+	 *
+	 * The session is the same one; its instructions, functions, blocks and
+	 * cross-references are not. A view holding any of those is showing the
+	 * previous derivation until it reacts, and nothing else announces this —
+	 * `onDidChangeActiveSession` does not fire, because the session did not
+	 * change.
+	 */
+	readonly onDidRederiveFacts: Event<IDelverSession>;
 	readonly isProjectDirty: boolean;
 	readonly projectPath: string | undefined;
 
@@ -97,6 +110,15 @@ export interface IDelverSessionService {
 	imports(): Promise<IGetImportsResult>;
 	exports(): Promise<IGetExportsResult>;
 	strings(): Promise<IStringsResult>;
+
+	/**
+	 * Re-scans a bounded window of the image for strings.
+	 *
+	 * Live only, and deliberately: the retained list is what an offline project
+	 * has, and without the bytes there is nothing to scan. A project opened
+	 * without its sample keeps whatever the cap left it, and says so.
+	 */
+	scanStrings(fromRva: string, maxStrings: number): Promise<IScanStringsResult>;
 
 	/** Marks newly produced or edited analysis as requiring persistence. */
 	markProjectDirty(): void;
@@ -141,10 +163,20 @@ const enum UpdatedTargetDecision {
 }
 
 export class DelverSessionService extends Disposable implements IDelverSessionService {
+	/**
+	 * Sessions that currently have a correction set in effect.
+	 *
+	 * Kept so a withdrawal is still pushed: going from one correction to none is
+	 * a change the server has to be told about, and an empty set is
+	 * indistinguishable from "never corrected" without this.
+	 */
+	private readonly correctedSessions = new Set<AnalysisSessionId>();
 	readonly _serviceBrand: undefined;
 
 	private readonly _onDidChangeActiveSession = this._register(new Emitter<IDelverSession | undefined>());
 	readonly onDidChangeActiveSession = this._onDidChangeActiveSession.event;
+	private readonly _onDidRederiveFacts = this._register(new Emitter<IDelverSession>());
+	readonly onDidRederiveFacts = this._onDidRederiveFacts.event;
 
 	/**
 	 * Every open target, keyed by its path.
@@ -194,6 +226,15 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 		this._register(lifecycleService.onBeforeShutdown(event => {
 			event.veto(this.shouldVetoShutdown(), 'veto.delverUnsavedProject');
 		}));
+		// Joined, not fired and forgotten: the provider pairs live in the shared
+		// process, which survives a reload. A release that races window teardown
+		// leaves them attached with the sample mapped — on Windows that locks
+		// the file the analyst is trying to rebuild.
+		this._register(lifecycleService.onWillShutdown(event => event.join(
+			this.releaseAllTargets(),
+			{ id: 'join.delverTargets', label: localize('join.delverTargets', "Closing the analysis targets") },
+		)));
+		this._register(this.interpretationService.onDidChange(event => this.reapplyCorrections(event.edit)));
 		this._register({ dispose: () => { void this.releaseAllTargets(); } });
 	}
 
@@ -215,23 +256,50 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 	}
 
 	async attachTarget(targetPath: string): Promise<IDelverSession> {
+		// Serialized with every other open: locating a target starts a provider
+		// pair exactly like opening one does, and a pair started against a
+		// session that an interleaved open has already replaced is a leak.
+		const result = this.opening.then(() => this.doAttach(targetPath), () => this.doAttach(targetPath));
+		this.opening = result.then(session => session, () => undefined);
+		return result;
+	}
+
+	private async doAttach(targetPath: string): Promise<IDelverSession> {
 		const existing = this.activeSession;
 		if (!existing?.projectPath) {
 			throw new Error('Open a Delver project before locating its target.');
 		}
 		const candidate = await this.createSession(targetPath);
-		if (candidate.contentHash !== existing.contentHash) {
-			await this.analysisService.closeImage(candidate.sessionId!).catch(() => undefined);
-			throw new Error('The selected target does not match this project revision (SHA-256 differs).');
-		}
-		const attached: IDelverSession = { ...candidate, projectPath: existing.projectPath };
-		const entry = this.activeEntry;
-		if (entry) {
+		try {
+			if (candidate.contentHash !== existing.contentHash) {
+				throw new Error('The selected target does not match this project revision (SHA-256 differs).');
+			}
+			// The entry is looked up again because `createSession` awaited: the
+			// project this attach was meant for may have been closed meanwhile,
+			// and there is then nothing to install the candidate into.
+			const entry = this.activeEntry;
+			if (!entry || entry.session !== existing) {
+				throw new Error('The project this target was located for is no longer open.');
+			}
+			const attached: IDelverSession = { ...candidate, projectPath: existing.projectPath };
+			const previousKey = this._activeTargetPath;
+			if (previousKey === undefined) {
+				throw new Error('The project this target was located for is no longer open.');
+			}
+			this.sessions.delete(previousKey);
 			entry.session = attached;
+			this.sessions.set(attached.targetPath, entry);
+			this._activeTargetPath = attached.targetPath;
+			this.targetAttachedContext.set(true);
+			this._onDidChangeActiveSession.fire(attached);
+			return attached;
+		} catch (error) {
+			// Every path that does not install the candidate releases it —
+			// otherwise its provider pair outlives the request that made it.
+			this.correctedSessions.delete(candidate.sessionId);
+			await this.analysisService.closeImage(candidate.sessionId).catch(() => undefined);
+			throw error;
 		}
-		this.targetAttachedContext.set(true);
-		this._onDidChangeActiveSession.fire(attached);
-		return attached;
 	}
 
 	async openProject(projectPath: string): Promise<IDelverSession> {
@@ -270,7 +338,8 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 		try {
 			const candidate = await this.createSession(targetPath, false);
 			if (candidate.contentHash !== offlineSession.contentHash) {
-				await this.analysisService.closeImage(candidate.sessionId).catch(() => undefined);
+				this.correctedSessions.delete(candidate.sessionId);
+			await this.analysisService.closeImage(candidate.sessionId).catch(() => undefined);
 				return offlineSession;
 			}
 			return { ...candidate, projectPath: offlineSession.projectPath };
@@ -314,18 +383,22 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 			return this.doOpen(targetPath);
 		}
 		if (!existing.sessionId) {
-			return this.attachTarget(targetPath);
+			// Already inside the open queue — going through `attachTarget` here
+			// would wait on the very promise this call is part of.
+			return this.doAttach(targetPath);
 		}
 
 		const candidate = await this.createSession(targetPath);
 		if (candidate.contentHash === existing.contentHash) {
+			this.correctedSessions.delete(candidate.sessionId);
 			await this.analysisService.closeImage(candidate.sessionId).catch(() => undefined);
 			return existing;
 		}
 
 		if (!this.projectService.projectPath(existing.contentHash)) {
 			if (!await this.confirmProjectClose(this.sessions.get(existing.targetPath))) {
-				await this.analysisService.closeImage(candidate.sessionId).catch(() => undefined);
+				this.correctedSessions.delete(candidate.sessionId);
+			await this.analysisService.closeImage(candidate.sessionId).catch(() => undefined);
 				throw new CancellationError();
 			}
 			await this.releaseTarget();
@@ -337,7 +410,8 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 		switch (decision) {
 			case UpdatedTargetDecision.AddRevision:
 				if (!await this.projectService.addRevision(existing, candidate)) {
-					await this.analysisService.closeImage(candidate.sessionId).catch(() => undefined);
+					this.correctedSessions.delete(candidate.sessionId);
+			await this.analysisService.closeImage(candidate.sessionId).catch(() => undefined);
 					throw new CancellationError();
 				}
 				await this.analysisService.closeImage(existing.sessionId).catch(() => undefined);
@@ -345,14 +419,16 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 				return candidate;
 			case UpdatedTargetDecision.CreateProject:
 				if (!await this.projectService.createProject(candidate)) {
-					await this.analysisService.closeImage(candidate.sessionId).catch(() => undefined);
+					this.correctedSessions.delete(candidate.sessionId);
+			await this.analysisService.closeImage(candidate.sessionId).catch(() => undefined);
 					throw new CancellationError();
 				}
 				await this.analysisService.closeImage(existing.sessionId).catch(() => undefined);
 				this.adoptSession(candidate, false);
 				return candidate;
 			default:
-				await this.analysisService.closeImage(candidate.sessionId).catch(() => undefined);
+				this.correctedSessions.delete(candidate.sessionId);
+			await this.analysisService.closeImage(candidate.sessionId).catch(() => undefined);
 				throw new CancellationError();
 		}
 	}
@@ -369,6 +445,10 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 			if (loadInterpretation) {
 				await this.interpretationService.load(contentHash);
 			}
+			// Applied before the session is handed out, so no caller ever sees the
+			// uncorrected facts of an image the analyst has already corrected.
+			// Loading the log first is what makes the corrections available at all.
+			await this.applyFunctionCorrections(handle.sessionId, contentHash);
 		} catch (error) {
 			await this.analysisService.closeImage(handle.sessionId).catch(() => undefined);
 			throw error;
@@ -381,14 +461,80 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 		};
 	}
 
+	/**
+	 * Re-derives an open image against the accepted corrections for its bytes.
+	 *
+	 * Pushed rather than pulled, because these facts live in the analysis server:
+	 * a correction that only the renderer knew about would leave every xref,
+	 * block, and call graph computed as though it had not been made
+	 * ([ADR 0015](../../../../../../Docs/history/adr/0015-authored-corrections-re-derive-facts.md)).
+	 *
+	 * An empty set is still sent when one was previously in effect — that is how
+	 * a withdrawal takes effect — but never for an image that has never had one,
+	 * since a re-analysis that changes nothing is pure cost.
+	 */
+	/**
+	 * Re-derives every open session whose bytes an accepted correction changed.
+	 *
+	 * Without this a correction takes effect only on the next open: the analyst
+	 * accepts it, the disclosure says what it did, and every fact they then read
+	 * is still derived from the uncorrected seeds. A proposal changes nothing, so
+	 * only an accepted edit re-derives — re-analysing on a proposal would spend a
+	 * full pass to arrive at the same facts.
+	 */
+	private reapplyCorrections(edit: IEdit): void {
+		if (edit.op !== EditOp.FunctionBounds || edit.status !== EditStatus.Accepted || edit.anchor.kind !== 'image') {
+			return;
+		}
+		for (const entry of this.sessions.values()) {
+			const session = entry.session;
+			if (session.contentHash !== edit.anchor.contentHash || session.sessionId === undefined) {
+				continue;
+			}
+			// Deliberately not awaited: this is a reaction to an authored edit,
+			// not a step in the caller's operation. A backend that refuses the
+			// set leaves the facts as they were — see `reanalyze` — so the worst
+			// case is that the correction is not reflected until the next open,
+			// which is where it stood before this existed.
+			void this.applyFunctionCorrections(session.sessionId, session.contentHash)
+				.catch(() => undefined);
+		}
+	}
+
+	private async applyFunctionCorrections(sessionId: AnalysisSessionId, contentHash: string): Promise<void> {
+		const corrections = functionCorrectionsFor(this.interpretationService, contentHash);
+		if (corrections.length === 0 && !this.correctedSessions.has(sessionId)) {
+			return;
+		}
+		if (corrections.length === 0) {
+			this.correctedSessions.delete(sessionId);
+		} else {
+			this.correctedSessions.add(sessionId);
+		}
+		await this.analysisService.setCorrections(sessionId, corrections.map(correction => ({
+			rva: correction.rva,
+			kind: correction.kind === 'define' ? FunctionCorrectionKindWire.Define : FunctionCorrectionKindWire.Undefine,
+			...(correction.endRva === undefined ? {} : { end_rva: correction.endRva }),
+		})));
+		// Announced only after the server has actually re-derived. A view that
+		// refreshed on the request rather than the result would read the
+		// previous facts back and cache them as the new ones.
+		const derived = [...this.sessions.values()].find(entry => entry.session.sessionId === sessionId)?.session;
+		if (derived) {
+			this._onDidRederiveFacts.fire(derived);
+		}
+	}
+
 	private adoptSession(session: IDelverSession, dirty: boolean): void {
-		this.sessions.set(session.targetPath, {
-			session,
+		const projectPath = this.projectService.projectPath(session.contentHash);
+		const adopted = projectPath === undefined ? session : { ...session, projectPath };
+		this.sessions.set(adopted.targetPath, {
+			session: adopted,
 			isProjectDirty: dirty,
-			projectPath: this.projectService.projectPath(session.contentHash),
+			projectPath,
 		});
-		this._activeTargetPath = session.targetPath;
-		this.publishActive(session);
+		this._activeTargetPath = adopted.targetPath;
+		this.publishActive(adopted);
 	}
 
 	/**
@@ -424,8 +570,25 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 		if (entry) {
 			entry.isProjectDirty = false;
 			if (projectPath !== undefined) {
-				entry.projectPath = projectPath;
+				this.adoptProjectPath(entry, projectPath);
 			}
+		}
+	}
+
+	/**
+	 * Records where one entry's project now lives, session included.
+	 *
+	 * The session carries the path the panes and the agent read, so moving the
+	 * entry alone leaves a Save As reporting — and re-saving — the old project.
+	 */
+	private adoptProjectPath(entry: IDelverSessionEntry, projectPath: string | undefined): void {
+		if (entry.projectPath === projectPath && entry.session.projectPath === projectPath) {
+			return;
+		}
+		entry.projectPath = projectPath;
+		entry.session = { ...entry.session, projectPath };
+		if (entry === this.activeEntry) {
+			this.publishActive(entry.session);
 		}
 	}
 
@@ -439,7 +602,7 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 			return false;
 		}
 		entry.isProjectDirty = false;
-		entry.projectPath = this.projectService.projectPath(entry.session.contentHash);
+		this.adoptProjectPath(entry, this.projectService.projectPath(entry.session.contentHash));
 		return true;
 	}
 
@@ -457,6 +620,17 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 
 	exports(): Promise<IGetExportsResult> {
 		return this.readSnapshotOrLive('exports', value => JSON.parse(value) as IGetExportsResult);
+	}
+
+	async scanStrings(fromRva: string, maxStrings: number): Promise<IScanStringsResult> {
+		const session = this.activeSession;
+		if (!session) {
+			throw new Error('No Delver project is open.');
+		}
+		if (session.sessionId === undefined) {
+			throw new Error('This project is open without its original sample, so strings past the retained list cannot be scanned. Ask the analyst to locate the matching target.');
+		}
+		return this.analysisService.scanStrings(session.sessionId, fromRva, maxStrings);
 	}
 
 	strings(): Promise<IStringsResult> {

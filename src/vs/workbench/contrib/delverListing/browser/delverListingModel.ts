@@ -6,7 +6,8 @@
 import { onUnexpectedError } from '../../../../base/common/errors.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
-import { IListingRowWire, IStringWire } from '../../../../platform/delver/common/protocol.generated.js';
+import { IInstructionRowWire, IStringRowWire, isInstructionRow, isStringRow } from '../../../../platform/delver/common/listingRows.js';
+import { IListingWindowRowWire } from '../../../../platform/delver/common/protocol.generated.js';
 
 /**
  * How many rows the table holds at once.
@@ -35,14 +36,35 @@ const EDGE_TRIGGER_ROWS = 2_000;
  */
 export interface IListingRow {
 	readonly row: number;
-	readonly data?: IListingRowWire;
+	readonly data?: IListingWindowRowWire;
 	readonly static?: IListingStaticRow;
 }
 
-/** Non-instruction content that participates in the same virtual listing. */
+/**
+ * Client-owned content that participates in the same virtual listing.
+ *
+ * Only the header block. Strings used to live here too, appended after the last
+ * instruction; they now arrive from the server at their own address as ordinary
+ * listing rows (`Docs/history/adr/0009-unified-address-ordered-listing.md`).
+ */
 export type IListingStaticRow =
-	| { readonly kind: 'metadata'; readonly address: string; readonly lines: readonly string[] }
-	| { readonly kind: 'string'; readonly value: IStringWire };
+	| { readonly kind: 'metadata'; readonly address: string; readonly lines: readonly string[] };
+
+/**
+ * The instruction a row holds, or `undefined` when it holds something else.
+ *
+ * A listing row is no longer always an instruction, and most callers want one
+ * specifically — a branch target, a signature, an operand to paint. Narrowing
+ * through here keeps every one of them from re-deriving the discriminant.
+ */
+export function instructionOf(row: IListingRow | undefined): IInstructionRowWire | undefined {
+	return row?.data !== undefined && isInstructionRow(row.data) ? row.data : undefined;
+}
+
+/** The string a row holds, or `undefined`. */
+export function stringOf(row: IListingRow | undefined): IStringRowWire | undefined {
+	return row?.data !== undefined && isStringRow(row.data) ? row.data : undefined;
+}
 
 /** A run of buffer-relative row indices. */
 export interface IRowRange {
@@ -52,7 +74,7 @@ export interface IRowRange {
 
 /** What the model needs from the analysis session. */
 export interface IListingSource {
-	listingWindow(startRow: number, count: number): Promise<readonly IListingRowWire[]>;
+	listingWindow(startRow: number, count: number): Promise<readonly IListingWindowRowWire[]>;
 }
 
 /**
@@ -88,7 +110,7 @@ export class DelverListingModel extends Disposable {
 	private _rows: IListingRow[] = [];
 	private _bufferStart = 0;
 	private readonly prefixCount: number;
-	private readonly instructionRows: number;
+	private readonly serverRows: number;
 	private readonly staticRows: readonly IListingStaticRow[];
 	private readonly loaded = new Set<number>();
 	private readonly inFlight = new Map<number, Promise<void>>();
@@ -97,16 +119,15 @@ export class DelverListingModel extends Disposable {
 
 	constructor(
 		private readonly source: IListingSource,
-		instructionRows: number,
+		serverRows: number,
 		prefixRows: readonly IListingStaticRow[] = [],
-		suffixRows: readonly IListingStaticRow[] = [],
 	) {
 		super();
 		this._register({ dispose: () => { this.disposed = true; } });
 		this.prefixCount = prefixRows.length;
-		this.instructionRows = instructionRows;
-		this.staticRows = [...prefixRows, ...suffixRows];
-		this.totalRows = instructionRows + this.staticRows.length;
+		this.serverRows = serverRows;
+		this.staticRows = prefixRows;
+		this.totalRows = serverRows + this.staticRows.length;
 		this._bufferStart = 0;
 		this._rows = this.rowsForRange(0, Math.min(BUFFER_ROWS, this.totalRows));
 	}
@@ -165,8 +186,8 @@ export class DelverListingModel extends Disposable {
 		return index >= 0 && index < this._rows.length ? index : -1;
 	}
 
-	/** Converts a provider instruction ordinal into this composite listing. */
-	instructionRow(row: number): number {
+	/** Converts a server listing ordinal into this composite listing. */
+	listingRow(row: number): number {
 		return this.prefixCount + row;
 	}
 
@@ -214,7 +235,7 @@ export class DelverListingModel extends Disposable {
 
 	private fetchPagesFor(firstRow: number, lastRow: number): void {
 		const firstInstruction = Math.max(0, firstRow - this.prefixCount);
-		const lastInstruction = Math.min(this.instructionRows - 1, lastRow - this.prefixCount);
+		const lastInstruction = Math.min(this.serverRows - 1, lastRow - this.prefixCount);
 		if (firstInstruction > lastInstruction) {
 			return;
 		}
@@ -230,10 +251,10 @@ export class DelverListingModel extends Disposable {
 			return;
 		}
 		const startRow = page * PAGE_ROWS;
-		if (startRow >= this.instructionRows) {
+		if (startRow >= this.serverRows) {
 			return;
 		}
-		const count = Math.min(PAGE_ROWS, this.instructionRows - startRow);
+		const count = Math.min(PAGE_ROWS, this.serverRows - startRow);
 
 		const request = this.source
 			.listingWindow(startRow, count)
@@ -271,11 +292,11 @@ export class DelverListingModel extends Disposable {
 	 * A page can straddle the buffer edge, so only the part that landed inside
 	 * it counts as changed.
 	 */
-	private applyRows(rows: readonly IListingRowWire[]): IRowRange | undefined {
+	private applyRows(rows: readonly IListingWindowRowWire[]): IRowRange | undefined {
 		let first = -1;
 		let last = -1;
 		for (const data of rows) {
-			const listingRow = this.instructionRow(data.row);
+			const listingRow = this.listingRow(data.row);
 			const index = this.indexOf(listingRow);
 			if (index === -1) {
 				continue;
@@ -298,7 +319,7 @@ export class DelverListingModel extends Disposable {
 	 */
 	private forgetPagesOutsideBuffer(): void {
 		const firstInstruction = Math.max(0, this._bufferStart - this.prefixCount);
-		const lastInstruction = Math.min(this.instructionRows - 1, this.bufferEnd - 1 - this.prefixCount);
+		const lastInstruction = Math.min(this.serverRows - 1, this.bufferEnd - 1 - this.prefixCount);
 		if (firstInstruction > lastInstruction) {
 			this.loaded.clear();
 			return;
@@ -323,10 +344,6 @@ export class DelverListingModel extends Disposable {
 	private rowAt(row: number): IListingRow {
 		if (row < this.prefixCount) {
 			return { row, static: this.staticRows[row] };
-		}
-		const suffixIndex = row - this.prefixCount - this.instructionRows;
-		if (suffixIndex >= 0) {
-			return { row, static: this.staticRows[this.prefixCount + suffixIndex] };
 		}
 		return { row };
 	}

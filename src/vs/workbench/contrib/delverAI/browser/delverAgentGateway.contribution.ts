@@ -20,6 +20,7 @@ import {
 	DELVER_AGENT_LIMITS,
 	DelverAgentError,
 	DelverAgentErrorCode,
+	IDelverAgentRequest,
 	IDelverAgentResult,
 	serializedByteLength,
 } from '../../../services/delver/common/delverAgentTypes.js';
@@ -40,6 +41,7 @@ const MAX_JSON_VALUES = 50_000;
 export interface IDelverAgentGatewayRequest {
 	readonly capability: string;
 	readonly args?: Readonly<Record<string, unknown>>;
+	readonly expectedProject?: IDelverAgentRequest['expectedProject'];
 	/** Bounded connection/client label used for later proposal attribution. */
 	readonly callerId?: string;
 }
@@ -107,6 +109,7 @@ export async function invokeDelverAgentGateway(
 		const result = await agentService.invoke({
 			capability: validated.capability,
 			args: validated.args,
+			...(validated.expectedProject === undefined ? {} : { expectedProject: validated.expectedProject }),
 			caller: { kind: 'model', id: validated.callerId },
 		}, token);
 		return {
@@ -187,6 +190,7 @@ function validateRequestId(value: unknown): string {
 interface IValidatedGatewayRequest {
 	readonly capability: string;
 	readonly args: Readonly<Record<string, unknown>>;
+	readonly expectedProject?: IDelverAgentRequest['expectedProject'];
 	readonly callerId: string;
 }
 
@@ -194,7 +198,7 @@ function validateGatewayRequest(value: unknown): IValidatedGatewayRequest {
 	if (!isPlainObject(value)) {
 		throw invalidArgument('The gateway request must be a JSON object.');
 	}
-	const unknownKeys = Object.keys(value).filter(key => key !== 'capability' && key !== 'args' && key !== 'callerId');
+	const unknownKeys = Object.keys(value).filter(key => key !== 'capability' && key !== 'args' && key !== 'expectedProject' && key !== 'callerId');
 	if (unknownKeys.length > 0) {
 		throw invalidArgument('The gateway request contains unsupported fields.');
 	}
@@ -210,11 +214,31 @@ function validateGatewayRequest(value: unknown): IValidatedGatewayRequest {
 	}
 
 	const args = value.args ?? {};
+	const expectedProject = value.expectedProject === undefined ? undefined : validateExpectedProject(value.expectedProject);
 	assertJsonSafe(args);
 	if (serializedByteLength(args) > DELVER_AGENT_LIMITS.serializedBytes) {
 		throw invalidArgument(`Gateway args exceed the ${DELVER_AGENT_LIMITS.serializedBytes} byte request limit.`);
 	}
-	return { capability: value.capability, args, callerId: callerId.trim() };
+	return { capability: value.capability, args, expectedProject, callerId: callerId.trim() };
+}
+
+function validateExpectedProject(value: unknown): IDelverAgentRequest['expectedProject'] {
+	if (value === null) {
+		return null;
+	}
+	if (!isPlainObject(value) || Object.keys(value).some(key => key !== 'contentHash' && key !== 'revisionId')) {
+		throw invalidArgument('expectedProject must be null or a project identity with no unsupported fields.');
+	}
+	if (typeof value.contentHash !== 'string' || !/^[0-9a-f]{64}$/i.test(value.contentHash)) {
+		throw invalidArgument('expectedProject.contentHash must be a SHA-256 hex digest.');
+	}
+	if (value.revisionId !== undefined && (typeof value.revisionId !== 'string' || value.revisionId.length === 0 || value.revisionId.length > 256)) {
+		throw invalidArgument('expectedProject.revisionId must be a non-empty string no longer than 256 characters.');
+	}
+	return {
+		contentHash: value.contentHash.toLowerCase(),
+		...(value.revisionId === undefined ? {} : { revisionId: value.revisionId }),
+	};
 }
 
 function assertJsonSafe(value: unknown): void {

@@ -8,6 +8,7 @@ import { fileURLToPath } from 'url';
 import { CancellationToken } from '../../../base/common/cancellation.js';
 import { Disposable } from '../../../base/common/lifecycle.js';
 import * as path from '../../../base/common/path.js';
+import { IDelverDecompilationSemanticsWire } from '../common/delverAnalysisService.js';
 import { DecompilerWorkerHost, IDecompilerWorkerInvocation } from './decompilerWorkerHost.js';
 
 const WORKER_SCRIPT_NAME = 'delver_decompiler_worker.py';
@@ -137,13 +138,13 @@ export class PyGhidraDecompiler extends Disposable {
 		await this.worker.shutdown();
 	}
 
-	async decompileFunction(targetId: string, targetPath: string, contentHash: string, functionRva: string, token: CancellationToken): Promise<{ readonly serialized: string; readonly targetOpenMs: number; readonly functionRecoveryMs: number; readonly decompilationMs: number; readonly serializationMs: number }> {
+	async decompileFunction(targetId: string, targetPath: string, contentHash: string, functionRva: string, semantics: IDelverDecompilationSemanticsWire, token: CancellationToken): Promise<{ readonly serialized: string; readonly targetOpenMs: number; readonly functionRecoveryMs: number; readonly decompilationMs: number; readonly serializationMs: number }> {
 		const targetOpenMs = await this.prepareTarget(targetId, targetPath, contentHash, token);
 		const workerTargetId = this.openedTargets.get(targetId)?.workerTargetId;
 		if (!workerTargetId) {
 			throw new Error(`Target '${targetId}' was not retained after preparation.`);
 		}
-		const result = await this.worker.request('decompileFunction', { targetId: workerTargetId, functionRva }, token);
+		const result = await this.worker.request('decompileFunction', { targetId: workerTargetId, functionRva, semantics }, token);
 		const timings = readWorkerTimings(result);
 		// Timings describe the worker transport and are not part of the versioned
 		// decompiler payload consumed by the strict workbench decoder or project DB.

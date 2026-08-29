@@ -12,6 +12,8 @@ import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/c
 import { DecompilerWorkerHost, IDecompilerWorkerHello } from '../../node/decompilerWorkerHost.js';
 import { createPyGhidraWorkerInvocation, discoverPyGhidraWorker, PyGhidraDecompiler, pyGhidraProjectDirectory, resolvePythonPath } from '../../node/pyGhidraDecompiler.js';
 
+const EMPTY_SEMANTICS = { schemaVersion: 2 as const, composites: [], dataTypes: [], functionPrototypes: [] };
+
 suite('PyGhidraDecompiler', () => {
 	ensureNoDisposablesAreLeakedInTestSuite();
 
@@ -65,6 +67,7 @@ suite('PyGhidraDecompiler', () => {
 
 	test('coalesces background preparation with the first decompilation', async () => {
 		let releaseOpen!: () => void;
+		let receivedSemantics: object | undefined;
 		const openGate = new Promise<void>(resolve => releaseOpen = resolve);
 		const requests: string[] = [];
 		class FakeWorker extends DecompilerWorkerHost {
@@ -77,12 +80,13 @@ suite('PyGhidraDecompiler', () => {
 					capabilities: { decompileFunction: true, cancel: true, persistentTargets: true, addressMappings: true, variables: true, intermediateRepresentations: [] },
 				});
 			}
-			override async request(method: string): Promise<object> {
+			override async request(method: string, params: object): Promise<object> {
 				requests.push(method);
 				if (method === 'openTarget') {
 					await openGate;
 					return { targetId: 'session-1' };
 				}
+				receivedSemantics = (params as { semantics?: object }).semantics;
 				return {
 					schemaVersion: 1, functionRva: '0x1000', text: 'return 0;', lineMappings: [], variables: [],
 					timings: { functionRecoveryMs: 1, decompilationMs: 2, serializationMs: 3 },
@@ -102,10 +106,12 @@ suite('PyGhidraDecompiler', () => {
 		assert.deepStrictEqual(requests, ['openTarget']);
 		releaseOpen();
 		await Promise.all([first, second]);
-		const result = await decompiler.decompileFunction('session-1', 'sample.exe', 'a'.repeat(64), '0x1000', CancellationToken.None);
+		const semantics = { schemaVersion: 2 as const, composites: [], dataTypes: [{ rva: '0x2000', declaration: 'uint32_t' }], functionPrototypes: [] };
+		const result = await decompiler.decompileFunction('session-1', 'sample.exe', 'a'.repeat(64), '0x1000', semantics, CancellationToken.None);
 
-		assert.deepStrictEqual({ requests, targetOpenMs: result.targetOpenMs, serialized: JSON.parse(result.serialized) }, {
+		assert.deepStrictEqual({ requests, receivedSemantics, targetOpenMs: result.targetOpenMs, serialized: JSON.parse(result.serialized) }, {
 			requests: ['openTarget', 'decompileFunction'],
+			receivedSemantics: semantics,
 			targetOpenMs: 0,
 			serialized: { schemaVersion: 1, functionRva: '0x1000', text: 'return 0;', lineMappings: [], variables: [] },
 		});
@@ -154,7 +160,7 @@ suite('PyGhidraDecompiler', () => {
 		assert.deepStrictEqual(requests, [{ method: 'openTarget', targetId: 'session-1' }]);
 		releaseOpen();
 		await Promise.all([first, second]);
-		await decompiler.decompileFunction('session-2', 'copy.exe', contentHash, '0x1000', CancellationToken.None);
+		await decompiler.decompileFunction('session-2', 'copy.exe', contentHash, '0x1000', EMPTY_SEMANTICS, CancellationToken.None);
 		await decompiler.closeTarget('session-1');
 		await decompiler.closeTarget('session-2');
 

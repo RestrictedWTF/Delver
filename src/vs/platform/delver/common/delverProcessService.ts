@@ -45,5 +45,14 @@ export interface IDelverProcessService {
 
 	attach(config: TargetConfig): Promise<IDelverTargetSnapshot>;
 	getImageInfo(): Promise<IGetImageInfoResult>;
-	detach(): void;
+
+	/**
+	 * Releases the provider child.
+	 *
+	 * Awaitable because the caller is a window and the provider is not: the
+	 * shared process survives a reload, and a child left behind keeps the
+	 * sample mapped — on Windows that locks the file under analysis. Shutdown
+	 * has to be able to join this, so it cannot be fire-and-forget.
+	 */
+	detach(): Promise<void>;
 }

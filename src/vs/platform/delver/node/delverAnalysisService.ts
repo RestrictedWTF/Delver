@@ -5,6 +5,7 @@
 
 import { Dirent, promises as fs } from 'fs';
 import { CancellationTokenSource } from '../../../base/common/cancellation.js';
+import { CancellationError, isCancellationError } from '../../../base/common/errors.js';
 import { Disposable, MutableDisposable } from '../../../base/common/lifecycle.js';
 import { basename, dirname, isAbsolute, join, normalize } from '../../../base/common/path.js';
 import { INativeEnvironmentService } from '../../environment/common/environment.js';
@@ -14,19 +15,12 @@ import {
 	IAnalysisSessionHandle,
 	IDelverDecompilerCacheInfoWire,
 	IDelverDecompilerTargetPreparationWire,
+	IDelverDecompilationSemanticsWire,
 	IDelverDecompilationWire,
 	IDelverAnalysisService,
 	IDelverReadMemoryWire,
 } from '../common/delverAnalysisService.js';
-import {
-	IFunctionsResult,
-	IGetExportsResult,
-	IGetImageInfoResult,
-	IGetImportsResult,
-	IListingWindowResult,
-	IStringsResult,
-	IXrefsResult,
-} from '../common/protocol.generated.js';
+import { IBasicBlocksResult, ICallGraphResult, ICallPathsResult, IFunctionCorrectionWire, IFunctionProfileResult, IFunctionsResult, IGetExportsResult, IGetImageInfoResult, IGetImportsResult, IGlobalAccessesResult, IGlobalsResult, IListingWindowResult, IScanStringsResult, ISetCorrectionsResult, IStringsResult, IXrefIndexResult, IXrefsResult } from '../common/protocol.generated.js';
 import { TargetConfig } from '../common/target.js';
 import { DelverAnalysisSession } from './analysisSession.js';
 import { discoverGhidraHeadless, GHIDRA_PINNED_VERSION, runGhidraHeadless } from './ghidraHeadlessDecompiler.js';
@@ -45,6 +39,7 @@ export class DelverAnalysisService extends Disposable implements IDelverAnalysis
 	private readonly sessions = new Map<AnalysisSessionId, DelverAnalysisSession>();
 	private readonly decompilations = new Map<string, { readonly sessionId: AnalysisSessionId; readonly source: CancellationTokenSource }>();
 	private readonly pyGhidra = this._register(new MutableDisposable<PyGhidraDecompiler>());
+	private readonly retiring = new Set<PyGhidraDecompiler>();
 	private readonly pyGhidraCacheRoot: string;
 	private pyGhidraKey: string | undefined;
 	private nextId = 1;
@@ -83,6 +78,30 @@ export class DelverAnalysisService extends Disposable implements IDelverAnalysis
 		return this.session(sessionId).functions();
 	}
 
+	async basicBlocks(sessionId: AnalysisSessionId, functionRva: string, maxBlocks: number): Promise<IBasicBlocksResult> {
+		return this.session(sessionId).basicBlocks(BigInt(functionRva), maxBlocks);
+	}
+
+	async callGraph(sessionId: AnalysisSessionId, functionRva: string, maxEdges: number): Promise<ICallGraphResult> {
+		return this.session(sessionId).callGraph(BigInt(functionRva), maxEdges);
+	}
+
+	async callPaths(sessionId: AnalysisSessionId, fromRva: string, toRva: string, maxDepth: number, maxPaths: number, maxVisited: number): Promise<ICallPathsResult> {
+		return this.session(sessionId).callPaths(BigInt(fromRva), BigInt(toRva), maxDepth, maxPaths, maxVisited);
+	}
+
+	async functionProfile(sessionId: AnalysisSessionId, functionRva: string): Promise<IFunctionProfileResult> {
+		return this.session(sessionId).functionProfile(BigInt(functionRva));
+	}
+
+	async globals(sessionId: AnalysisSessionId, start: number, maxGlobals: number): Promise<IGlobalsResult> {
+		return this.session(sessionId).globals(start, maxGlobals);
+	}
+
+	async globalAccesses(sessionId: AnalysisSessionId, rva: string, maxAccesses: number): Promise<IGlobalAccessesResult> {
+		return this.session(sessionId).globalAccesses(BigInt(rva), maxAccesses);
+	}
+
 	async imageInfo(sessionId: AnalysisSessionId): Promise<IGetImageInfoResult> {
 		return this.session(sessionId).getImageInfo();
 	}
@@ -105,6 +124,18 @@ export class DelverAnalysisService extends Disposable implements IDelverAnalysis
 
 	async xrefsFrom(sessionId: AnalysisSessionId, rva: string): Promise<IXrefsResult> {
 		return this.session(sessionId).xrefsFrom(BigInt(rva));
+	}
+
+	async xrefIndex(sessionId: AnalysisSessionId, start: number, maxXrefs: number): Promise<IXrefIndexResult> {
+		return this.session(sessionId).xrefIndex(start, maxXrefs);
+	}
+
+	async setCorrections(sessionId: AnalysisSessionId, corrections: readonly IFunctionCorrectionWire[]): Promise<ISetCorrectionsResult> {
+		return this.session(sessionId).setCorrections(corrections);
+	}
+
+	async scanStrings(sessionId: AnalysisSessionId, fromRva: string, maxStrings: number): Promise<IScanStringsResult> {
+		return this.session(sessionId).scanStrings(fromRva, maxStrings);
 	}
 
 	async readMemory(sessionId: AnalysisSessionId, space: 'image' | 'file', address: string, count: number): Promise<IDelverReadMemoryWire> {
@@ -157,7 +188,7 @@ export class DelverAnalysisService extends Disposable implements IDelverAnalysis
 		return previous;
 	}
 
-	async decompileFunction(sessionId: AnalysisSessionId, rva: string, contentHash: string, ghidraHome: string, pythonPath: string, operationId: string, backend: 'pyghidra' | 'headless'): Promise<IDelverDecompilationWire> {
+	async decompileFunction(sessionId: AnalysisSessionId, rva: string, contentHash: string, ghidraHome: string, pythonPath: string, operationId: string, backend: 'pyghidra' | 'headless', semantics: IDelverDecompilationSemanticsWire): Promise<IDelverDecompilationWire> {
 		if (this.decompilations.has(operationId)) {
 			throw new Error(`Duplicate decompiler operation ${operationId}`);
 		}
@@ -177,6 +208,7 @@ export class DelverAnalysisService extends Disposable implements IDelverAnalysis
 						this.session(sessionId).targetPath,
 						contentHash,
 						rva,
+						semantics,
 						source.token,
 					);
 					return {
@@ -188,6 +220,14 @@ export class DelverAnalysisService extends Disposable implements IDelverAnalysis
 						serialized: result.serialized,
 					};
 				} catch (error) {
+					if (isCancellationError(error)) {
+						// The user pressed Escape; the backend is fine. Wrapping this in a
+						// generic failure is what marks the decompiler dead until restart.
+						// `instanceof` does not survive the shared-process boundary but the
+						// error's `name` and `message` do (ADR 0001, "Scope"), so rethrow the
+						// canonical cancellation shape rather than a description of it.
+						throw new CancellationError();
+					}
 					throw new Error(`PyGhidra decompilation failed. Delver did not start the slow headless backend automatically.\n${errorMessage(error)}`);
 				}
 			}
@@ -264,10 +304,41 @@ export class DelverAnalysisService extends Disposable implements IDelverAnalysis
 	private getPyGhidra(configuration: { readonly ghidraHome: string; readonly pythonPath: string; readonly workerScriptPath: string }): PyGhidraDecompiler {
 		const key = `${configuration.pythonPath}\0${configuration.ghidraHome}\0${configuration.workerScriptPath}`;
 		if (!this.pyGhidra.value || this.pyGhidraKey !== key) {
+			this.retirePyGhidra();
 			this.pyGhidra.value = new PyGhidraDecompiler(configuration, this.pyGhidraCacheRoot);
 			this.pyGhidraKey = key;
 		}
 		return this.pyGhidra.value;
+	}
+
+	/**
+	 * Retires the current worker without killing it.
+	 *
+	 * Assigning over the {@link MutableDisposable} would dispose the old worker,
+	 * and disposal terminates the process outright. Ghidra only releases the lock
+	 * inside the cached project when it exits on its own, so a reconfiguration
+	 * that kills it poisons that project for every later open of the same
+	 * content — the cache is keyed by content hash and survives the restart.
+	 */
+	private retirePyGhidra(): void {
+		const previous = this.pyGhidra.clearAndLeak();
+		this.pyGhidraKey = undefined;
+		if (previous) {
+			this.retiring.add(previous);
+			void this.shutdownRetired(previous);
+		}
+	}
+
+	private async shutdownRetired(decompiler: PyGhidraDecompiler): Promise<void> {
+		try {
+			await decompiler.shutdown();
+		} catch {
+			// The worker is on its way out and no caller is waiting on it; the
+			// shutdown path escalates to a signal on its own if it has to.
+		} finally {
+			this.retiring.delete(decompiler);
+			decompiler.dispose();
+		}
 	}
 
 	private async resetPyGhidra(): Promise<void> {
@@ -289,6 +360,13 @@ export class DelverAnalysisService extends Disposable implements IDelverAnalysis
 			session.dispose();
 		}
 		this.sessions.clear();
+		// A worker still draining its graceful shutdown is no longer owned by the
+		// MutableDisposable; the service going away is the one point where waiting
+		// for it is no longer an option.
+		for (const decompiler of this.retiring) {
+			decompiler.dispose();
+		}
+		this.retiring.clear();
 	}
 }
 

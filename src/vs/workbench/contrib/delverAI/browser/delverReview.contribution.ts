@@ -20,7 +20,9 @@ import { Registry } from '../../../../platform/registry/common/platform.js';
 import { TreeView, TreeViewPane } from '../../../browser/parts/views/treeView.js';
 import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { Extensions as ViewExtensions, ITreeViewDescriptor, IViewsRegistry, TreeViewItemHandleArg } from '../../../common/views.js';
-import { registerDelverView } from '../../../services/delver/browser/delverViewContainer.js';
+import { Emitter } from '../../../../base/common/event.js';
+import { DelverSurfaceId, DelverZone } from '../../../services/delver/browser/delverSurface.js';
+import { registerDelverTreeSurface } from '../../../services/delver/browser/delverTreeSurface.js';
 import { FocusReason, IDelverFocusService } from '../../../services/delver/common/delverFocusService.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
@@ -28,9 +30,13 @@ import { IDelverProjectService } from '../../../services/delver/common/delverPro
 import { DELVER_TARGET_OPEN, IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 import {
 	DELVER_REVIEW_FINDING_CONTEXT,
+	DELVER_REVIEW_FINDINGS_CONTEXT,
+	DELVER_REVIEW_FINDINGS_HANDLE,
 	DELVER_REVIEW_GO_TO_COMMAND,
 	DELVER_REVIEW_OPEN_TOOL_CALL_COMMAND,
 	DELVER_REVIEW_PROPOSAL_CONTEXT,
+	DELVER_REVIEW_PROPOSALS_CONTEXT,
+	DELVER_REVIEW_PROPOSALS_HANDLE,
 	DELVER_REVIEW_VIEW_ID,
 	DelverReviewTreeDataProvider,
 	findingIdFromHandle,
@@ -41,7 +47,7 @@ import { DELVER_TOOL_CALL_SCHEME, DelverToolCallContentProvider, delverToolCallR
 const viewName = localize2('delverReview', "Review");
 const FOCUS_ORIGIN = 'delver.view.review';
 
-class DelverReviewViewContribution extends Disposable {
+export class DelverReviewViewContribution extends Disposable {
 	constructor(
 		@IInstantiationService instantiationService: IInstantiationService,
 		@IDelverSessionService sessionService: IDelverSessionService,
@@ -52,7 +58,7 @@ class DelverReviewViewContribution extends Disposable {
 		super();
 		const toolCallContentProvider = instantiationService.createInstance(DelverToolCallContentProvider);
 		this._register(textModelService.registerTextModelContentProvider(DELVER_TOOL_CALL_SCHEME, toolCallContentProvider));
-		const treeView = instantiationService.createInstance(TreeView, DELVER_REVIEW_VIEW_ID, viewName.value);
+		const treeView = this._register(instantiationService.createInstance(TreeView, DELVER_REVIEW_VIEW_ID, viewName.value));
 		const dataProvider = new DelverReviewTreeDataProvider();
 		treeView.dataProvider = dataProvider;
 		const viewDescriptor: ITreeViewDescriptor = {
@@ -65,38 +71,42 @@ class DelverReviewViewContribution extends Disposable {
 			collapsed: false,
 			order: 80,
 		};
-		registerDelverView(viewDescriptor);
+		const badge = this._register(new Emitter<number | undefined>());
+		this._register(registerDelverTreeSurface(DelverSurfaceId.Review, DelverZone.Inspector, viewDescriptor, badge.event));
 
 		const viewsRegistry = Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry);
-		viewsRegistry.registerViewWelcomeContent(DELVER_REVIEW_VIEW_ID, {
+		this._register(viewsRegistry.registerViewWelcomeContent(DELVER_REVIEW_VIEW_ID, {
 			content: localize('delverReviewNoTarget', "Open a target or project to review model-authored work.\n[Open Target](command:delver.target.open)"),
 			when: DELVER_TARGET_OPEN.toNegated(),
-		});
-		viewsRegistry.registerViewWelcomeContent(DELVER_REVIEW_VIEW_ID, {
+		}));
+		this._register(viewsRegistry.registerViewWelcomeContent(DELVER_REVIEW_VIEW_ID, {
 			content: localize('delverReviewEmpty', "No interpretation proposals or findings are waiting for review."),
 			when: DELVER_TARGET_OPEN,
-		});
+		}));
 
 		const update = () => {
 			const session = sessionService.activeSession;
+			const proposals = session ? interpretationService.pendingProposals(session.contentHash) : [];
+			const findings = session ? projectService.pendingFindings(session.contentHash) : [];
 			dataProvider.setPending(
-				session ? interpretationService.pendingProposals(session.contentHash) : [],
-				session ? projectService.pendingFindings(session.contentHash) : [],
+				proposals,
+				findings,
 				session ? projectService.toolCallsFor(session.contentHash) : [],
 			);
+			badge.fire(proposals.length + findings.length || undefined);
 			treeView.refresh().catch(onUnexpectedError);
 		};
-		sessionService.onDidChangeActiveSession(update);
-		interpretationService.onDidChange(event => {
+		this._register(sessionService.onDidChangeActiveSession(update));
+		this._register(interpretationService.onDidChange(event => {
 			if (event.edit.anchor.contentHash === sessionService.activeSession?.contentHash) {
 				update();
 			}
-		});
-		projectService.onDidChangeFindings(event => {
+		}));
+		this._register(projectService.onDidChangeFindings(event => {
 			if (event.contentHash === sessionService.activeSession?.contentHash) {
 				update();
 			}
-		});
+		}));
 		update();
 	}
 }
@@ -111,11 +121,15 @@ CommandsRegistry.registerCommand(DELVER_REVIEW_GO_TO_COMMAND, (accessor: Service
 });
 
 CommandsRegistry.registerCommand(DELVER_REVIEW_OPEN_TOOL_CALL_COMMAND, async (accessor: ServicesAccessor, contentHash: string, callId: string) => {
-	const call = accessor.get(IDelverProjectService).toolCall(contentHash, callId);
+	// Service accessors are invocation-scoped. Resolve every dependency before
+	// the first await so opening the editor cannot outlive the accessor.
+	const projectService = accessor.get(IDelverProjectService);
+	const editorService = accessor.get(IEditorService);
+	const call = projectService.toolCall(contentHash, callId);
 	if (!call) {
 		return;
 	}
-	await accessor.get(IEditorService).openEditor({
+	await editorService.openEditor({
 		resource: delverToolCallResource(call),
 		label: localize('delverReviewToolCallEditorLabel', "Tool Call: {0}", call.capability),
 		description: call.callId,
@@ -161,8 +175,98 @@ registerAction2(class RejectDelverReviewItemAction extends Action2 {
 	}
 });
 
+const reviewGroupWhen = ContextKeyExpr.and(
+	ContextKeyExpr.equals('view', DELVER_REVIEW_VIEW_ID),
+	ContextKeyExpr.or(
+		ContextKeyExpr.equals('viewItem', DELVER_REVIEW_PROPOSALS_CONTEXT),
+		ContextKeyExpr.equals('viewItem', DELVER_REVIEW_FINDINGS_CONTEXT),
+	),
+);
+
+registerAction2(class AcceptAllDelverReviewItemsAction extends Action2 {
+	constructor() {
+		super({
+			id: 'delver.review.acceptAll',
+			title: localize('delverReviewAcceptAll', "Accept All"),
+			icon: Codicon.check,
+			menu: { id: MenuId.ViewItemContext, when: reviewGroupWhen, group: 'inline', order: 1 },
+		});
+	}
+
+	run(accessor: ServicesAccessor, handle: TreeViewItemHandleArg): Promise<void> {
+		return decideReviewGroup(accessor, handle.$treeItemHandle, 'accepted');
+	}
+});
+
+registerAction2(class RejectAllDelverReviewItemsAction extends Action2 {
+	constructor() {
+		super({
+			id: 'delver.review.rejectAll',
+			title: localize('delverReviewRejectAll', "Reject All"),
+			icon: Codicon.close,
+			menu: { id: MenuId.ViewItemContext, when: reviewGroupWhen, group: 'inline', order: 2 },
+		});
+	}
+
+	run(accessor: ServicesAccessor, handle: TreeViewItemHandleArg): Promise<void> {
+		return decideReviewGroup(accessor, handle.$treeItemHandle, 'rejected');
+	}
+});
+
+/**
+ * Resolves every service a review decision needs.
+ *
+ * Service accessors are invocation-scoped: they stop resolving once the
+ * synchronous invocation returns, which is long before an awaited decision
+ * settles. Resolving up front — the notification service above all — keeps the
+ * failure path able to report itself instead of throwing an illegal-state error
+ * that leaves the analyst with no feedback at all.
+ */
+function reviewServices(accessor: ServicesAccessor) {
+	return {
+		sessionService: accessor.get(IDelverSessionService),
+		interpretationService: accessor.get(IDelverInterpretationService),
+		projectService: accessor.get(IDelverProjectService),
+		notificationService: accessor.get(INotificationService),
+	};
+}
+
+async function decideReviewGroup(accessor: ServicesAccessor, handle: string, outcome: DelverFindingOutcome): Promise<void> {
+	const { sessionService, interpretationService, projectService, notificationService } = reviewServices(accessor);
+	const session = sessionService.activeSession;
+	if (!session) {
+		return;
+	}
+	try {
+		if (handle === DELVER_REVIEW_PROPOSALS_HANDLE) {
+			const sequences = interpretationService.pendingProposals(session.contentHash).map(proposal => proposal.seq);
+			if (sequences.length === 0) {
+				return;
+			}
+			await interpretationService.resolveProposals(
+				session.contentHash,
+				sequences,
+				outcome === 'accepted' ? EditStatus.Accepted : EditStatus.Rejected,
+			);
+		} else if (handle === DELVER_REVIEW_FINDINGS_HANDLE) {
+			const findingIds = projectService.pendingFindings(session.contentHash).map(finding => finding.id);
+			if (findingIds.length === 0) {
+				return;
+			}
+			await projectService.resolveFindings(session.contentHash, findingIds, outcome);
+		} else {
+			return;
+		}
+		if (!sessionService.projectPath) {
+			sessionService.markProjectDirty();
+		}
+	} catch (error) {
+		notificationService.error(error instanceof Error ? error.message : String(error));
+	}
+}
+
 async function decideReviewItem(accessor: ServicesAccessor, handle: string, outcome: DelverFindingOutcome): Promise<void> {
-	const sessionService = accessor.get(IDelverSessionService);
+	const { sessionService, interpretationService, projectService, notificationService } = reviewServices(accessor);
 	const session = sessionService.activeSession;
 	if (!session) {
 		return;
@@ -171,13 +275,13 @@ async function decideReviewItem(accessor: ServicesAccessor, handle: string, outc
 		const proposalSeq = proposalSequenceFromHandle(handle);
 		const findingId = findingIdFromHandle(handle);
 		if (proposalSeq !== undefined) {
-			await accessor.get(IDelverInterpretationService).resolveProposals(
+			await interpretationService.resolveProposals(
 				session.contentHash,
 				[proposalSeq],
 				outcome === 'accepted' ? EditStatus.Accepted : EditStatus.Rejected,
 			);
 		} else if (findingId !== undefined) {
-			await accessor.get(IDelverProjectService).resolveFindings(session.contentHash, [findingId], outcome);
+			await projectService.resolveFindings(session.contentHash, [findingId], outcome);
 		} else {
 			return;
 		}
@@ -185,6 +289,6 @@ async function decideReviewItem(accessor: ServicesAccessor, handle: string, outc
 			sessionService.markProjectDirty();
 		}
 	} catch (error) {
-		accessor.get(INotificationService).error(error instanceof Error ? error.message : String(error));
+		notificationService.error(error instanceof Error ? error.message : String(error));
 	}
 }

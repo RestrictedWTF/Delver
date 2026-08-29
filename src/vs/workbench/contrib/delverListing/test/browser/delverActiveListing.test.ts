@@ -5,7 +5,7 @@
 
 import * as assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { activeListing, IDelverListingHost, setActiveListing, touchActiveListing } from '../../browser/delverActiveListing.js';
+import { activeListing, IDelverListingHost, setActiveListing, touchActiveListing } from '../../../../services/delver/browser/delverActiveListing.js';
 
 function host(name: string): IDelverListingHost {
 	return {

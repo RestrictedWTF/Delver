@@ -6,7 +6,7 @@
 import * as assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { FunctionSourceWire } from '../../../../../platform/delver/common/protocol.generated.js';
-import { shouldFollowWhilePinned } from '../../browser/delverListingContext.js';
+import { shouldFollowWhilePinned } from '../../../../services/delver/browser/delverListingContext.js';
 import { FocusReason } from '../../../../services/delver/common/delverFocusService.js';
 import { parseAddress } from '../../browser/delverListingNavigation.js';
 import { containingFunctionRva } from '../../../../services/delver/common/delverFunctions.js';

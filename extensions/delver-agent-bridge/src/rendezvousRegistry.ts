@@ -136,7 +136,7 @@ export class FileRendezvousRegistry implements IRendezvousRegistry {
 		await this.prepareDirectory(this.directory);
 
 		const temporaryId = this.createTemporaryId();
-		if (!REGISTRY_ID.test(temporaryId)) {
+		if (!matchesPattern(temporaryId, REGISTRY_ID)) {
 			throw new Error('The Delver rendezvous temporary identifier is invalid.');
 		}
 		const temporaryPath = this.entryPath(`.tmp-${temporaryId}.json`);
@@ -317,9 +317,9 @@ export function validateRendezvousRegistryEntry(entry: IRendezvousRegistryEntry,
 	if (
 		entry.schemaVersion !== RENDEZVOUS_SCHEMA_VERSION
 		|| entry.bootstrapProtocolVersion !== RENDEZVOUS_BOOTSTRAP_PROTOCOL_VERSION
-		|| !REGISTRY_ID.test(entry.registryEntryId)
-		|| !REGISTRY_ID.test(entry.windowInstanceId)
-		|| !ROOT_FINGERPRINT.test(entry.rootFingerprint)
+		|| !matchesPattern(entry.registryEntryId, REGISTRY_ID)
+		|| !matchesPattern(entry.windowInstanceId, REGISTRY_ID)
+		|| !matchesPattern(entry.rootFingerprint, ROOT_FINGERPRINT)
 		|| !isLocalEndpoint(entry.bootstrapEndpoint, platform)
 		|| !Number.isSafeInteger(entry.ownerProcessId)
 		|| entry.ownerProcessId < 1
@@ -332,6 +332,15 @@ export function validateRendezvousRegistryEntry(entry: IRendezvousRegistryEntry,
 	) {
 		throw new Error('The Delver rendezvous entry is invalid.');
 	}
+}
+
+/**
+ * Tests a pattern against a value that arrived from outside this process.
+ * `RegExp.test` coerces its argument, so a number or a one-element array of the
+ * right shape would otherwise pass a check on a field that must be a string.
+ */
+function matchesPattern(value: unknown, pattern: RegExp): boolean {
+	return typeof value === 'string' && pattern.test(value);
 }
 
 function isLocalEndpoint(endpoint: string, platform: NodeJS.Platform): boolean {

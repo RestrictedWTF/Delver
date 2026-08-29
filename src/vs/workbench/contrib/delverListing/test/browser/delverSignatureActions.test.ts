@@ -6,7 +6,7 @@
 import * as assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { IDelverAgentResult } from '../../../../services/delver/common/delverAgentTypes.js';
-import { explicitSignatureGenerationInvocation, explicitSignaturePolicy, explicitSignatureRva, generatedSignaturePresentation, signatureActions, signatureGenerationArgs, signaturePolicyChoices } from '../../browser/delverSignatureActions.js';
+import { explicitSignatureGenerationInvocation, explicitSignaturePolicy, explicitSignatureRva, generatedSignaturePresentation, signatureActions, signatureGenerationArgs, signaturePolicyChoices } from '../../../../services/delver/browser/delverSignatureActions.js';
 
 suite('Delver signature actions', () => {
 

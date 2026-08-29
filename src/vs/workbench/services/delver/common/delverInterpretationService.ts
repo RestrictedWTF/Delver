@@ -7,18 +7,20 @@ import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import {
 	Anchor,
+	anchorKey,
 	EditOp,
 	EditStatus,
 	EditValue,
 	IAuthor,
 	IEdit,
+	IEditRequest,
 	IInterpretationAt,
 	InterpretationLog,
 	ProposalOutcome,
 } from '../../../../platform/delver/common/interpretation.js';
 import {
 	editFromWire,
-	editToWire,
+	editRequestToWire,
 	IInterpretationEditWire,
 	IDelverInterpretationStoreService,
 } from '../../../../platform/delver/common/delverInterpretationStoreService.js';
@@ -307,7 +309,7 @@ export class DelverInterpretationService extends Disposable implements IDelverIn
 			const desired = InterpretationLog.from(active.filter(edit => !sameAuthor(edit.author, author)));
 			const fields = new Map<string, IEdit[]>();
 			for (const edit of targets) {
-				const key = `${edit.anchor.contentHash}:${edit.anchor.rva.toString(16)}:${edit.op}`;
+				const key = `${anchorKey(edit.anchor)}:${edit.op}`;
 				const existing = fields.get(key);
 				if (existing) {
 					existing.push(edit);
@@ -359,11 +361,22 @@ export class DelverInterpretationService extends Disposable implements IDelverIn
 		return this.logs.get(contentHash)?.log ?? [];
 	}
 
-	private async appendPersisted(contentHash: string, request: Parameters<InterpretationLog['append']>[0]): Promise<IEdit> {
+	/**
+	 * Persists one edit, then folds the record the store wrote into the log.
+	 *
+	 * The sequence comes back from the store rather than being minted here: this
+	 * log is a replay of what the store holds, and a second window replaying the
+	 * same edits would otherwise mint the same number and lose one of the two
+	 * writes. The log's own next free sequence goes along as a floor, so an edit
+	 * also stays clear of a project log the store has never seen.
+	 */
+	private async appendPersisted(contentHash: string, request: IEditRequest): Promise<IEdit> {
 		const log = this.logs.get(contentHash)!;
 		const next = InterpretationLog.from(log.log);
-		const edit = next.append(request);
-		await this.storeService.append(contentHash, editToWire(edit));
+		const pending = next.prepare(request);
+		const stored = await this.storeService.append(contentHash, editRequestToWire(pending), next.nextSequence);
+		const edit = editFromWire(stored);
+		next.adopt(edit);
 		this.logs.set(contentHash, next);
 		this._onDidChange.fire({ edit });
 		return edit;

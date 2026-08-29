@@ -6,11 +6,12 @@
 import { Codicon } from '../../../../base/common/codicons.js';
 import { toErrorMessage } from '../../../../base/common/errorMessage.js';
 import { onUnexpectedError } from '../../../../base/common/errors.js';
+import { Disposable } from '../../../../base/common/lifecycle.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
 import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
-import { EditOp } from '../../../../platform/delver/common/interpretation.js';
+import { EditOp, isImageAnchor } from '../../../../platform/delver/common/interpretation.js';
 import { IFunctionWire } from '../../../../platform/delver/common/protocol.generated.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
@@ -46,13 +47,14 @@ const FOCUS_ORIGIN = 'delver.view.functions';
 /**
  * Every function the analysis found, split by how much the image vouches for it.
  */
-class DelverFunctionsViewContribution {
+class DelverFunctionsViewContribution extends Disposable {
 	constructor(
 		@IInstantiationService instantiationService: IInstantiationService,
 		@IDelverSessionService sessionService: IDelverSessionService,
 		@IDelverInterpretationService interpretationService: IDelverInterpretationService,
 	) {
-		const treeView = instantiationService.createInstance(TreeView, DELVER_FUNCTIONS_VIEW_ID, viewName.value);
+		super();
+		const treeView = this._register(instantiationService.createInstance(TreeView, DELVER_FUNCTIONS_VIEW_ID, viewName.value));
 		const dataProvider = new DelverFunctionsTreeDataProvider();
 		treeView.dataProvider = dataProvider;
 		registerDelverTreeFilterProvider(treeView, dataProvider);
@@ -67,9 +69,9 @@ class DelverFunctionsViewContribution {
 			collapsed: false,
 			order: 20,
 		};
-		registerDelverTreeSurface(DelverSurfaceId.Functions, DelverZone.Navigator, viewDescriptor);
+		this._register(registerDelverTreeSurface(DelverSurfaceId.Functions, DelverZone.Navigator, viewDescriptor));
 
-		Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViewWelcomeContent(
+		this._register(Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViewWelcomeContent(
 			DELVER_FUNCTIONS_VIEW_ID,
 			{
 				content: localize(
@@ -78,7 +80,7 @@ class DelverFunctionsViewContribution {
 				),
 				when: DELVER_TARGET_OPEN.toNegated(),
 			},
-		);
+		));
 
 		/** Guards against a slow lookup overwriting a newer session's answer. */
 		let generation = 0;
@@ -110,9 +112,10 @@ class DelverFunctionsViewContribution {
 
 		// Renaming anything re-labels this pane immediately. The log is the
 		// truth; this view is one of its caches.
-		interpretationService.onDidChange(event => {
+		this._register(interpretationService.onDidChange(event => {
 			const session = sessionService.activeSession;
-			if (!session || event.edit.op !== EditOp.Rename || event.edit.anchor.contentHash !== session.contentHash) {
+			if (!session || event.edit.op !== EditOp.Rename || event.edit.anchor.contentHash !== session.contentHash
+				|| !isImageAnchor(event.edit.anchor)) {
 				return;
 			}
 			const wireRva = wireRvaByAddress.get(event.edit.anchor.rva);
@@ -127,7 +130,7 @@ class DelverFunctionsViewContribution {
 			}
 			dataProvider.setNames(names);
 			treeView.refresh().catch(onUnexpectedError);
-		});
+		}));
 
 		const update = async () => {
 			const session = sessionService.activeSession;
@@ -167,7 +170,12 @@ class DelverFunctionsViewContribution {
 			treeView.refresh().catch(onUnexpectedError);
 		};
 
-		sessionService.onDidChangeActiveSession(() => update());
+		this._register(sessionService.onDidChangeActiveSession(() => update()));
+		// An accepted correction re-derives the function list itself, so this
+		// pane has to ask again rather than re-label what it already holds — the
+		// rename path above cannot help, because the function it names may not
+		// have existed a moment ago.
+		this._register(sessionService.onDidRederiveFacts(() => update()));
 
 		// A session may already be open when this contribution constructs.
 		if (sessionService.activeSession) {

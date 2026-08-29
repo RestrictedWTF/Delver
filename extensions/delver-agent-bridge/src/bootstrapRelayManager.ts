@@ -5,7 +5,7 @@
 
 import { BootstrapSessionCloseReason, IBootstrapPeerIdentity } from './bootstrap';
 import { GatedBootstrapRelayTransport } from './bootstrapRelayTransport';
-import { IBootstrapRelayAttempt, parseRelayPeerRecord, RelayProcessFactory } from './relayProcess';
+import { IBootstrapRelayAttempt, IRelayProcess, parseRelayPeerRecord, RelayProcessFactory } from './relayProcess';
 import { IRelayTimers, isRelayReadyRecord } from './relaySupervisor';
 
 const CONTROL_MAX_LINE_BYTES = 4 * 1024;
@@ -60,6 +60,7 @@ export class DelverBootstrapRelayManager {
 	private resolveCompletion!: (reason: BootstrapRelayCloseReason) => void;
 	private state: BootstrapRelayState = 'idle';
 	private attempt: IBootstrapRelayAttempt | undefined;
+	private relayProcess: IRelayProcess | undefined;
 	private transport: GatedBootstrapRelayTransport | undefined;
 	private session: IManagedBootstrapSession | undefined;
 	private publication: IBootstrapRelayPublication | undefined;
@@ -101,7 +102,10 @@ export class DelverBootstrapRelayManager {
 
 		try {
 			this.attempt = this.options.createAttempt();
+			// The child is owned from the moment it exists: every later failure in
+			// this block must be able to kill it, transport or no transport.
 			const relayProcess = this.options.spawn(this.options.executable, this.attempt.endpoint);
+			this.relayProcess = relayProcess;
 			this.transport = new GatedBootstrapRelayTransport(relayProcess, this.options.maxBufferedInputBytes);
 			this.state = 'awaitingReady';
 			this.removeControlListener = relayProcess.onStderr(data => this.receiveControl(data));
@@ -303,8 +307,15 @@ export class DelverBootstrapRelayManager {
 		this.session?.dispose(false);
 		this.session = undefined;
 		if (terminate) {
-			this.transport?.terminate();
+			// The transport terminates the child it wraps; without one, only the
+			// manager holds the spawned child and must kill it directly.
+			if (this.transport) {
+				this.transport.terminate();
+			} else {
+				this.relayProcess?.terminate();
+			}
 		}
+		this.relayProcess = undefined;
 		this.rejectStarted(error);
 		void this.finishCleanup(reason);
 	}

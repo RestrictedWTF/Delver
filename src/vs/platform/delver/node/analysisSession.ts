@@ -11,20 +11,23 @@ import { DelverRpcClient } from './rpc.js';
 import {
 	IDelverReadMemoryWire,
 } from '../common/delverAnalysisService.js';
-import {
-	IAddressForRowResult,
-	IFunctionsResult,
-	IGetExportsResult,
-	IGetImageInfoResult,
-	IGetImportsResult,
-	IListingWindowResult,
-	IOpenImageResult,
-	IReadMemoryResult,
-	IRowForAddressResult,
-	IStringsResult,
-	IXrefsResult,
-} from '../common/protocol.generated.js';
+import { IAddressForRowResult, IBasicBlocksResult, ICallGraphResult, ICallPathsResult, IFunctionCorrectionWire, IFunctionProfileResult, IFunctionsResult, IGetExportsResult, IGetImageInfoResult, IGetImportsResult, IGlobalAccessesResult, IGlobalsResult, IListingWindowResult, IOpenImageResult, IReadMemoryResult, IRowForAddressResult, IScanStringsResult, ISetCorrectionsResult, IStringsResult, IXrefIndexResult, IXrefsResult } from '../common/protocol.generated.js';
 import { TargetConfig } from '../common/target.js';
+
+/**
+ * Where a child process's diagnostics go.
+ *
+ * A provider's stderr is the only place a spawn or parse failure is explained,
+ * so it cannot simply be dropped. It also cannot be written to the console
+ * unconditionally: the unit-test harness fails any test run that produces
+ * console output, which silently turned the integration tests below into a
+ * suite that aborted before it asserted anything. Injecting the sink keeps the
+ * diagnostics in production and lets a test collect them instead.
+ */
+export type DelverProcessLogSink = (message: string) => void;
+
+/** Writes child diagnostics where a developer will actually see them. */
+export const consoleProcessLogSink: DelverProcessLogSink = message => console.error(message);
 
 /**
  * Owns the two processes that make up an analysis session.
@@ -53,7 +56,7 @@ export class DelverAnalysisSession extends Disposable {
 	/**
 	 * Starts a provider and an analysis server, then opens the image.
 	 */
-	static async start(config: TargetConfig): Promise<DelverAnalysisSession> {
+	static async start(config: TargetConfig, log: DelverProcessLogSink = consoleProcessLogSink): Promise<DelverAnalysisSession> {
 		if (config.kind !== 'file') {
 			throw new Error(`Unsupported target kind for analysis: ${config.kind}`);
 		}
@@ -66,7 +69,7 @@ export class DelverAnalysisSession extends Disposable {
 			['--listen', providerEndpoint, config.path],
 			{ stdio: ['ignore', 'ignore', 'pipe'] },
 		);
-		logStderr(provider, 'provider-file');
+		logStderr(provider, 'provider-file', log);
 
 		let analysis: ChildProcess | undefined;
 		try {
@@ -77,7 +80,7 @@ export class DelverAnalysisSession extends Disposable {
 				['--provider', providerEndpoint, '--listen', analysisEndpoint],
 				{ stdio: ['ignore', 'ignore', 'pipe'] },
 			);
-			logStderr(analysis, 'server-analysis');
+			logStderr(analysis, 'server-analysis', log);
 			await waitForListening(analysis, 'server-analysis');
 
 			const rpc = await DelverRpcClient.connect(analysisEndpoint);
@@ -199,6 +202,62 @@ export class DelverAnalysisSession extends Disposable {
 		return json.result as IFunctionsResult;
 	}
 
+	async basicBlocks(functionRva: bigint, maxBlocks: number): Promise<IBasicBlocksResult> {
+		const { json } = await this.rpc.call('analysis/basicBlocks', {
+			image_id: this.image.image_id,
+			function_rva: `0x${functionRva.toString(16).toUpperCase()}`,
+			max_blocks: maxBlocks,
+		});
+		return json.result as IBasicBlocksResult;
+	}
+
+	async callGraph(functionRva: bigint, maxEdges: number): Promise<ICallGraphResult> {
+		const { json } = await this.rpc.call('analysis/callGraph', {
+			image_id: this.image.image_id,
+			function_rva: `0x${functionRva.toString(16).toUpperCase()}`,
+			max_edges: maxEdges,
+		});
+		return json.result as ICallGraphResult;
+	}
+
+	async callPaths(fromRva: bigint, toRva: bigint, maxDepth: number, maxPaths: number, maxVisited: number): Promise<ICallPathsResult> {
+		const { json } = await this.rpc.call('analysis/callPaths', {
+			image_id: this.image.image_id,
+			from_rva: `0x${fromRva.toString(16).toUpperCase()}`,
+			to_rva: `0x${toRva.toString(16).toUpperCase()}`,
+			max_depth: maxDepth,
+			max_paths: maxPaths,
+			max_visited: maxVisited,
+		});
+		return json.result as ICallPathsResult;
+	}
+
+	async functionProfile(functionRva: bigint): Promise<IFunctionProfileResult> {
+		const { json } = await this.rpc.call('analysis/functionProfile', {
+			image_id: this.image.image_id,
+			function_rva: `0x${functionRva.toString(16).toUpperCase()}`,
+		});
+		return json.result as IFunctionProfileResult;
+	}
+
+	async globals(start: number, maxGlobals: number): Promise<IGlobalsResult> {
+		const { json } = await this.rpc.call('analysis/globals', {
+			image_id: this.image.image_id,
+			start,
+			max_globals: maxGlobals,
+		});
+		return json.result as IGlobalsResult;
+	}
+
+	async globalAccesses(rva: bigint, maxAccesses: number): Promise<IGlobalAccessesResult> {
+		const { json } = await this.rpc.call('analysis/globalAccesses', {
+			image_id: this.image.image_id,
+			rva: `0x${rva.toString(16).toUpperCase()}`,
+			max_accesses: maxAccesses,
+		});
+		return json.result as IGlobalAccessesResult;
+	}
+
 	async strings(): Promise<IStringsResult> {
 		const { json } = await this.rpc.call('analysis/strings', {
 			image_id: this.image.image_id,
@@ -212,6 +271,54 @@ export class DelverAnalysisSession extends Disposable {
 
 	async xrefsFrom(rva: bigint): Promise<IXrefsResult> {
 		return this.xrefs('analysis/xrefsFrom', rva);
+	}
+
+	/**
+	 * One page of the whole cross-reference table.
+	 *
+	 * Unlike `xrefsTo`/`xrefsFrom` this asks nothing about an address; it walks
+	 * the table so a project can keep it. The result's `next_start` is returned
+	 * exactly as the server sent it — absent means the table ended, and putting a
+	 * number there would erase that signal.
+	 */
+	/**
+	 * Re-derives every fact against a new authored correction set.
+	 *
+	 * The whole set is sent, never a delta: the server replaces what is in
+	 * effect, and a caller that could send partial updates would have no way to
+	 * say what the facts it is reading were derived against.
+	 */
+	async setCorrections(corrections: readonly IFunctionCorrectionWire[]): Promise<ISetCorrectionsResult> {
+		const { json } = await this.rpc.call('analysis/setCorrections', {
+			image_id: this.image.image_id,
+			corrections,
+		});
+		return json.result as ISetCorrectionsResult;
+	}
+
+	/**
+	 * Re-scans a bounded window of the image for strings.
+	 *
+	 * Distinct from `strings()`, which serves the list retained at analysis
+	 * time and stops at the scanner's cap. This produces them on demand, so a
+	 * caller can walk past that cap instead of being stopped by it.
+	 */
+	async scanStrings(fromRva: string, maxStrings: number): Promise<IScanStringsResult> {
+		const { json } = await this.rpc.call('analysis/scanStrings', {
+			image_id: this.image.image_id,
+			from_rva: fromRva,
+			max_strings: maxStrings,
+		});
+		return json.result as IScanStringsResult;
+	}
+
+	async xrefIndex(start: number, maxXrefs: number): Promise<IXrefIndexResult> {
+		const { json } = await this.rpc.call('analysis/xrefIndex', {
+			image_id: this.image.image_id,
+			start,
+			max_xrefs: maxXrefs,
+		});
+		return json.result as IXrefIndexResult;
 	}
 
 	private async xrefs(method: string, rva: bigint): Promise<IXrefsResult> {
@@ -245,9 +352,9 @@ function localEndpoint(role: string): string {
 		: `unix:///tmp/delver-${role}-${unique}.sock`;
 }
 
-function logStderr(child: ChildProcess, name: string): void {
+function logStderr(child: ChildProcess, name: string, log: DelverProcessLogSink): void {
 	child.stderr?.on('data', (chunk: Buffer) => {
-		console.error(`[${name}] ${chunk.toString().trimEnd()}`);
+		log(`[${name}] ${chunk.toString().trimEnd()}`);
 	});
 }
 

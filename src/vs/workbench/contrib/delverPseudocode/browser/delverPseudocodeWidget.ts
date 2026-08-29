@@ -6,9 +6,10 @@
 import * as dom from '../../../../base/browser/dom.js';
 import { Dimension } from '../../../../base/browser/dom.js';
 import { Button } from '../../../../base/browser/ui/button/button.js';
+import { disposableTimeout } from '../../../../base/common/async.js';
 import { CancellationToken, CancellationTokenSource } from '../../../../base/common/cancellation.js';
 import { CancellationError, isCancellationError } from '../../../../base/common/errors.js';
-import { Disposable, DisposableStore, MutableDisposable } from '../../../../base/common/lifecycle.js';
+import { Disposable, DisposableStore, IDisposable, MutableDisposable } from '../../../../base/common/lifecycle.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { IEditorConstructionOptions } from '../../../../editor/browser/config/editorConfiguration.js';
 import { CodeEditorWidget } from '../../../../editor/browser/widget/codeEditor/codeEditorWidget.js';
@@ -27,12 +28,12 @@ import { IDelverSurface } from '../../../services/delver/browser/delverSurface.j
 import { decompilerLinesForRva, IDelverDecompilerService, IDecompiledFunction, rangesForDecompilerLine } from '../../../services/delver/common/delverDecompilerService.js';
 import { FocusReason, IDelverFocusService } from '../../../services/delver/common/delverFocusService.js';
 import { IDelverSelectionService, MenuDelverSelectionContext } from '../../../services/delver/common/delverSelection.js';
-import { foldedComment } from '../../../../platform/delver/common/interpretation.js';
+import { EditOp, EditStatus, foldedComment, isImageAnchor } from '../../../../platform/delver/common/interpretation.js';
 import { toWireAddress } from '../../../services/delver/common/delverAgentTypes.js';
 import { IDelverInterpretationService } from '../../../services/delver/common/delverInterpretationService.js';
 import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 import { IStatusbarEntryAccessor, IStatusbarService, StatusbarAlignment } from '../../../services/statusbar/browser/statusbar.js';
-import { DelverPseudocodeInput } from './delverPseudocodeInput.js';
+import { DelverPseudocodeInput } from '../../../services/delver/browser/delverPseudocodeInput.js';
 import { isPseudocodeSyncEnabled } from './delverPseudocodeSync.js';
 import { focusForPseudocodeLine, pseudocodeLineForRva } from './delverPseudocodeModel.js';
 
@@ -65,6 +66,12 @@ export class DelverPseudocodeWidget extends Disposable implements IDelverSurface
 	private readonly inputDisposables = this._register(new MutableDisposable<DisposableStore>());
 	private readonly model = this._register(new MutableDisposable<ITextModel>());
 	private readonly recoveryOperation = this._register(new MutableDisposable<CancellationTokenSource>());
+	private readonly semanticReload = this._register(new MutableDisposable<CancellationTokenSource>());
+	/**
+	 * The yield that lets the editor settle before the context menu opens. Held
+	 * so a torn-down pane cannot open a menu over a surface that is already gone.
+	 */
+	private readonly contextMenuYield = this._register(new MutableDisposable<IDisposable>());
 
 	constructor(
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
@@ -155,7 +162,7 @@ export class DelverPseudocodeWidget extends Disposable implements IDelverSurface
 		// a context menu that flashes and vanishes. Yielding lets the editor settle
 		// first, and the menu then keeps the focus it takes.
 		const anchor = { x: event.event.posx, y: event.event.posy };
-		setTimeout(() => {
+		this.contextMenuYield.value = disposableTimeout(() => {
 			this.contextMenuService.showContextMenu({
 				getAnchor: () => anchor,
 				menuId: MenuDelverSelectionContext,
@@ -191,6 +198,38 @@ export class DelverPseudocodeWidget extends Disposable implements IDelverSurface
 					: localize('delverPseudocodeFailed', "Could not decompile function: {0}", toMessage(error)), true);
 			}
 		}
+	}
+
+	/**
+	 * Re-decompiles the function on screen after accepted semantics changed.
+	 *
+	 * Not a `refresh`: the cache is keyed on the semantic snapshot, so the new
+	 * one simply misses and the old entry stays valid for whoever still wants it.
+	 * Forcing a refresh here would also bypass saved pseudocode that legitimately
+	 * matches the new snapshot.
+	 *
+	 * Silent on failure by design — the analyst accepted a type, they did not ask
+	 * for a decompilation, so a backend that is down should not replace their
+	 * pseudocode with an error. The stale text stays until they ask for it again.
+	 */
+	private reloadForChangedSemantics(): void {
+		const input = this.input;
+		if (!input) {
+			return;
+		}
+		this.semanticReload.value?.cancel();
+		const source = new CancellationTokenSource();
+		this.semanticReload.value = source;
+		void (async () => {
+			try {
+				const result = await this.requestPseudocode(input, source.token, false);
+				if (!source.token.isCancellationRequested && this.input === input) {
+					this.showResult(result, input);
+				}
+			} catch {
+				// Deliberately swallowed; see above.
+			}
+		})();
 	}
 
 	private async requestPseudocode(input: DelverPseudocodeInput, token: CancellationToken, refresh: boolean): Promise<IDecompiledFunction> {
@@ -281,9 +320,21 @@ export class DelverPseudocodeWidget extends Disposable implements IDelverSurface
 			}
 		}));
 		store.add(this.interpretationService.onDidChange(event => {
-			if (event.edit.anchor.contentHash === this.contentHash) {
-				this.applyComments();
+			if (event.edit.anchor.contentHash !== this.contentHash) {
+				return;
 			}
+			// A data type or prototype is an *input* to decompilation, not an
+			// overlay on it: accepting one changes the C itself, and the result on
+			// screen was produced against the previous type model. Comments and
+			// names are the opposite — they decorate output that is still correct.
+			// Only an accepted edit counts, because only accepted edits are in the
+			// semantic snapshot the cache keys on; re-decompiling on a proposal
+			// would spend a backend round trip to arrive at the same text.
+			if (isSemanticOp(event.edit.op) && event.edit.status === EditStatus.Accepted) {
+				this.reloadForChangedSemantics();
+				return;
+			}
+			this.applyComments();
 		}));
 		this.applyComments();
 		this.applyFocus();
@@ -320,6 +371,9 @@ export class DelverPseudocodeWidget extends Disposable implements IDelverSurface
 		const byLine = new Map<number, string[]>();
 		const seen = new Set<bigint>();
 		for (const edit of this.interpretationService.logFor(contentHash)) {
+			if (!isImageAnchor(edit.anchor)) {
+				continue;
+			}
 			const rva = edit.anchor.rva;
 			if (seen.has(rva)) {
 				continue;
@@ -422,6 +476,12 @@ export class DelverPseudocodeWidget extends Disposable implements IDelverSurface
 				? localize('delverPseudocodeLiveProvenance', "Live · {0} {1}", result.backendId, result.backendVersion ?? '')
 				: localize('delverPseudocodeLiveTimedProvenance', "Live · {0} {1} · {2}", result.backendId, result.backendVersion ?? '', formatDuration(requestMs));
 		}
+		// Appended to whatever provenance already says, because it qualifies the
+		// same claim: the analyst is looking at C that predates the types they
+		// accepted, and nothing else on screen would tell them.
+		if (result.semanticsIgnored) {
+			text = localize('delverPseudocodeSemanticsIgnored', "{0} · accepted types not applied", text);
+		}
 		const name = localize('delverPseudocodeProvenanceName', "Delver Decompiler");
 		if (this.provenanceEntry.value) {
 			this.provenanceEntry.value.update({ name, text, ariaLabel: text });
@@ -494,6 +554,32 @@ export class DelverPseudocodeWidget extends Disposable implements IDelverSurface
 		this.releaseInput();
 		super.dispose();
 	}
+}
+
+/**
+ * Whether an edit changes what the decompiler is *given* rather than what is
+ * drawn over its output.
+ *
+ * Exported because this classification is the whole reason the pane can afford
+ * to re-decompile at all, and it has been wrong twice — once missing
+ * `CompositeType`, once missing `FunctionBounds`. Each time the symptom was
+ * silent: the analyst accepted something and the C in front of them did not
+ * change. A list that has to be added to is a list worth testing.
+ *
+ * The distinction is the whole reason the pane can afford to re-decompile at
+ * all: names, comments and tags decorate correct C and cost nothing to
+ * re-render, while a type, a prototype, or a structure layout makes the C
+ * itself out of date. A composite counts even though it names no address:
+ * whether *this* function uses it is not knowable without the dependency graph
+ * the snapshot deliberately does not have, so the pane reloads rather than
+ * guess.
+ */
+export function isSemanticOp(op: EditOp): boolean {
+	return op === EditOp.DataType || op === EditOp.FunctionPrototype || op === EditOp.CompositeType
+		// A correction changes where the function *is*, which is a stronger
+		// change to the C than a type: the pane may be showing a body whose
+		// bounds no longer exist.
+		|| op === EditOp.FunctionBounds;
 }
 
 function toMessage(error: unknown): string {

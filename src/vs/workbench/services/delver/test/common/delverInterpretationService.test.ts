@@ -7,6 +7,7 @@ import * as assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import {
 	IDelverInterpretationStoreService,
+	IInterpretationEditRequestWire,
 	IInterpretationEditWire,
 } from '../../../../../platform/delver/common/delverInterpretationStoreService.js';
 import { EditOp, EditStatus, IAuthor } from '../../../../../platform/delver/common/interpretation.js';
@@ -32,8 +33,13 @@ class FakeStore implements Partial<IDelverInterpretationStoreService> {
 		return this.persisted;
 	}
 
-	async append(_contentHash: string, edit: IInterpretationEditWire): Promise<void> {
-		this.persisted.push(edit);
+	async append(_contentHash: string, edit: IInterpretationEditRequestWire, minimumSeq = 1): Promise<IInterpretationEditWire> {
+		// Allocates the way the shared-process store does: above everything held,
+		// and above the floor the caller knows about.
+		const seq = Math.max(minimumSeq, this.persisted.reduce((highest, entry) => Math.max(highest, entry.seq), 0) + 1);
+		const sequenced: IInterpretationEditWire = { seq, ...edit };
+		this.persisted.push(sequenced);
+		return sequenced;
 	}
 
 	async importLog(contentHash: string): Promise<readonly IInterpretationEditWire[]> {
@@ -69,7 +75,13 @@ suite('DelverInterpretationService persistence', () => {
 				loaded: service.logFor(HASH)[0].value,
 				current: service.nameAt(anchor),
 				seq: saved.seq,
-				wireRva: persistence.persisted[1].anchor.rva,
+				// Narrowed rather than asserted through: the wire anchor is a union
+				// now, and a test that reached past that would stop proving the
+				// image case is the one being persisted.
+				wireRva: (() => {
+					const anchor = persistence.persisted[1].anchor;
+					return anchor.kind === 'image' ? anchor.rva : undefined;
+				})(),
 				announced,
 			},
 			{
@@ -80,6 +92,34 @@ suite('DelverInterpretationService persistence', () => {
 				announced: ['new_name'],
 			},
 		);
+	});
+
+	test('two services over one store never mint the same sequence', async () => {
+		// The defect this guards: each service replays the same stored log, so
+		// both reach the same next number in memory. Whichever write lands second
+		// then collides with the first, and the store that resolves the collision
+		// by ignoring it loses an authored edit while reporting success.
+		const persistence = new FakeStore();
+		const first = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService));
+		const second = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService));
+		const anchor = { kind: 'image' as const, contentHash: HASH, rva: 0x4000n };
+		await first.load(HASH);
+		await second.load(HASH);
+
+		const fromFirst = await first.edit(anchor, EditOp.Rename, 'first_window');
+		const fromSecond = await second.edit(anchor, EditOp.Rename, 'second_window');
+
+		assert.deepStrictEqual({
+			seqs: [fromFirst.seq, fromSecond.seq],
+			persisted: persistence.persisted.map(edit => ({ seq: edit.seq, value: edit.value })),
+		}, {
+			seqs: [8, 9],
+			persisted: [
+				{ seq: 7, value: 'loaded_name' },
+				{ seq: 8, value: 'first_window' },
+				{ seq: 9, value: 'second_window' },
+			],
+		});
 	});
 
 	test('undo appends compensations and continues backward through local history', async () => {

@@ -134,7 +134,17 @@ export class DelverAgentRelaySupervisor {
 			return;
 		}
 
-		const transport = new RelayProcessTransport(process);
+		let transport: RelayProcessTransport;
+		try {
+			transport = new RelayProcessTransport(process);
+		} catch {
+			// Nothing else owns the spawned child until the transport wraps it.
+			process.terminate();
+			void descriptor.cleanup().catch(() => undefined);
+			this.recordFailureAndRestart();
+			return;
+		}
+
 		let connection: IDisposableConnection;
 		try {
 			connection = this.options.createConnection(transport, descriptor.token);

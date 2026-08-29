@@ -7,13 +7,13 @@ import './media/delverListing.css';
 // Registers the listing's semantic colors; the CSS above reads them as variables.
 import './delverListingColors.js';
 
-import { CancellationToken } from '../../../../base/common/cancellation.js';
+import { CancellationToken, CancellationTokenSource } from '../../../../base/common/cancellation.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { isCancellationError, onUnexpectedError } from '../../../../base/common/errors.js';
 import { localize2 } from '../../../../nls.js';
 import { Action2, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
-import { Disposable } from '../../../../base/common/lifecycle.js';
+import { Disposable, toDisposable } from '../../../../base/common/lifecycle.js';
 import { ContextKeyExpr, IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { DELVER_TARGET_ATTACHED, DELVER_TARGET_OPEN, IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 import { IDelverWorkspaceService } from '../../../services/delver/common/delverWorkspaceService.js';
@@ -27,15 +27,15 @@ import { IWorkspaceContextService } from '../../../../platform/workspace/common/
 import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../browser/editor.js';
 import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { IDelverFocusService } from '../../../services/delver/common/delverFocusService.js';
-import { DELVER_CAN_GO_BACK, DELVER_CAN_GO_FORWARD, DELVER_LISTING_FOCUSED } from './delverListingContext.js';
-import { activeListing, onDidChangeActiveListing } from './delverActiveListing.js';
+import { DELVER_CAN_GO_BACK, DELVER_CAN_GO_FORWARD, DELVER_LISTING_FOCUSED } from '../../../services/delver/browser/delverListingContext.js';
+import { activeListing, onDidChangeActiveListing } from '../../../services/delver/browser/delverActiveListing.js';
 import { EditorExtensions, EditorsOrder } from '../../../common/editor.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { ISearchService, QueryType } from '../../../services/search/common/search.js';
 import { DelverWorkspaceInput } from '../../../services/delver/browser/delverWorkspaceInput.js';
 import { DelverListingEditor } from './delverListingEditor.js';
-import { DELVER_LISTING_EDITOR_ID, DelverListingInput } from './delverListingInput.js';
+import { DELVER_LISTING_EDITOR_ID, DelverListingInput } from '../../../services/delver/browser/delverListingInput.js';
 import { DelverListingWidget } from './delverListingWidget.js';
 import {
 	CommentAction,
@@ -54,7 +54,7 @@ import {
 	RedoInterpretationAction,
 } from './delverListingNavigation.js';
 import { ExportInterpretationAction, ImportInterpretationAction } from './delverInterpretationActions.js';
-import { GenerateSignatureAction } from './delverSignatureActions.js';
+import { GenerateSignatureAction } from '../../../services/delver/browser/delverSignatureActions.js';
 
 Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
 	EditorPaneDescriptor.create(DelverListingEditor, DELVER_LISTING_EDITOR_ID, localize2('delverListingEditor', "Delver Listing").value),
@@ -277,7 +277,7 @@ async function closeDelverEditors(editorService: IEditorService, predicate: (edi
 }
 
 /** Opens the sole portable project found anywhere in the local workspace. */
-class DelverProjectAutoOpenContribution {
+export class DelverProjectAutoOpenContribution extends Disposable {
 	constructor(
 		@IWorkspaceContextService workspaceContextService: IWorkspaceContextService,
 		@ISearchService searchService: ISearchService,
@@ -285,17 +285,30 @@ class DelverProjectAutoOpenContribution {
 		@IEditorService editorService: IEditorService,
 		@IDelverSessionService sessionService: IDelverSessionService,
 	) {
+		super();
+		// Held as a disposable that *cancels*. A workspace-wide glob outlives a
+		// window closed straight after restore, and its continuation opens a
+		// project and an editor — work that must not land once the contribution
+		// is gone. `CancellationTokenSource.dispose()` defaults to
+		// `cancel: false`, so the source is wrapped rather than registered.
+		const search = new CancellationTokenSource();
+		this._register(toDisposable(() => search.dispose(true)));
 		void this.autoOpen(workspaceContextService, searchService, {
 			dialogService,
 			editorService,
 			sessionService,
-		}).catch(onUnexpectedError);
+		}, search.token).catch(error => {
+			if (!isCancellationError(error)) {
+				onUnexpectedError(error);
+			}
+		});
 	}
 
 	private async autoOpen(
 		workspaceContextService: IWorkspaceContextService,
 		searchService: ISearchService,
 		services: IDelverProjectOpenServices,
+		token: CancellationToken,
 	): Promise<void> {
 		if (services.sessionService.activeSession) {
 			return;
@@ -310,8 +323,8 @@ class DelverProjectAutoOpenContribution {
 			filePattern: '**/*.delverdb',
 			shouldGlobMatchFilePattern: true,
 			maxResults: 2,
-		}, CancellationToken.None);
-		if (result.results.length !== 1 || services.sessionService.activeSession) {
+		}, token);
+		if (token.isCancellationRequested || result.results.length !== 1 || services.sessionService.activeSession) {
 			return;
 		}
 		await openDelverProject(services, result.results[0].resource.fsPath);

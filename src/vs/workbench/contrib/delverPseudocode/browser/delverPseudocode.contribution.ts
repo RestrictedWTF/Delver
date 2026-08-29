@@ -28,7 +28,7 @@ import { registerDelverSurface } from '../../../services/delver/browser/delverSu
 import { IDelverDecompilerService } from '../../../services/delver/common/delverDecompilerService.js';
 import { IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';
 import { DelverPseudocodeEditor } from './delverPseudocodeEditor.js';
-import { DELVER_PSEUDOCODE_EDITOR_ID, DelverPseudocodeInput } from './delverPseudocodeInput.js';
+import { DELVER_PSEUDOCODE_EDITOR_ID, DelverPseudocodeInput } from '../../../services/delver/browser/delverPseudocodeInput.js';
 import { DelverPseudocodeWidget } from './delverPseudocodeWidget.js';
 import {
 	DELVER_PSEUDOCODE_SYNC,

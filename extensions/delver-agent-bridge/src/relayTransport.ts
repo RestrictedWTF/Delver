@@ -52,8 +52,9 @@ export class RelayProcessTransport implements IDtpConnectionTransport {
 		return () => this.closeListeners.delete(listener);
 	}
 
+	/** Fire-and-forget write; a queue or transport failure closes the relay, never the caller. */
 	write(data: Buffer): void {
-		void this.enqueue(data).catch(() => undefined);
+		void this.writeAsync(data).catch(() => undefined);
 	}
 
 	/** Resolves only after the child write callback and any backpressure drain complete. */

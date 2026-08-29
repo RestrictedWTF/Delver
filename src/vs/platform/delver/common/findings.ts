@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { Anchor, IAuthor } from './interpretation.js';
+import { IAuthor, IImageAnchor } from './interpretation.js';
 
 export type DelverFindingSeverity = 'info' | 'suspicious' | 'malicious';
 export type DelverFindingStatus = 'proposed' | 'accepted' | 'rejected';
@@ -18,10 +18,16 @@ export const DELVER_FINDING_LIMITS = {
 	sourceCallsPerEvidence: 16,
 } as const;
 
-/** One concrete image range that supports a finding. `endRva` is exclusive. */
+/**
+ * One concrete image range that supports a finding. `endRva` is exclusive.
+ *
+ * The anchor names a place, deliberately: a finding is a claim about bytes, and
+ * there is nothing to cite in a range that has no address. This matches what
+ * `IDelverFindingAnchorWire` has always required.
+ */
 export interface IDelverFindingEvidence {
 	readonly kind: 'range';
-	readonly anchor: Anchor;
+	readonly anchor: IImageAnchor;
 	readonly endRva?: bigint;
 	readonly description: string;
 	/** Earlier successful dispatcher calls whose results support this range. */
@@ -54,7 +60,7 @@ export interface IDelverFinding {
 	readonly severity: DelverFindingSeverity;
 	readonly confidence: number;
 	readonly status: DelverFindingStatus;
-	readonly anchors: readonly Anchor[];
+	readonly anchors: readonly IImageAnchor[];
 	readonly evidence: readonly IDelverFindingEvidence[];
 	readonly provenance: IDelverFindingProvenance;
 }
@@ -248,33 +254,33 @@ function evidenceFromWire(value: unknown): IDelverFindingEvidence {
 	};
 }
 
-function anchorToWire(anchor: Anchor): IDelverFindingAnchorWire {
+function anchorToWire(anchor: IImageAnchor): IDelverFindingAnchorWire {
 	validateAnchor(anchor);
 	return { kind: 'image', contentHash: anchor.contentHash, rva: wireRva(anchor.rva) };
 }
 
-function anchorFromWire(value: unknown): Anchor {
+function anchorFromWire(value: unknown): IImageAnchor {
 	if (!isRecord(value) || value.kind !== 'image' || !isContentHash(value.contentHash)) {
 		throw new Error('Invalid finding anchor');
 	}
 	return { kind: 'image', contentHash: value.contentHash, rva: parseWireRva(value.rva) };
 }
 
-function validateAnchor(anchor: Anchor): void {
+function validateAnchor(anchor: IImageAnchor): void {
 	if (!isContentHash(anchor.contentHash) || anchor.rva < 0n) {
 		throw new Error('Invalid finding anchor');
 	}
 }
 
-function uniqueAnchors(anchors: readonly Anchor[]): readonly Anchor[] {
-	const unique = new Map<string, Anchor>();
+function uniqueAnchors(anchors: readonly IImageAnchor[]): readonly IImageAnchor[] {
+	const unique = new Map<string, IImageAnchor>();
 	for (const anchor of anchors) {
 		unique.set(anchorKey(anchor), anchor);
 	}
 	return [...unique.values()];
 }
 
-function anchorKey(anchor: Anchor): string {
+function anchorKey(anchor: IImageAnchor): string {
 	return `${anchor.contentHash}:${anchor.rva.toString(16)}`;
 }
 

@@ -4,9 +4,10 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as assert from 'assert';
+import * as childProcess from 'child_process';
 import * as path from 'path';
 import { describe, it } from 'node:test';
-import { createRelayAttempt, relayEnvironment, resolveRelayExecutable, waitForRelayPeer } from '../relayProcess';
+import { createRelayAttempt, NodeRelayProcess, relayEnvironment, resolveRelayExecutable, waitForRelayPeer } from '../relayProcess';
 import { TestRelayProcess } from './relayTestUtils';
 
 describe('Delver relay process setup', () => {
@@ -71,5 +72,27 @@ describe('Delver relay process setup', () => {
 		const peer = waitForRelayPeer(process, 'linux', controller.signal);
 		controller.abort();
 		await assert.rejects(peer, /cancelled/);
+	});
+
+	it('reports a stdio stream failure to the relay owner instead of crashing the host', async () => {
+		const child = childProcess.spawn(process.execPath, ['-e', 'process.stdin.resume()'], { stdio: 'pipe', windowsHide: true });
+		const relay = new NodeRelayProcess(child);
+		const errors: string[] = [];
+		relay.onError(error => errors.push(error.message));
+		const exited = new Promise<void>(resolve => relay.onExit(() => resolve()));
+
+		// A peer that goes away mid-write fails the pipe; without a stream error
+		// listener this is an unhandled 'error' event that takes the host down.
+		child.stdin.destroy(new Error('write EPIPE'));
+		const writeFailure = await new Promise<Error | null | undefined>(resolve => {
+			relay.write(Buffer.from('claim'), error => resolve(error));
+		});
+		relay.terminate(true);
+		await exited;
+
+		assert.deepStrictEqual({ reported: errors[0], writeFailed: writeFailure instanceof Error }, {
+			reported: 'write EPIPE',
+			writeFailed: true,
+		});
 	});
 });

@@ -5,7 +5,7 @@
 
 import { connect } from 'net';
 import { Readable, Writable } from 'stream';
-import { IRequest, IResponse } from '../common/protocol.generated.js';
+import { IErrorData, IRequest, IResponse, IRpcError } from '../common/protocol.generated.js';
 
 /**
  * Translates a Delver endpoint string into a path `net.connect` understands.
@@ -29,6 +29,19 @@ export interface IRpcMessage {
 export interface IRpcTransport {
 	readonly reader: Readable;
 	readonly writer: Writable;
+}
+
+/** Error returned by a Delver RPC peer. */
+export class DelverRpcError extends Error {
+	readonly code: number;
+	readonly data: IErrorData | undefined;
+
+	constructor(error: IRpcError) {
+		super(error.data?.detail ? `${error.message}: ${error.data.detail}` : error.message);
+		this.name = 'DelverRpcError';
+		this.code = error.code;
+		this.data = error.data;
+	}
 }
 
 /**
@@ -86,6 +99,17 @@ class StreamReader {
 		}
 	}
 
+	/**
+	 * Fails this reader permanently, waking whatever read is parked on it.
+	 *
+	 * Used when framing breaks: the reader no longer knows where the next message
+	 * begins, so continuing to hand out bytes is worse than stopping.
+	 */
+	fail(error: Error): void {
+		this.error ??= error;
+		this.notify();
+	}
+
 	async readBytes(length: number): Promise<Buffer> {
 		while (this.buffer.length < length) {
 			if (this.error) {
@@ -106,9 +130,21 @@ class StreamReader {
  * Low-level Delver RPC client that speaks the LSP-style framing protocol.
  */
 export class DelverRpcClient {
+	private readonly transport: IRpcTransport;
 	private readonly reader: StreamReader;
 	private readonly writer: Writable;
 	private nextId = 1;
+
+	/**
+	 * Set once the framing is known to be broken.
+	 *
+	 * A desync is not recoverable on an ordered stream: the reader has lost the
+	 * message boundary, so every later call would answer with somebody else's
+	 * bytes. Recording it here turns the whole connection into a reported
+	 * failure, which the caller can reconnect from, instead of a silent wrong
+	 * answer it cannot detect.
+	 */
+	private broken: Error | undefined;
 
 	/**
 	 * Tail of the in-flight call chain.
@@ -124,6 +160,7 @@ export class DelverRpcClient {
 	private tail: Promise<unknown> = Promise.resolve();
 
 	constructor(transport: IRpcTransport) {
+		this.transport = transport;
 		this.reader = new StreamReader(transport.reader);
 		this.writer = transport.writer;
 	}
@@ -158,6 +195,9 @@ export class DelverRpcClient {
 	 * response are consumed and returned alongside the JSON.
 	 */
 	call(method: string, params: unknown, expectedFrames = 0): Promise<IRpcMessage> {
+		if (this.broken) {
+			return Promise.reject(this.broken);
+		}
 		const result = this.tail.then(() => this.sendAndReceive(method, params, expectedFrames));
 
 		// The chain must survive a failed call. Without swallowing the rejection
@@ -169,6 +209,9 @@ export class DelverRpcClient {
 	}
 
 	private async sendAndReceive(method: string, params: unknown, expectedFrames: number): Promise<IRpcMessage> {
+		if (this.broken) {
+			throw this.broken;
+		}
 		const id = this.nextId++;
 		const request: IRequest = { id, method, params };
 		await this.writeJson(request);
@@ -178,7 +221,10 @@ export class DelverRpcClient {
 			// Now that calls are serialized this means the stream itself is out of
 			// step — an unsolicited message, or a server that answered out of
 			// order. Either way the connection can no longer be trusted.
-			throw new Error(`RPC id mismatch: expected ${id}, got ${json.id}`);
+			throw this.breakConnection(`RPC id mismatch: expected ${id}, got ${json.id}`);
+		}
+		if (json.error) {
+			throw new DelverRpcError(json.error);
 		}
 
 		const frames: { frameId: number; data: Buffer }[] = [];
@@ -194,7 +240,7 @@ export class DelverRpcClient {
 	 */
 	async readJson(): Promise<IResponse> {
 		const header = await this.readHeader();
-		const contentLength = Number(header.get('Content-Length'));
+		const contentLength = this.headerCount(header, 'Content-Length');
 		const body = await this.reader.readBytes(contentLength);
 		return JSON.parse(body.toString('utf-8')) as IResponse;
 	}
@@ -204,8 +250,12 @@ export class DelverRpcClient {
 	 */
 	async readFrame(): Promise<{ frameId: number; data: Buffer }> {
 		const header = await this.readHeader();
-		const frameId = Number(header.get('Delver-Frame'));
-		const contentLength = Number(header.get('Content-Length'));
+		// A missing `Delver-Frame` means the peer sent a JSON message where the
+		// frame that answers this request was supposed to be (ADR 0001: the frame
+		// immediately follows its message). Reading it as a frame anyway is the
+		// desync itself, so it fails the connection here.
+		const frameId = this.headerCount(header, 'Delver-Frame');
+		const contentLength = this.headerCount(header, 'Content-Length');
 		const data = await this.reader.readBytes(contentLength);
 		return { frameId, data };
 	}
@@ -220,11 +270,40 @@ export class DelverRpcClient {
 			}
 			const colon = line.indexOf(':');
 			if (colon === -1) {
-				throw new Error(`Malformed header line: ${line}`);
+				throw this.breakConnection(`Malformed header line: ${line}`);
 			}
 			map.set(line.slice(0, colon).trim(), line.slice(colon + 1).trim());
 		}
 		return map;
+	}
+
+	/**
+	 * Reads a header field that ADR 0001 defines as a plain decimal count.
+	 *
+	 * `Number(undefined)` is `NaN`, and a `NaN` length reads zero bytes: the
+	 * message body is then still in the buffer and every later read is one
+	 * message behind, with nothing anywhere saying so.
+	 */
+	private headerCount(header: Map<string, string>, name: string): number {
+		const raw = header.get(name);
+		if (raw === undefined || !/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+			throw this.breakConnection(`Malformed ${name} header: ${raw ?? 'absent'}`);
+		}
+		return Number(raw);
+	}
+
+	/**
+	 * Records a framing failure, tears the transport down, and returns the error
+	 * to throw. The first failure is the one every later caller is told about.
+	 */
+	private breakConnection(reason: string): Error {
+		if (!this.broken) {
+			this.broken = new Error(`Delver RPC connection desynchronized: ${reason}`);
+			this.reader.fail(this.broken);
+			this.transport.reader.destroy();
+			this.transport.writer.destroy();
+		}
+		return this.broken;
 	}
 
 	private writeJson(message: IRequest): Promise<void> {

@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as assert from 'assert';
+import { Emitter } from '../../../../../base/common/event.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { ILocation } from '../../../../../platform/delver/common/address.js';
 import { getSingletonServiceDescriptors } from '../../../../../platform/instantiation/common/extensions.js';
@@ -13,6 +14,29 @@ import {
 	IDelverFocusChangeEvent,
 	IDelverFocusService,
 } from '../../common/delverFocusService.js';
+import { IDelverSession, IDelverSessionService } from '../../common/delverSessionService.js';
+
+const CONTENT_HASH = 'a'.repeat(64);
+const OTHER_CONTENT_HASH = 'b'.repeat(64);
+
+/** Just enough session for the focus bus: which bytes are open, and when that changes. */
+class FakeSessionService implements Partial<IDelverSessionService> {
+	private readonly emitter = new Emitter<IDelverSession | undefined>();
+	readonly onDidChangeActiveSession = this.emitter.event;
+
+	activeSession: IDelverSession | undefined = { targetPath: 'sample.exe', contentHash: CONTENT_HASH };
+
+	open(contentHash: string | undefined): void {
+		this.activeSession = contentHash === undefined
+			? undefined
+			: { targetPath: `${contentHash.slice(0, 4)}.exe`, contentHash };
+		this.emitter.fire(this.activeSession);
+	}
+
+	dispose(): void {
+		this.emitter.dispose();
+	}
+}
 
 function at(address: bigint): ILocation {
 	return { space: 'Image', address };
@@ -41,11 +65,12 @@ suite('DelverFocusService', () => {
 		);
 	});
 
-	function createService(): { service: DelverFocusService; events: IDelverFocusChangeEvent[] } {
-		const service = store.add(new DelverFocusService());
+	function createService(): { service: DelverFocusService; session: FakeSessionService; events: IDelverFocusChangeEvent[] } {
+		const session = store.add(new FakeSessionService());
+		const service = store.add(new DelverFocusService(session as unknown as IDelverSessionService));
 		const events: IDelverFocusChangeEvent[] = [];
 		store.add(service.onDidChangeFocus(e => events.push(e)));
-		return { service, events };
+		return { service, session, events };
 	}
 
 	test('broadcasts the origin so a view can ignore its own echo', () => {
@@ -91,7 +116,7 @@ suite('DelverFocusService', () => {
 		}, 'pseudocode', FocusReason.User);
 
 		assert.deepStrictEqual({ focus: service.focus, eventCount: events.length }, {
-			focus: { moment: service.focus.moment, location: at(0x1000n), selection: { start: 0x1000n, end: 0x1012n }, selections },
+			focus: { moment: service.focus.moment, location: at(0x1000n), selection: { start: 0x1000n, end: 0x1012n }, selections, contentHash: CONTENT_HASH },
 			eventCount: 1,
 		});
 	});
@@ -201,6 +226,59 @@ suite('DelverFocusService', () => {
 		service.setFocus({ location: { space: 'File', address: 0x1000n }, continuous: true }, 'hex', FocusReason.User);
 
 		assert.strictEqual(service.canGoBack, true, 'coalescing must not span address spaces');
+	});
+
+	test('focus does not survive a session change', () => {
+		// The failure this prevents is not a stale-looking answer but a
+		// confident wrong one: `delver_current_context` reported sample A's
+		// address stamped with sample B's content hash and resolved it against
+		// sample B's function list. An address cannot be translated between two
+		// binaries, so the only safe reset is to have nothing focused.
+		const { service, session, events } = createService();
+		service.setFocus({ location: at(0x1000n), selection: { start: 0x1000n, end: 0x1004n } }, 'listing', FocusReason.User);
+		events.length = 0;
+
+		session.open(OTHER_CONTENT_HASH);
+
+		assert.deepStrictEqual({
+			focus: { address: hex(service.focus.location?.address), selection: service.focus.selection, contentHash: service.focus.contentHash },
+			canGoBack: service.canGoBack,
+			canGoForward: service.canGoForward,
+			events: events.map(e => ({ origin: e.origin, reason: e.reason, address: hex(e.focus.location?.address) })),
+		}, {
+			focus: { address: '<none>', selection: undefined, contentHash: undefined },
+			canGoBack: false,
+			canGoForward: false,
+			events: [{ origin: 'session', reason: FocusReason.TargetEvent, address: '<none>' }],
+		});
+	});
+
+	test('focus carries the bytes it was set against', () => {
+		const { service, session } = createService();
+
+		service.setFocus({ location: at(0x1000n) }, 'listing', FocusReason.User);
+		const first = service.focus.contentHash;
+		session.open(OTHER_CONTENT_HASH);
+		service.setFocus({ location: at(0x1000n) }, 'listing', FocusReason.User);
+
+		assert.deepStrictEqual(
+			{ first, second: service.focus.contentHash },
+			{ first: CONTENT_HASH, second: OTHER_CONTENT_HASH },
+		);
+	});
+
+	test('closing the target clears the focus, and reopening the same bytes does not resurrect it', () => {
+		const { service, session } = createService();
+		service.setFocus({ location: at(0x1000n) }, 'listing', FocusReason.User);
+
+		session.open(undefined);
+		const afterClose = hex(service.focus.location?.address);
+		session.open(CONTENT_HASH);
+
+		assert.deepStrictEqual(
+			{ afterClose, afterReopen: hex(service.focus.location?.address), canGoBack: service.canGoBack },
+			{ afterClose: '<none>', afterReopen: '<none>', canGoBack: false },
+		);
 	});
 
 	test('back and forward at the ends are no-ops', () => {

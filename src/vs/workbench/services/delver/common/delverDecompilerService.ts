@@ -4,12 +4,14 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { CancellationToken } from '../../../../base/common/cancellation.js';
-import { CancellationError } from '../../../../base/common/errors.js';
+import { CancellationError, isCancellationError } from '../../../../base/common/errors.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
+import { stringHash } from '../../../../base/common/hash.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { localize } from '../../../../nls.js';
 import { AnalysisSessionId, DelverDecompilerStatusWire, IDelverAnalysisService, IDelverDecompilationTimingsWire, IDelverDecompilerCacheInfoWire } from '../../../../platform/delver/common/delverAnalysisService.js';
 import { IDelverProjectSnapshot } from '../../../../platform/delver/common/delverProjectStoreService.js';
+import { EditOp } from '../../../../platform/delver/common/interpretation.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { ConfigurationScope, Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
@@ -17,6 +19,7 @@ import { createDecorator } from '../../../../platform/instantiation/common/insta
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { decodeGhidraDecompilerOutput } from './ghidraDecompilerProtocol.js';
+import { IDelverInterpretationService } from './delverInterpretationService.js';
 import { IDelverProjectService } from './delverProjectService.js';
 import { IDelverSessionService } from './delverSessionService.js';
 
@@ -27,6 +30,28 @@ export const DELVER_DECOMPILER_BACKEND_SETTING = 'delver.decompiler.backend';
 
 const GHIDRA_PINNED_VERSION = '12.1';
 const MAX_CACHED_FUNCTIONS = 128;
+
+/**
+ * Accepted declarations of one kind that may be sent with a decompilation.
+ *
+ * Must stay equal to `MAX_SEMANTIC_DECLARATIONS` in
+ * `scripts/ghidra/delver_decompiler_worker.py`, which is the bound that actually
+ * refuses. Duplicated rather than derived because the worker is a separate
+ * process in another language; checked on this side so the refusal is local and
+ * says what to do about it, instead of arriving as `invalid_params` after the
+ * whole snapshot has been serialized and written to the pipe.
+ */
+const MAX_SEMANTIC_DECLARATIONS = 10_000;
+
+/**
+ * Accepted composites that may be sent with a decompilation.
+ *
+ * Must stay equal to `MAX_SEMANTIC_COMPOSITES` in the worker, for the same
+ * reason as the declaration bound above: the refusal that matters is the local
+ * one, because it happens before the snapshot is serialized and it can say what
+ * to do about it.
+ */
+const MAX_SEMANTIC_COMPOSITES = 1_000;
 
 /** One half-open image-relative address range represented by a pseudocode line. */
 export interface IDecompiledAddressRange {
@@ -53,6 +78,52 @@ export interface IDecompiledVariable {
 	readonly declarationLine?: number;
 }
 
+/** One accepted authored declaration that can affect decompiler output. */
+export interface IDecompilationSemanticDeclaration {
+	/** Canonical image-relative address. */
+	readonly rva: string;
+	readonly declaration: string;
+}
+
+/** One field of an authored composite, at an explicit offset. */
+export interface IDecompilationSemanticField {
+	readonly offset: number;
+	readonly name: string;
+	/** Type declaration, resolved against the program's own type manager. */
+	readonly type: string;
+}
+
+/**
+ * One authored composite type, which belongs to the image rather than to an
+ * address.
+ *
+ * Offsets are explicit and the size includes trailing padding, because a real
+ * binary's layout is something the analyst knows and the backend must not
+ * re-pack into something tidier and wrong.
+ */
+export interface IDecompilationSemanticComposite {
+	readonly name: string;
+	readonly kind: 'struct';
+	readonly size: number;
+	readonly fields: readonly IDecompilationSemanticField[];
+}
+
+/**
+ * Complete accepted semantic input used for one decompilation.
+ *
+ * This first version is deliberately content-wide. It may invalidate more
+ * functions than necessary, but can never reuse pseudocode produced against a
+ * different accepted type model. A later dependency graph can narrow the
+ * arrays without changing the durable result envelope.
+ */
+export interface IDecompilationSemanticDependencies {
+	readonly schemaVersion: 2;
+	/** Applied before the two arrays below, which may reference them by name. */
+	readonly composites: readonly IDecompilationSemanticComposite[];
+	readonly dataTypes: readonly IDecompilationSemanticDeclaration[];
+	readonly functionPrototypes: readonly IDecompilationSemanticDeclaration[];
+}
+
 /** Stable output consumed by the pseudocode editor and, later, AI tooling. */
 export interface IDecompiledFunction {
 	readonly backendId: string;
@@ -65,6 +136,16 @@ export interface IDecompiledFunction {
 	readonly text: string;
 	readonly lineMappings: readonly IDecompiledLineMapping[];
 	readonly variables: readonly IDecompiledVariable[];
+	readonly semanticDependencies?: IDecompilationSemanticDependencies;
+	/**
+	 * True when accepted semantics existed but this backend could not apply them.
+	 *
+	 * The C below is real and correct for the bytes; it simply does not reflect
+	 * the analyst's accepted types. Saying so is the whole point — silently
+	 * returning type-free pseudocode after a type was accepted would be a
+	 * confident answer to a question that was not asked.
+	 */
+	readonly semanticsIgnored?: boolean;
 }
 
 /** Everything a backend needs to identify one function in the active image. */
@@ -73,6 +154,8 @@ export interface IDecompileFunctionRequest {
 	readonly targetPath?: string;
 	readonly contentHash: string;
 	readonly functionRva: bigint;
+	/** Internal accepted semantic snapshot. Callers normally leave this absent. */
+	readonly semanticDependencies?: IDecompilationSemanticDependencies;
 }
 
 export type DelverDecompilerStatus =
@@ -82,6 +165,15 @@ export type DelverDecompilerStatus =
 /** Backend-neutral seam shared by the Ghidra adapter and future decompilers. */
 export interface IDelverDecompilerBackend {
 	readonly status: DelverDecompilerStatus;
+	/**
+	 * Whether this backend can apply accepted data types and prototypes.
+	 *
+	 * Absent means yes. A backend that answers `false` is not refused — it is
+	 * asked for pseudocode built against no accepted semantics at all, and the
+	 * result is attributed to that empty snapshot rather than to the one the
+	 * caller asked for.
+	 */
+	readonly appliesSemantics?: boolean;
 	readonly onDidChangeStatus?: Event<DelverDecompilerStatus>;
 	prepare?(): Promise<DelverDecompilerStatus>;
 	restart?(): Promise<DelverDecompilerStatus>;
@@ -215,6 +307,17 @@ export class SharedProcessDecompilerBackend implements IDelverDecompilerBackend 
 		if (!request.sessionId || !request.targetPath) {
 			throw new DelverDecompilerUnavailableError(localize('delverDecompilerTargetRequired', "Attach the matching target to decompile content that is not saved in this project."));
 		}
+		const semanticDependencies = request.semanticDependencies ?? emptySemanticDependencies();
+		// Refused here rather than truncated, and refused before the request is
+		// built rather than by the worker after 20 MB has crossed the pipe. A
+		// truncated snapshot would decompile against *some* of the analyst's
+		// accepted types and present the result as though all of them applied,
+		// which is the one outcome worse than not answering.
+		if (semanticDependencies.dataTypes.length > MAX_SEMANTIC_DECLARATIONS
+			|| semanticDependencies.functionPrototypes.length > MAX_SEMANTIC_DECLARATIONS
+			|| semanticDependencies.composites.length > MAX_SEMANTIC_COMPOSITES) {
+			throw new DelverDecompilerUnavailableError(localize('delverDecompilerSemanticLimit', "This project has more accepted data types, function prototypes, or structures than the decompiler backend accepts. Retire some before decompiling."));
+		}
 
 		const operationId = generateUuid();
 		const cancellationListener = token.onCancellationRequested(() => {
@@ -229,8 +332,10 @@ export class SharedProcessDecompilerBackend implements IDelverDecompilerBackend 
 				this.pythonPath,
 				operationId,
 				this.backendSelection === 'headless' ? 'headless' : 'pyghidra',
+				semanticDependencies,
 			);
-			const decoded = decodeGhidraDecompilerOutput(result.serialized, request.functionRva, result.backendId);
+			const serialized = attachSemanticDependencies(result.serialized, semanticDependencies);
+			const decoded = decodeGhidraDecompilerOutput(serialized, request.functionRva, result.backendId);
 			this.logService?.info(`[Delver decompiler] ${result.backendId} ${result.backendVersion}, generation ${result.processGeneration}, RVA 0x${request.functionRva.toString(16)}: spawn=${result.timings.spawnMs}ms handshake=${result.timings.handshakeMs}ms open=${result.timings.targetOpenMs}ms recovery=${result.timings.functionRecoveryMs}ms decompile=${result.timings.decompilationMs}ms serialize=${result.timings.serializationMs}ms`);
 			if (token.isCancellationRequested) {
 				throw new CancellationError();
@@ -239,7 +344,7 @@ export class SharedProcessDecompilerBackend implements IDelverDecompilerBackend 
 				backendId: result.backendId,
 				backendVersion: result.backendVersion,
 				functionRva: `0x${request.functionRva.toString(16)}`,
-				serialized: result.serialized,
+				serialized,
 			});
 			if (!this.projectService?.projectPath(request.contentHash)) {
 				this.sessionService?.markProjectDirty();
@@ -254,7 +359,11 @@ export class SharedProcessDecompilerBackend implements IDelverDecompilerBackend 
 			};
 		}
 		catch (error) {
-			if (!(error instanceof CancellationError)) {
+			// A cancellation raised in the shared process arrives here as a plain
+			// `Error` carrying the canonical name and message, never as an instance
+			// (ADR 0001, "Scope"). Testing the shape is what keeps Escape from being
+			// reported as a dead backend.
+			if (!isCancellationError(error)) {
 				const diagnostic = errorMessage(error);
 				this.setStatus({ state: 'failed', available: false, reason: localize('delverDecompilerFailed', "The selected decompiler backend failed."), diagnostic });
 				this.logService?.error(`[Delver decompiler] ${diagnostic}`);
@@ -273,6 +382,18 @@ export class SharedProcessDecompilerBackend implements IDelverDecompilerBackend 
 
 	private get pythonPath(): string {
 		return this.configurationService.getValue<string>(DELVER_DECOMPILER_PYTHON_PATH_SETTING)?.trim() || 'auto';
+	}
+
+	/**
+	 * Headless runs a one-shot script with no route for accepted declarations.
+	 *
+	 * It used to refuse such a request outright, which turned one accepted type
+	 * into a total loss of pseudocode: the saved text no longer matched the
+	 * snapshot and nothing would produce new text. Declaring the limitation
+	 * instead lets the service ask for what this backend *can* answer.
+	 */
+	get appliesSemantics(): boolean {
+		return this.backendSelection !== 'headless';
 	}
 
 	private get backendSelection(): 'pyghidra' | 'headless' | 'disabled' {
@@ -298,6 +419,7 @@ export class DelverDecompilerService implements IDelverDecompilerService {
 	constructor(
 		private readonly backend: IDelverDecompilerBackend,
 		private readonly projectSnapshot?: (contentHash: string) => IDelverProjectSnapshot | undefined,
+		private readonly semanticDependencies?: (contentHash: string) => IDecompilationSemanticDependencies,
 	) { }
 
 	readonly onDidChangeStatus: Event<DelverDecompilerStatus> = this.backend.onDidChangeStatus ?? Event.None;
@@ -335,7 +457,14 @@ export class DelverDecompilerService implements IDelverDecompilerService {
 			throw new CancellationError();
 		}
 
-		const key = decompilationKey(request.contentHash, request.functionRva);
+		const { semanticsDropped, ...resolved } = this.withSemanticDependencies(request);
+		const key = decompilationKey(resolved.contentHash, resolved.functionRva, resolved.semanticDependencies);
+		// Marked on the way out rather than stored: the cached and saved text is
+		// genuinely the answer for the empty snapshot it is keyed under, and it
+		// stops being an unapplied-types answer the moment a backend that can
+		// apply them is configured. The flag belongs to the request, not the C.
+		const mark = (result: IDecompiledFunction): IDecompiledFunction =>
+			semanticsDropped ? { ...result, semanticsIgnored: true } : result;
 		const cached = this.cache.get(key);
 		if (cached) {
 			// Refresh insertion order so frequently revisited functions survive the
@@ -343,51 +472,72 @@ export class DelverDecompilerService implements IDelverDecompilerService {
 			// panes cannot let one pane alter another pane's pseudocode.
 			this.cache.delete(key);
 			this.cache.set(key, cached);
-			return Promise.resolve(cached);
+			return Promise.resolve(mark(cached));
 		}
-		const saved = this.loadSavedResult(request);
+		const saved = this.loadSavedResult(resolved);
 		if (saved) {
 			this.cacheResult(key, saved);
-			return Promise.resolve(saved);
+			return Promise.resolve(mark(saved));
 		}
 		const pending = this.pending.get(key);
 		if (pending) {
-			return pending;
+			return pending.then(mark);
 		}
-		return this.decompileAndCache(key, request, token);
+		return this.decompileAndCache(key, resolved, token, false, semanticsDropped);
 	}
 
 	redecompileFunction(request: IDecompileFunctionRequest, token: CancellationToken): Promise<IDecompiledFunction> {
 		if (token.isCancellationRequested) {
 			throw new CancellationError();
 		}
-		return this.decompileAndCache(decompilationKey(request.contentHash, request.functionRva), request, token, true);
+		const { semanticsDropped, ...resolved } = this.withSemanticDependencies(request);
+		return this.decompileAndCache(
+			decompilationKey(resolved.contentHash, resolved.functionRva, resolved.semanticDependencies),
+			resolved, token, true, semanticsDropped);
 	}
 
 	savedResultDiagnostic(request: Pick<IDecompileFunctionRequest, 'contentHash' | 'functionRva'>): string | undefined {
-		return this.savedDiagnostics.get(decompilationKey(request.contentHash, request.functionRva));
+		const resolved = this.withSemanticDependencies(request);
+		return this.savedDiagnostics.get(decompilationKey(resolved.contentHash, resolved.functionRva, resolved.semanticDependencies));
 	}
 
-	private decompileAndCache(key: string, request: IDecompileFunctionRequest, token: CancellationToken, refresh = false): Promise<IDecompiledFunction> {
-		const existing = this.pending.get(key);
+	private decompileAndCache(key: string, request: IDecompileFunctionRequest, token: CancellationToken, refresh = false, semanticsDropped = false): Promise<IDecompiledFunction> {
+		// A refresh must never be answered by an in-flight request: coalescing is a
+		// cache, and the caller asked precisely because the cached answer is wrong.
+		// It runs alongside its predecessor instead, and only the newest operation
+		// for a key is the one the map hands to later callers.
+		const existing = refresh ? undefined : this.pending.get(key);
 		if (existing) {
 			return existing;
 		}
-		const operation = this.runBackend(key, request, token, refresh);
+		const operation = this.runBackend(key, request, token, refresh, semanticsDropped);
 		this.pending.set(key, operation);
-		void operation.then(() => this.pending.delete(key), () => this.pending.delete(key));
+		const settled = () => {
+			if (this.pending.get(key) === operation) {
+				this.pending.delete(key);
+			}
+		};
+		void operation.then(settled, settled);
 		return operation;
 	}
 
-	private async runBackend(key: string, request: IDecompileFunctionRequest, token: CancellationToken, refresh: boolean): Promise<IDecompiledFunction> {
+	private async runBackend(key: string, request: IDecompileFunctionRequest, token: CancellationToken, refresh: boolean, semanticsDropped: boolean): Promise<IDecompiledFunction> {
 		const previous = this.cache.get(key);
 		try {
-			const result = await this.backend.decompileFunction(request, token);
-			if (result.timings) {
-				this.latestLivePerformance = result;
+			const backendResult = await this.backend.decompileFunction(request, token);
+			const attributed = backendResult.semanticDependencies || hasSemanticDependencies(request.semanticDependencies!)
+				? { ...backendResult, semanticDependencies: request.semanticDependencies }
+				: backendResult;
+			if (attributed.timings) {
+				this.latestLivePerformance = attributed;
 			}
-			this.cacheResult(key, result);
-			return result;
+			// Cached without the flag, and marked on the way out — the text is
+			// genuinely the answer for the empty snapshot it is keyed under, and
+			// it stops being an unapplied-types answer the moment the analyst
+			// retires the last accepted type. Storing the flag made that cache
+			// entry keep warning about types that no longer exist.
+			this.cacheResult(key, attributed);
+			return semanticsDropped ? { ...attributed, semanticsIgnored: true } : attributed;
 		}
 		catch (error) {
 			// An explicit refresh is atomic from the reader's perspective: failed or
@@ -411,7 +561,7 @@ export class DelverDecompilerService implements IDelverDecompilerService {
 	}
 
 	private loadSavedResult(request: IDecompileFunctionRequest): IDecompiledFunction | undefined {
-		const key = decompilationKey(request.contentHash, request.functionRva);
+		const key = decompilationKey(request.contentHash, request.functionRva, request.semanticDependencies!);
 		this.savedDiagnostics.delete(key);
 		const snapshot = this.projectSnapshot?.(request.contentHash);
 		if (!snapshot || snapshot.metadata.contentHash !== request.contentHash) {
@@ -436,8 +586,13 @@ export class DelverDecompilerService implements IDelverDecompilerService {
 				if (!candidate.backendId.trim() || !candidate.backendVersion.trim()) {
 					throw new Error(localize('delverSavedDecompilerIdentityMissing', "backend identity is incomplete"));
 				}
+				const decoded = decodeGhidraDecompilerOutput(candidate.serialized, request.functionRva, candidate.backendId);
+				if (!sameSemanticDependencies(decoded.semanticDependencies, request.semanticDependencies!)) {
+					this.savedDiagnostics.set(key, localize('delverSavedDecompilerStaleSemantics', "Saved pseudocode at {0} was ignored because accepted type interpretation changed after it was produced.", canonicalRva(request.functionRva)));
+					continue;
+				}
 				return {
-					...decodeGhidraDecompilerOutput(candidate.serialized, request.functionRva, candidate.backendId),
+					...decoded,
 					backendVersion: candidate.backendVersion,
 					provenance: 'saved',
 				};
@@ -447,6 +602,35 @@ export class DelverDecompilerService implements IDelverDecompilerService {
 		}
 		return undefined;
 	}
+
+	/**
+	 * Resolves the snapshot a request will actually be answered against.
+	 *
+	 * Not always the accepted one. A backend that cannot apply declarations is
+	 * answering against *no* accepted semantics, so that is the snapshot the
+	 * request carries, the cache is keyed on, and the saved result records. That
+	 * attribution is what makes the whole thing behave:
+	 *
+	 * - pseudocode saved before any type was accepted still matches, so accepting
+	 *   a type on such a backend no longer empties the pane;
+	 * - the cache stops missing on every call, because the effective snapshot is
+	 *   stable rather than one the backend will never satisfy;
+	 * - and installing a backend that *can* apply them changes the effective
+	 *   snapshot back, which re-decompiles exactly as it should.
+	 *
+	 * `semanticsDropped` is carried separately so the result can say the accepted
+	 * types were not applied. Answering without saying so would be worse than
+	 * refusing, which is what this used to do.
+	 */
+	private withSemanticDependencies<T extends Pick<IDecompileFunctionRequest, 'contentHash' | 'functionRva'> & { readonly semanticDependencies?: IDecompilationSemanticDependencies }>(request: T): T & { readonly semanticDependencies: IDecompilationSemanticDependencies; readonly semanticsDropped: boolean } {
+		const accepted = request.semanticDependencies ?? this.semanticDependencies?.(request.contentHash) ?? emptySemanticDependencies();
+		const dropped = this.backend.appliesSemantics === false && hasSemanticDependencies(accepted);
+		return {
+			...request,
+			semanticDependencies: dropped ? emptySemanticDependencies() : accepted,
+			semanticsDropped: dropped,
+		};
+	}
 }
 
 class DefaultDelverDecompilerService extends DelverDecompilerService {
@@ -455,17 +639,139 @@ class DefaultDelverDecompilerService extends DelverDecompilerService {
 		@IConfigurationService configurationService: IConfigurationService,
 		@IDelverProjectService projectService: IDelverProjectService,
 		@IDelverSessionService sessionService: IDelverSessionService,
+		@IDelverInterpretationService interpretationService: IDelverInterpretationService,
 		@ILogService logService: ILogService,
 	) {
 		super(
 			new SharedProcessDecompilerBackend(analysisService, configurationService, projectService, sessionService, logService),
 			contentHash => projectService.projectSnapshot(contentHash),
+			contentHash => semanticDependenciesFor(interpretationService, contentHash),
 		);
 	}
 }
 
-function decompilationKey(contentHash: string, functionRva: bigint): string {
-	return `${contentHash}:${functionRva.toString(16)}`;
+/**
+ * Cache key for one function under one accepted type model.
+ *
+ * The snapshot is folded to a digest rather than spelled out. Inlining it put a
+ * copy of every accepted declaration — each bounded at 2 KB — into all 128 cache
+ * keys, and re-serialized the whole set on every lookup, which is the hot path
+ * every pseudocode load takes. The digest is over the same canonical JSON, so
+ * two snapshots collide in the key exactly when they are equal; `total` is
+ * included so a length change cannot be hidden by a hash collision alone.
+ */
+function decompilationKey(contentHash: string, functionRva: bigint, semanticDependencies: IDecompilationSemanticDependencies): string {
+	return `${contentHash}:${functionRva.toString(16)}:${semanticDigest(semanticDependencies)}`;
+}
+
+function semanticDigest(semanticDependencies: IDecompilationSemanticDependencies): string {
+	if (!hasSemanticDependencies(semanticDependencies)) {
+		return '0';
+	}
+	const total = semanticDependencies.composites.length + semanticDependencies.dataTypes.length + semanticDependencies.functionPrototypes.length;
+	return `${total}.${(stringHash(JSON.stringify(semanticDependencies), 0) >>> 0).toString(16)}`;
+}
+
+function emptySemanticDependencies(): IDecompilationSemanticDependencies {
+	return { schemaVersion: 2, composites: [], dataTypes: [], functionPrototypes: [] };
+}
+
+/**
+ * Builds the accepted semantic snapshot for one image.
+ *
+ * Exported for tests: the ordering it produces is a contract with the worker
+ * rather than an implementation detail, and it is not otherwise observable
+ * without a live backend.
+ */
+export function semanticDependenciesFor(interpretationService: IDelverInterpretationService, contentHash: string): IDecompilationSemanticDependencies {
+	const rvas = new Set<bigint>();
+	const typeNames = new Set<string>();
+	for (const edit of interpretationService.logFor(contentHash)) {
+		if (edit.anchor.kind === 'type') {
+			if (edit.op === EditOp.CompositeType) {
+				typeNames.add(edit.anchor.name);
+			}
+		} else if (edit.op === EditOp.DataType || edit.op === EditOp.FunctionPrototype) {
+			rvas.add(edit.anchor.rva);
+		}
+	}
+	// Composites are collected first and sorted by name, matching the order the
+	// worker requires. It defines them before parsing anything else, so a
+	// declaration at an address can name a struct this same snapshot introduced.
+	const composites: IDecompilationSemanticComposite[] = [];
+	for (const name of [...typeNames].sort()) {
+		const layout = interpretationService.at({ kind: 'type', contentHash, name })?.compositeType;
+		const parsed = layout === undefined ? undefined : parseCompositeLayout(name, layout);
+		if (parsed) {
+			composites.push(parsed);
+		}
+	}
+	const dataTypes: IDecompilationSemanticDeclaration[] = [];
+	const functionPrototypes: IDecompilationSemanticDeclaration[] = [];
+	for (const rva of [...rvas].sort((left, right) => left < right ? -1 : left > right ? 1 : 0)) {
+		const current = interpretationService.at({ kind: 'image', contentHash, rva });
+		if (current?.dataType) {
+			dataTypes.push({ rva: canonicalRva(rva), declaration: current.dataType });
+		}
+		if (current?.functionPrototype) {
+			functionPrototypes.push({ rva: canonicalRva(rva), declaration: current.functionPrototype });
+		}
+	}
+	return { schemaVersion: 2, composites, dataTypes, functionPrototypes };
+}
+
+/**
+ * Reads one stored composite layout back into the shape the worker expects.
+ *
+ * A layout that no longer parses is dropped rather than sent. It was validated
+ * when it was authored, so this only fires on a project edited by hand or
+ * written by a newer version — and in both cases the honest move is to decompile
+ * without it rather than to hand the worker something it will refuse, which
+ * would make every function in the image unreadable over one bad row.
+ */
+function parseCompositeLayout(name: string, layout: string): IDecompilationSemanticComposite | undefined {
+	try {
+		const parsed = JSON.parse(layout) as Omit<IDecompilationSemanticComposite, 'name'>;
+		if (parsed.kind !== 'struct' || typeof parsed.size !== 'number' || !Array.isArray(parsed.fields)) {
+			return undefined;
+		}
+		return {
+			name,
+			kind: 'struct',
+			size: parsed.size,
+			fields: parsed.fields.map(field => ({ offset: field.offset, name: field.name, type: field.type })),
+		};
+	} catch {
+		return undefined;
+	}
+}
+
+function sameSemanticDependencies(left: IDecompilationSemanticDependencies | undefined, right: IDecompilationSemanticDependencies): boolean {
+	return JSON.stringify(left ?? emptySemanticDependencies()) === JSON.stringify(right);
+}
+
+function hasSemanticDependencies(value: IDecompilationSemanticDependencies): boolean {
+	return value.composites.length > 0 || value.dataTypes.length > 0 || value.functionPrototypes.length > 0;
+}
+
+/**
+ * Records the snapshot a decompilation was produced against, in its own result.
+ *
+ * Omitted when the snapshot is empty. The decoder already reads an absent field
+ * as the empty snapshot and `sameSemanticDependencies` already treats the two as
+ * equal, so writing it out would add roughly seventy bytes to every saved
+ * function in a portable project to say nothing at all — and a project with no
+ * authored types is the common case, not the edge one.
+ */
+function attachSemanticDependencies(serialized: string, semanticDependencies: IDecompilationSemanticDependencies): string {
+	if (!hasSemanticDependencies(semanticDependencies)) {
+		return serialized;
+	}
+	const value: unknown = JSON.parse(serialized);
+	if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+		return serialized;
+	}
+	return JSON.stringify({ ...value, semanticDependencies });
 }
 
 function canonicalRva(functionRva: bigint): string {

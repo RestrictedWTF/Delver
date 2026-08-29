@@ -4,18 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { createDecorator } from '../../instantiation/common/instantiation.js';
-import {
-	IFunctionsResult,
-	IGetExportsResult,
-	IGetImageInfoResult,
-	IGetImportsResult,
-	IListingWindowResult,
-	IMomentWire,
-	IOpenImageResult,
-	IRangeWire,
-	IStringsResult,
-	IXrefsResult,
-} from './protocol.generated.js';
+import { IBasicBlocksResult, ICallGraphResult, ICallPathsResult, IFunctionCorrectionWire, IFunctionProfileResult, IFunctionsResult, IGetExportsResult, IGetImageInfoResult, IGetImportsResult, IGlobalAccessesResult, IGlobalsResult, IListingWindowResult, IMomentWire, IOpenImageResult, IRangeWire, IScanStringsResult, ISetCorrectionsResult, IStringsResult, IXrefIndexResult, IXrefsResult } from './protocol.generated.js';
 import { TargetConfig } from './target.js';
 
 export const IDelverAnalysisService = createDecorator<IDelverAnalysisService>('delverAnalysisService');
@@ -57,6 +46,36 @@ export interface IDelverDecompilationWire {
 	readonly processGeneration: number;
 	readonly timings: IDelverDecompilationTimingsWire;
 	readonly serialized: string;
+}
+
+/** One accepted authored declaration supplied to the decompiler backend. */
+export interface IDelverDecompilationSemanticDeclarationWire {
+	readonly rva: string;
+	readonly declaration: string;
+}
+
+/** Complete accepted semantic snapshot used to produce one decompilation. */
+/** One field of an authored composite, at an explicit offset. */
+export interface IDelverDecompilationSemanticFieldWire {
+	readonly offset: number;
+	readonly name: string;
+	readonly type: string;
+}
+
+/** One authored composite type, which belongs to the image, not to an address. */
+export interface IDelverDecompilationSemanticCompositeWire {
+	readonly name: string;
+	readonly kind: 'struct';
+	readonly size: number;
+	readonly fields: readonly IDelverDecompilationSemanticFieldWire[];
+}
+
+export interface IDelverDecompilationSemanticsWire {
+	readonly schemaVersion: 2;
+	/** Defined before the two arrays below, which may reference them by name. */
+	readonly composites: readonly IDelverDecompilationSemanticCompositeWire[];
+	readonly dataTypes: readonly IDelverDecompilationSemanticDeclarationWire[];
+	readonly functionPrototypes: readonly IDelverDecompilationSemanticDeclarationWire[];
 }
 
 export interface IDelverDecompilerCacheInfoWire {
@@ -130,6 +149,33 @@ export interface IDelverAnalysisService {
 	 */
 	functions(sessionId: AnalysisSessionId): Promise<IFunctionsResult>;
 
+	/** Returns a bounded basic-block CFG for one exact detected function entry. */
+	basicBlocks(sessionId: AnalysisSessionId, functionRva: string, maxBlocks: number): Promise<IBasicBlocksResult>;
+
+	/** Returns bounded direct call-graph edges for one exact detected function entry. */
+	callGraph(sessionId: AnalysisSessionId, functionRva: string, maxEdges: number): Promise<ICallGraphResult>;
+
+	/**
+	 * Returns bounded call paths between two functions, or from a function to an
+	 * import slot.
+	 *
+	 * `toRva` is either an exact detected function entry or the RVA of an import
+	 * address table slot. **An empty `paths` is not a proof of absence**: the
+	 * search is bounded, so a caller may only render "no path exists" when
+	 * `search_exhausted` is true, neither limit flag is set, and
+	 * `unresolved_indirect_sites_on_frontier` is zero.
+	 */
+	callPaths(sessionId: AnalysisSessionId, fromRva: string, toRva: string, maxDepth: number, maxPaths: number, maxVisited: number): Promise<ICallPathsResult>;
+
+	/** Returns aggregate structure counts for one exact detected function entry. */
+	functionProfile(sessionId: AnalysisSessionId, functionRva: string): Promise<IFunctionProfileResult>;
+
+	/** Returns one page of observed global-data addresses. */
+	globals(sessionId: AnalysisSessionId, start: number, maxGlobals: number): Promise<IGlobalsResult>;
+
+	/** Returns decoded instructions that reference one observed global-data address. */
+	globalAccesses(sessionId: AnalysisSessionId, rva: string, maxAccesses: number): Promise<IGlobalAccessesResult>;
+
 	/**
 	 * Image headers: architecture, entry point, sections, and directory counts.
 	 */
@@ -162,6 +208,41 @@ export interface IDelverAnalysisService {
 	 */
 	xrefsFrom(sessionId: AnalysisSessionId, rva: string): Promise<IXrefsResult>;
 
+	/**
+	 * Exports one page of the cross-reference table.
+	 *
+	 * `xrefsTo` and `xrefsFrom` answer a question about one address, and need the
+	 * analysed image present to answer it. This walks the whole table instead, so
+	 * a `.delverdb` project can retain the references and still answer "who
+	 * references this address" after being reopened without its original sample.
+	 *
+	 * The walk is resumable: pass the previous page's `next_start` as `start`.
+	 * **`next_start` is absent exactly when the table has ended** — that absence
+	 * is the completeness signal, and it is passed through unchanged. A caller
+	 * must not read a short page as the end, nor a missing `next_start` as zero.
+	 */
+	xrefIndex(sessionId: AnalysisSessionId, start: number, maxXrefs: number): Promise<IXrefIndexResult>;
+
+	/**
+	 * Re-derives every fact for a session against a new correction set.
+	 *
+	 * A correction changes the seeds analysis starts from, so the answer is a
+	 * re-derivation rather than an edit to the previous one — which is what
+	 * keeps a corrected fact as recomputable as an uncorrected one. The result
+	 * reports the function counts either side of the change, because an analyst
+	 * approving a correction has to be able to see its exact effect.
+	 */
+	setCorrections(sessionId: AnalysisSessionId, corrections: readonly IFunctionCorrectionWire[]): Promise<ISetCorrectionsResult>;
+
+	/**
+	 * Re-scans a bounded window of the image for strings.
+	 *
+	 * The resumable counterpart to {@link strings}: that one serves what was
+	 * retained when the image was analysed, and the retention has a cap real
+	 * binaries reach. This is how a caller reaches past it.
+	 */
+	scanStrings(sessionId: AnalysisSessionId, fromRva: string, maxStrings: number): Promise<IScanStringsResult>;
+
 	/** Starts the selected backend and reports the backend that actually answered. */
 	decompilerStatus(ghidraHome: string | undefined, pythonPath: string | undefined, backend?: 'pyghidra' | 'headless'): Promise<DelverDecompilerStatusWire>;
 
@@ -175,7 +256,7 @@ export interface IDelverAnalysisService {
 	clearDecompilerCache(): Promise<IDelverDecompilerCacheInfoWire>;
 
 	/** Runs one decompilation and identifies the backend that emitted its versioned JSON. */
-	decompileFunction(sessionId: AnalysisSessionId, rva: string, contentHash: string, ghidraHome: string, pythonPath: string, operationId: string, backend: 'pyghidra' | 'headless'): Promise<IDelverDecompilationWire>;
+	decompileFunction(sessionId: AnalysisSessionId, rva: string, contentHash: string, ghidraHome: string, pythonPath: string, operationId: string, backend: 'pyghidra' | 'headless', semantics: IDelverDecompilationSemanticsWire): Promise<IDelverDecompilationWire>;
 
 	/** Starts and opens a verified target in PyGhidra before the first F5 request. */
 	prepareDecompilerTarget(sessionId: AnalysisSessionId, contentHash: string, ghidraHome: string, pythonPath: string): Promise<IDelverDecompilerTargetPreparationWire>;

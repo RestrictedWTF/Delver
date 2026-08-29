@@ -357,9 +357,11 @@ function variantLabel(variant: DelverSignatureVariant): string {
 }
 
 function policyLabel(policy: DelverSignaturePolicy): string {
-	return policy === 'unique-now'
-		? localize('delverSignatureUniqueNowPolicy', "unique now")
-		: localize('delverSignatureRelocationStablePolicy', "relocation stable");
+	switch (policy) {
+		case 'unique-now': return localize('delverSignatureUniqueNowPolicy', "unique now");
+		case 'relocation-stable': return localize('delverSignatureRelocationStablePolicy', "relocation stable");
+		case 'cross-revision-stable': return localize('delverSignatureCrossRevisionStablePolicy', "cross-revision stable");
+	}
 }
 
 function scopeLabel(scope: DelverSignatureScope): string {
