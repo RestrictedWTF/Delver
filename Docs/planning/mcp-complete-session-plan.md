@@ -309,9 +309,17 @@ is a half-open range excluded from the derivation: the bytes are not decoded, no
 function start is admitted inside it from any source — seed, call target or sweep
 — and it originates no cross-reference. A cross-reference *targeting* the range
 survives, because a pointer into a table is the evidence that made it data.
-Strings are unaffected. The linear sweep steps over the range to its exclusive
-end rather than a byte at a time, which is the `rva+1` trap in its second form:
-incrementing would guess a function at every excluded byte.
+Strings are unaffected. An instruction that *starts* outside a range but reads
+into it is excluded too, along with the xref and the function it derives from
+those bytes. That is not a corner case: the boundary an analyst can see is the
+table's, not the bad decode's, so the instruction before a jump table routinely
+reaches into it for an operand — and a `call rel32` whose displacement is
+excluded invents a function at whatever the excluded bytes spell. Checking only
+an instruction's start address kept all three. The sweep also steps over a range
+rather than through it, but that is a cost optimisation and **not** a
+correctness guard: `add_function` and `walk` already refuse, so replacing the
+stride with `rva += 1` leaves every test in the crate passing. Measured, not
+assumed.
 
 It reuses `EditOp.FunctionBounds` at the same `(contentHash, rva)` anchor rather
 than adding an op, with canonical JSON `{"kind":"data","endRva":"0x..."}`. "A

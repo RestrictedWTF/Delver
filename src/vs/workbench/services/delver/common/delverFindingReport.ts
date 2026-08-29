@@ -16,6 +16,14 @@
  * and the identity of whoever made it, model or human, alongside the decision a
  * reviewer recorded. A finding nobody has reviewed says so rather than being
  * quietly presented as established.
+ *
+ * All three of those guarantees are structural, so every piece of text that
+ * came from a finding is neutralized before it is written — see
+ * {@link untrustedBlock}. A title is one line and a description is prose; if
+ * either could open a heading or a list item, a model quoting the sample's own
+ * strings could write a section Delver never rendered and a review line no
+ * human ever recorded, inside the one artifact whose entire premise is that
+ * every claim carries its real author and its real decision.
  */
 
 import { IAuthor } from '../../../../platform/delver/common/interpretation.js';
@@ -73,12 +81,12 @@ export function renderDelverFindingReport(input: IDelverReportInput): string {
 	const lines: string[] = [];
 	lines.push('# Delver investigation report');
 	lines.push('');
-	lines.push(`- **Content hash:** \`${input.contentHash}\``);
+	lines.push(`- **Content hash:** \`${untrustedLine(input.contentHash)}\``);
 	if (input.targetPath !== undefined) {
-		lines.push(`- **Sample:** \`${input.targetPath}\``);
+		lines.push(`- **Sample:** \`${untrustedLine(input.targetPath)}\``);
 	}
 	if (input.projectPath !== undefined) {
-		lines.push(`- **Project:** \`${input.projectPath}\``);
+		lines.push(`- **Project:** \`${untrustedLine(input.projectPath)}\``);
 	}
 	lines.push(`- **Rendered:** ${new Date(input.renderedAt).toISOString()}`);
 	lines.push(`- **Findings:** ${input.findings.length} total — `
@@ -131,21 +139,27 @@ function renderFinding(
 	toolCalls: readonly IDelverToolCallRecord[],
 ): readonly string[] {
 	const lines: string[] = [];
-	lines.push(`### ${finding.title}`);
+	lines.push(`### ${untrustedLine(finding.title)}`);
 	lines.push('');
 	lines.push(`- **Severity:** ${finding.severity}`);
 	// Rendered beside severity and never folded into it. A confident report of
 	// something harmless and a tentative report of something catastrophic are
 	// different situations, and one number cannot carry both.
-	lines.push(`- **Confidence:** ${finding.confidence.toFixed(2)} (evidence strength, not impact)`);
+	// Two decimals, but never rounded to an endpoint the value did not reach:
+	// 0.996 printed as `1.00` reads as certainty and 0.004 as `0.00` reads as
+	// none, and both are claims the author did not make.
+	const confidence = finding.confidence >= 1 ? '1.00'
+		: finding.confidence <= 0 ? '0.00'
+			: clampReported(finding.confidence);
+	lines.push(`- **Confidence:** ${confidence} (evidence strength, not impact)`);
 	lines.push(`- **Author:** ${describeAuthor(finding.author)}`);
 	lines.push(`- **Recorded:** ${new Date(finding.at).toISOString()}`);
 	lines.push(decision === undefined
 		? '- **Review:** not yet reviewed by a human'
 		: `- **Review:** ${decision.outcome} by ${describeAuthor(decision.author)} at ${new Date(decision.at).toISOString()}`);
-	lines.push(`- **Reported through:** \`${finding.provenance.capability}\` (call \`${finding.provenance.callId}\`)`);
+	lines.push(`- **Reported through:** \`${untrustedLine(finding.provenance.capability)}\` (call \`${untrustedLine(finding.provenance.callId)}\`)`);
 	lines.push('');
-	lines.push(finding.description);
+	lines.push(untrustedBlock(finding.description));
 	lines.push('');
 	lines.push('**Evidence**');
 	lines.push('');
@@ -153,23 +167,70 @@ function renderFinding(
 		const range = entry.endRva === undefined
 			? hex(entry.anchor.rva)
 			: `${hex(entry.anchor.rva)}–${hex(entry.endRva)}`;
-		lines.push(`- \`${range}\` — ${entry.description}`);
+		lines.push(`- \`${range}\` — ${untrustedLine(entry.description)}`);
 		for (const callId of entry.sourceCallIds ?? []) {
 			// The citation is resolved where it can be and shown raw where it
 			// cannot. A call id whose record is gone is still the honest answer:
 			// the claim named a source, and the source is no longer retained.
 			const record = toolCalls.find(call => call.callId === callId);
 			lines.push(record === undefined
-				? `  - source: \`${callId}\` (record not retained in this project)`
-				: `  - source: \`${record.capability}\` (call \`${callId}\`)`);
+				? `  - source: \`${untrustedLine(callId)}\` (record not retained in this project)`
+				: `  - source: \`${untrustedLine(record.capability)}\` (call \`${untrustedLine(callId)}\`)`);
 		}
 	}
 	lines.push('');
 	return lines;
 }
 
+/**
+ * One line of untrusted text, safe to interpolate inline.
+ *
+ * Newlines collapse to spaces because the caller is filling a heading or a list
+ * item, both of which are one line by definition: a newline here does not
+ * wrap, it ends the construct and lets whatever follows begin a new one.
+ * Backticks go too, so a fragment cannot close a code span the template opened.
+ */
+function untrustedLine(text: string): string {
+	return text.replace(/[\r\n]+/g, ' ').replace(/`/g, '\'').trim();
+}
+
+/**
+ * A block of untrusted prose, safe to write at the top level of the document.
+ *
+ * Markdown builds every block-level construct — headings, list items,
+ * blockquotes, fences, tables, thematic breaks — from a marker at the *start*
+ * of a line. Escaping that marker is therefore enough to stop a finding's text
+ * from forging document structure, and it is cheaper and far more predictable
+ * than trying to enumerate the constructs themselves. The text stays readable:
+ * a backslash before a leading `#` renders as the `#`.
+ *
+ * Blank lines are preserved, because a description is prose and paragraphs are
+ * how prose is read.
+ */
+function untrustedBlock(text: string): string {
+	return text
+		.split(/\r?\n/)
+		.map(line => line.replace(/^(\s*)([#>\-+*=|~`_]|\d+[.)])/, '$1\\$2'))
+		.join('\n');
+}
+
+/**
+ * Two decimals, without letting rounding manufacture certainty.
+ *
+ * `toFixed` is right in the middle of the range and wrong at its ends, where
+ * it turns "almost sure" into "sure" and "barely anything" into "nothing".
+ * Those two readings are exactly the ones a reader acts on.
+ */
+function clampReported(confidence: number): string {
+	const rounded = confidence.toFixed(2);
+	if (rounded === '1.00') {
+		return '0.99';
+	}
+	return rounded === '0.00' ? '0.01' : rounded;
+}
+
 function describeAuthor(author: IAuthor): string {
-	return author.kind === 'human' ? `${author.id} (human)` : `${author.id} (model)`;
+	return author.kind === 'human' ? `${untrustedLine(author.id)} (human)` : `${untrustedLine(author.id)} (model)`;
 }
 
 /**

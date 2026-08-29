@@ -6,6 +6,7 @@
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { CancellationError, isCancellationError } from '../../../../base/common/errors.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
+import { IDisposable } from '../../../../base/common/lifecycle.js';
 import { stringHash } from '../../../../base/common/hash.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { localize } from '../../../../nls.js';
@@ -549,6 +550,34 @@ export class DelverDecompilerService implements IDelverDecompilerService {
 		}
 	}
 
+	/**
+	 * Drops every cached body for one image, after its facts were re-derived.
+	 *
+	 * The cache key is content hash, function RVA, and a digest of the accepted
+	 * *types* — deliberately, because a type change is what usually changes the
+	 * C. A correction changes something the key cannot see: where the function
+	 * is, or whether it exists at all. Left alone, the pane and
+	 * `delver_decompile` keep answering for an RVA whose function was just
+	 * undefined, with a body derived from bounds that no longer exist.
+	 *
+	 * Content-wide rather than per-function, for the same reason the semantic
+	 * snapshot is: a re-derivation moves call targets and block boundaries
+	 * across the image, so "which functions changed" is not a question the key
+	 * can answer.
+	 */
+	invalidateDerivedFacts(contentHash: string): void {
+		for (const key of [...this.cache.keys()]) {
+			if (key.startsWith(`${contentHash}:`)) {
+				this.cache.delete(key);
+			}
+		}
+		for (const key of [...this.savedDiagnostics.keys()]) {
+			if (key.startsWith(`${contentHash}:`)) {
+				this.savedDiagnostics.delete(key);
+			}
+		}
+	}
+
 	private cacheResult(key: string, result: IDecompiledFunction): void {
 		this.cache.delete(key);
 		this.cache.set(key, result);
@@ -647,6 +676,16 @@ class DefaultDelverDecompilerService extends DelverDecompilerService {
 			contentHash => projectService.projectSnapshot(contentHash),
 			contentHash => semanticDependenciesFor(interpretationService, contentHash),
 		);
+		// A re-derivation is the one event that changes the C without
+		// changing anything in the cache key, so nothing but this listener
+		// can evict.
+		this.rederived = sessionService.onDidRederiveFacts(session => this.invalidateDerivedFacts(session.contentHash));
+	}
+
+	private readonly rederived: IDisposable;
+
+	dispose(): void {
+		this.rederived.dispose();
 	}
 }
 

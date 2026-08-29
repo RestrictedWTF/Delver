@@ -191,6 +191,7 @@ suite('Delver Review View contribution lifetime', () => {
 		instantiationService.stub(IDelverSessionService, {
 			activeSession: undefined,
 			onDidChangeActiveSession: Event.None,
+			onDidRefuseCorrections: Event.None,
 		});
 		instantiationService.stub(IDelverInterpretationService, {
 			onDidChange: Event.None,

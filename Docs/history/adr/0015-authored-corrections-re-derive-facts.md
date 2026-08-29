@@ -135,10 +135,20 @@ and it originates **no** cross-reference. A cross-reference *targeting* the rang
 survives, because a pointer into a table is the evidence that made it data in the
 first place. Strings are unaffected.
 
-The linear sweep steps **over** an excluded range to its exclusive end rather
-than incrementing a byte at a time. This is the `rva+1` trap the decision above
-already records for `Undefine`, in its second form: incrementing would guess a
-function at every excluded byte.
+Exclusion is by *overlap*, not by start address. An instruction beginning
+outside a range and reading into it is excluded along with the cross-reference
+and the function start it derives — because the boundary an analyst can see is
+the data's, not the mis-decode's, and a `call rel32` whose displacement lies in
+excluded bytes manufactures a function at whatever those bytes spell. The first
+implementation checked only the start address and kept all three; an audit found
+it.
+
+The linear sweep also steps **over** an excluded range to its exclusive end
+rather than incrementing. That is a cost optimisation and not a correctness
+guard — `add_function` and `walk` already refuse, so `rva += 1` produces the
+same result more slowly. An earlier draft of this ADR called it the `rva+1`
+trap in a second form; that was wrong, and it is recorded here rather than
+quietly deleted.
 
 Conflicts follow the same whole-set refusal. `Corrections<'a> { functions,
 data_ranges }` is a borrowed view with `From<&[FunctionCorrection]>` impls, so

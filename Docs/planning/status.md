@@ -65,11 +65,18 @@ Three decisions worth carrying:
   unlike a `define`. A range an analyst calls data is usually *inside* an
   executable section — that is the mistake being corrected — so a
   mapped-executable test would refuse every useful case.
-- **The linear sweep steps over the range to its exclusive end**, rather than
-  incrementing a byte at a time. This is the `rva+1` trap that
-  [ADR 0015](../history/adr/0015-authored-corrections-re-derive-facts.md) already
-  records for `Undefine`, in a second form: incrementing would guess a function
-  at every excluded byte.
+- **An instruction that starts outside a range but reads into it is excluded**,
+  along with the xref and the function it derives from those bytes. An analyst
+  draws the boundary at the table's true start, not at whatever boundary the bad
+  decode produced, so the instruction before it routinely reaches in for an
+  operand — and a `call rel32` with an excluded displacement invents a function
+  at whatever those bytes spell. Checking only the start address kept all three.
+  Found by audit after the first version shipped, not by design.
+- **The sweep steps over a range rather than through it, and that is a cost
+  optimisation, not a correctness guard.** `add_function` and `walk` already
+  refuse, so replacing the stride with `rva += 1` leaves every test passing. The
+  first write-up of this claimed it as the `rva+1` trap in a second form; it is
+  not, and the audit that measured it is the reason this line is here.
 
 In Rust, `Corrections<'a> { functions, data_ranges }` is a borrowed view with
 `From<&[FunctionCorrection]>` impls, so existing call sites compile untouched.
@@ -138,11 +145,50 @@ conflicting set whole and the current push swallows that failure. Both are
 written up in the S5 section of
 [mcp-complete-session-plan.md](mcp-complete-session-plan.md).
 
+**Two audits ran over this work, and both found real defects.** Every row below
+is fixed and pinned by a test that was verified to fail without the fix.
+
+- **P0 — the report could be made to forge its own structure.** Finding text is
+  written by a model reading the sample's strings, and `boundedText` trims but
+  permits embedded newlines. A description could therefore open a
+  `## Accepted findings` section and a `- **Review:** accepted by <name>` line
+  that no human ever recorded, inside the one artifact built to be forwarded to
+  someone who cannot check it. Every piece of finding-derived text is now
+  neutralized: titles and evidence lines collapse to one line, prose has its
+  line-leading Markdown markers escaped. The text stays readable — it is
+  evidence and must be defused, not dropped.
+- **P0 — a refused correction set was swallowed.** A set applies whole or not
+  at all, so one conflicting correction leaves *every* correction unapplied
+  while the review queue still shows them accepted. The `.catch(() => undefined)`
+  meant nothing said so. There is now an `onDidRefuseCorrections` event and a
+  notification, and the session is marked corrected only after the server
+  accepts rather than before the await.
+- **P1 — a re-derivation was invisible behind the saved snapshot.** `functions()`
+  answers from the project snapshot when one exists, and the snapshot is
+  refreshed only by a save. After a correction, the Functions pane and
+  `delver_reanalyze`'s own before-count both reported the last save's state as
+  current. Re-derived sessions now bypass the snapshot for derived facts.
+- **P1 — the decompiler cache survived a re-derivation.** Its key covers
+  accepted *types*, not bounds, so the pane kept serving a body for a function
+  that had just been undefined. It now evicts on `onDidRederiveFacts`.
+- **P1 (Rust) — exclusion checked only an instruction's start address.** See
+  above; this is the one that most directly broke the feature's headline claim.
+- **P2** — confidence no longer rounds to `1.00`/`0.00`; the findings `status`
+  filter is validated before the cursor and refuses a non-string instead of
+  coercing it to `all`; the oversize-report message no longer points at a
+  file-export route that does not exist.
+
+**Four of the twelve data-range tests were vacuous** and are rewritten. Two
+compared a pure function against itself, one asserted a call signature, and one
+named a trap it did not pin. The `analyze`-atomicity claim they appeared to
+cover is `server-analysis`'s and is still untested; that is stated in the code
+rather than papered over.
+
 **Byte and assembly patching remains explicitly excluded**, on ADR 0015's
 reasoning: a patch changes the bytes, so facts derived from them are facts about
 something the sample no longer is. It needs its own decision.
 
-**Verified:** 405 Delver TypeScript tests, 234 Rust tests, and the 10 Python
+**Verified:** 407 Delver TypeScript tests, 248 Rust tests, and the 10 Python
 decompiler-worker tests pass; the client typecheck is clean, the corpus matches
 6/6, `cargo fmt` and clippy are clean, and the layers check is clean. Run the
 TypeScript suite with the full selector — `--grep Delver` alone misses six

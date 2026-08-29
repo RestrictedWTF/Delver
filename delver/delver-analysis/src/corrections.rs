@@ -27,6 +27,7 @@
 //!   code.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound;
 
 /// One authored correction to function detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -308,6 +309,27 @@ impl CorrectionSet {
 			.range(..=rva)
 			.next_back()
 			.and_then(|(_, &end)| (rva < end).then_some(end))
+	}
+
+	/// Whether an instruction spanning `[rva, end)` reads any excluded byte.
+	///
+	/// Checking the *start* of an instruction is not enough, and the gap is not
+	/// theoretical: an analyst draws a range at the true start of a jump table,
+	/// which is rarely the boundary the bad decode happened to produce. The
+	/// instruction before it then reaches into the table for an operand — and
+	/// a `call rel32` reading its displacement out of excluded bytes
+	/// manufactures a function at whatever address those bytes spell, which is
+	/// the exact phantom the correction was authored to remove.
+	///
+	/// So an instruction is excluded if it *overlaps* a range at all: either it
+	/// starts inside one, or a range starts inside it.
+	pub(crate) fn instruction_overlaps_data_range(&self, rva: u64, end: u64) -> bool {
+		self.data_range_end_at(rva).is_some()
+			|| self
+				.data_ranges
+				.range((Bound::Excluded(rva), Bound::Excluded(end)))
+				.next()
+				.is_some()
 	}
 
 	/// The start of the data range covering `rva`, if one does.

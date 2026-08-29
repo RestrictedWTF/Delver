@@ -416,6 +416,9 @@ impl<'a> Descent<'a> {
 			// this loop pushes from originating inside one. An xref *to* the
 			// range, pushed from an instruction outside it, is untouched: the
 			// reference is a fact about the image whatever the bytes are.
+			//
+			// This is the start of an instruction; the overlap check below
+			// handles one that begins outside a range and reads into it.
 			if self.corrections.data_range_end_at(rva).is_some() {
 				return;
 			}
@@ -432,6 +435,20 @@ impl<'a> Descent<'a> {
 				return;
 			};
 			if instruction.flow == FlowKind::Invalid {
+				return;
+			}
+			// The range check above catches an instruction that *starts* in
+			// excluded bytes; this catches one that starts outside and reads
+			// into them. Both are the same claim — the author said those bytes
+			// are not code — and only the second can manufacture a function,
+			// because a `call rel32` whose displacement lies inside the range
+			// invents a start at whatever the excluded bytes spell. Checked
+			// before anything is recorded, so no instruction, xref, or function
+			// survives the overlap.
+			if self.corrections.instruction_overlaps_data_range(
+				instruction.rva,
+				instruction.rva.saturating_add(instruction.len as u64),
+			) {
 				return;
 			}
 
@@ -515,12 +532,14 @@ impl<'a> Descent<'a> {
 		for (start, end) in executable {
 			let mut rva = start;
 			while rva < end {
-				// Step **over** a data range, never into or past it a byte at a
-				// time: advancing by one would land the sweep mid-range and
-				// then guess a function at every byte the author excluded, and
-				// arriving at `end_rva` by increments would do it once per byte
-				// on the way. Jumping to the exclusive end visits the first
-				// byte after the range exactly once, as an ordinary candidate.
+				// Step over the range rather than through it. This is a cost
+				// optimisation and **not** the correctness guard: `add_function`
+				// refuses every candidate inside a range and `walk` returns
+				// before recording anything, so byte-stepping would reach the
+				// same empty result — it would just do the work once per
+				// excluded byte, and a range can be megabytes. Measured, not
+				// assumed: replacing this with `rva += 1` leaves every test in
+				// this file passing.
 				if let Some(range_end) = self.corrections.data_range_end_at(rva) {
 					rva = range_end;
 					continue;
@@ -1350,7 +1369,7 @@ mod tests {
 	}
 
 	#[test]
-	fn a_range_is_stepped_over_rather_than_a_byte_at_a_time() {
+	fn a_range_leaves_no_sweep_guess_inside_it_or_just_past_it() {
 		let (image, file) = image_with_code(NOP_LED_FUNCTION);
 
 		let baseline = analyze(&image, &file);
@@ -1366,11 +1385,71 @@ mod tests {
 					(0x1000, FunctionSource::EntryPoint),
 					(0x1005, FunctionSource::LinearSweep),
 				],
-				// No start at 0x1005 — and, the trap this pins, not one there
-				// because the sweep resumed one byte into the range either.
+				// No start at 0x1005. The guard that produces this is in
+				// `add_function`, not in the sweep's stride: the stride is a
+				// cost optimisation and this test passes without it.
 				vec![(0x1000, FunctionSource::EntryPoint)],
 			),
 		);
+	}
+
+	/// A `call rel32` at 0x1000 whose displacement lies inside the range, and
+	/// the function that displacement invents at 0x100a.
+	const CALL_OVER_A_TABLE: &[u8] = &[
+		0xE8, 0x05, 0x00, 0x00, 0x00, // call 0x100a at 0x1000; operand is 0x1001..0x1005
+		0xC3, 0xCC, 0xCC, 0xCC, 0xCC, // ret, then padding
+		0x48, 0x89, 0xD8, 0xC3, // the invented function at 0x100a
+	];
+
+	#[test]
+	fn an_instruction_reading_into_a_range_is_excluded_along_with_what_it_invents() {
+		let (image, file) = image_with_code(CALL_OVER_A_TABLE);
+
+		// The analyst draws the range at the table's true start — 0x1002 —
+		// which is *mid-instruction*, because the bad decode began before it.
+		// That is the normal case, not a corner one: the boundary an analyst
+		// can see is the data's, not the decoder's mistake's.
+		let baseline = analyze(&image, &file);
+		let corrected = analyze_data_corrected(&image, &file, &[], &[data(0x1002, 0x1008)])
+			.expect("no conflict");
+
+		let derived_from_the_call = |analysis: &AnalyzedImage| {
+			starts(analysis)
+				.into_iter()
+				.filter(|&(_, source)| source == FunctionSource::CallTarget)
+				.collect::<Vec<_>>()
+		};
+
+		assert_eq!(
+			(
+				baseline.instructions.row_for_address(0x1000).is_some(),
+				baseline.xrefs.from(0x1000).len(),
+				derived_from_the_call(&baseline),
+				corrected.instructions.row_for_address(0x1000),
+				corrected.xrefs.from(0x1000).len(),
+				derived_from_the_call(&corrected),
+			),
+			(
+				// Uncorrected: the call is decoded, it pushes an xref, and it
+				// names 0x100a as a function — all three read out of bytes the
+				// analyst is about to declare data.
+				true,
+				1,
+				vec![(0x100a, FunctionSource::CallTarget)],
+				// Corrected: checking only the instruction's *start* would keep
+				// every one of them, because the call begins at 0x1000, outside
+				// the range, and reaches into it for its displacement.
+				None,
+				0,
+				vec![],
+			),
+		);
+		// What the sweep still guesses over bytes outside the range is a
+		// separate and honest matter: 0x100a really does hold code. The claim
+		// this pins is that nothing was *derived from reading excluded bytes*.
+		assert!(starts(&corrected)
+			.iter()
+			.all(|&(_, source)| source != FunctionSource::CallTarget));
 	}
 
 	#[test]
@@ -1411,9 +1490,18 @@ mod tests {
 		let corrected = analyze_data_corrected(&image, &file, &[], &[data(0x1001, 0x1007)])
 			.expect("no conflict");
 
+		// Equality of the string lists means nothing on its own — the scanner
+		// takes no correction argument, so it *cannot* differ. What makes this
+		// a test is the first pair: the range demonstrably changed the code
+		// side, and the strings still did not move. Without that, this asserts
+		// a call signature.
 		assert_eq!(
-			format!("{:?}", corrected.strings),
-			format!("{:?}", baseline.strings),
+			(
+				baseline.instructions.row_for_address(0x1001).is_some(),
+				corrected.instructions.row_for_address(0x1001),
+				format!("{:?}", corrected.strings),
+			),
+			(true, None, format!("{:?}", baseline.strings),),
 			"the scanner reads bytes, not decoded code",
 		);
 	}
@@ -1477,7 +1565,6 @@ mod tests {
 	fn a_refused_set_applies_nothing() {
 		let (image, file) = image_with_code(NOP_LED_FUNCTION);
 
-		let baseline = analyze(&image, &file);
 		// The first range would apply cleanly on its own; it must not, because
 		// the set as a whole is not one an author could reproduce.
 		let refused = analyze_data_corrected(
@@ -1486,20 +1573,41 @@ mod tests {
 			&[],
 			&[data(0x1004, 0x1009), data(0x1008, 0x1009)],
 		);
-		let after = analyze(&image, &file);
+		// Dropping only the offending range makes the same set apply, which is
+		// what shows the refusal was about the conflict and not about the first
+		// range being unacceptable on its own.
+		let without = analyze_data_corrected(&image, &file, &[], &[data(0x1004, 0x1009)])
+			.expect("the surviving range is fine on its own");
 
 		assert_eq!(
-			(refused.is_err(), format!("{after:?}")),
-			(true, format!("{baseline:?}")),
+			(
+				matches!(
+					refused,
+					Err(CorrectionConflict::OverlappingDataRanges { rva: 0x1008, .. })
+				),
+				starts(&without),
+			),
+			(true, vec![(0x1000, FunctionSource::EntryPoint)]),
 		);
+		// Atomicity over an *open image* — a refused set leaving the previous
+		// facts in place rather than emptying them — is `server-analysis`'s
+		// `reanalyze`, not this crate's. Asserting it here by re-running
+		// `analyze` would assert only that `analyze` is a pure function.
 	}
 
 	#[test]
-	fn an_empty_data_range_set_derives_exactly_what_analyze_does() {
+	fn a_correction_set_that_changes_nothing_derives_exactly_what_analyze_does() {
 		let (image, file) = image_with_code(CALL_OVER_PADDING);
 
 		let baseline = analyze(&image, &file);
-		let corrected = analyze_data_corrected(&image, &file, &[], &[]).expect("no conflict");
+		// Deliberately *not* an empty set. An empty one is the same call as
+		// `analyze` by construction and cannot fail, so it pins nothing. These
+		// are real corrections that happen to bite on nothing: an undefine at
+		// an address that holds no function, and a data range over bytes no
+		// pass reaches. Both traverse the whole corrected path.
+		let corrected =
+			analyze_data_corrected(&image, &file, &[undefine(0x1fff)], &[data(0x1ff0, 0x1ff8)])
+				.expect("no conflict");
 
 		assert_eq!(format!("{corrected:?}"), format!("{baseline:?}"));
 	}

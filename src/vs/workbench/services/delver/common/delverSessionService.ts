@@ -82,6 +82,17 @@ export interface IDelverSessionService {
 	 * change.
 	 */
 	readonly onDidRederiveFacts: Event<IDelverSession>;
+
+	/**
+	 * Fires when the analysis server refused the accepted correction set.
+	 *
+	 * A correction set applies whole or not at all, so one correction that
+	 * conflicts with another leaves *every* correction unapplied. The review
+	 * queue still shows both accepted, and every fact read afterwards is
+	 * derived from the previous seeds — which is the worst shape a failure can
+	 * take here, because nothing looks wrong. It has to be said out loud.
+	 */
+	readonly onDidRefuseCorrections: Event<{ readonly session: IDelverSession; readonly reason: string }>;
 	readonly isProjectDirty: boolean;
 	readonly projectPath: string | undefined;
 
@@ -186,12 +197,24 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 	 * indistinguishable from "never corrected" without this.
 	 */
 	private readonly correctedSessions = new Set<AnalysisSessionId>();
+	/**
+	 * Sessions whose facts have been derived again since the snapshot was read.
+	 *
+	 * The saved snapshot is refreshed by a save and by nothing else, so after a
+	 * re-derivation it holds the function list, image counts, and strings of
+	 * whatever the last save saw. Answering from it would report the state of a
+	 * save that predates the correction the analyst just accepted — and report
+	 * it as current.
+	 */
+	private readonly rederivedSessions = new Set<AnalysisSessionId>();
 	readonly _serviceBrand: undefined;
 
 	private readonly _onDidChangeActiveSession = this._register(new Emitter<IDelverSession | undefined>());
 	readonly onDidChangeActiveSession = this._onDidChangeActiveSession.event;
 	private readonly _onDidRederiveFacts = this._register(new Emitter<IDelverSession>());
 	readonly onDidRederiveFacts = this._onDidRederiveFacts.event;
+	private readonly _onDidRefuseCorrections = this._register(new Emitter<{ readonly session: IDelverSession; readonly reason: string }>());
+	readonly onDidRefuseCorrections = this._onDidRefuseCorrections.event;
 
 	/**
 	 * Every open target, keyed by its path.
@@ -312,6 +335,7 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 			// Every path that does not install the candidate releases it —
 			// otherwise its provider pair outlives the request that made it.
 			this.correctedSessions.delete(candidate.sessionId);
+			this.rederivedSessions.delete(candidate.sessionId);
 			await this.analysisService.closeImage(candidate.sessionId).catch(() => undefined);
 			throw error;
 		}
@@ -354,6 +378,7 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 			const candidate = await this.createSession(targetPath, false);
 			if (candidate.contentHash !== offlineSession.contentHash) {
 				this.correctedSessions.delete(candidate.sessionId);
+				this.rederivedSessions.delete(candidate.sessionId);
 			await this.analysisService.closeImage(candidate.sessionId).catch(() => undefined);
 				return offlineSession;
 			}
@@ -406,6 +431,7 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 		const candidate = await this.createSession(targetPath);
 		if (candidate.contentHash === existing.contentHash) {
 			this.correctedSessions.delete(candidate.sessionId);
+			this.rederivedSessions.delete(candidate.sessionId);
 			await this.analysisService.closeImage(candidate.sessionId).catch(() => undefined);
 			return existing;
 		}
@@ -413,6 +439,7 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 		if (!this.projectService.projectPath(existing.contentHash)) {
 			if (!await this.confirmProjectClose(this.sessions.get(existing.targetPath))) {
 				this.correctedSessions.delete(candidate.sessionId);
+				this.rederivedSessions.delete(candidate.sessionId);
 			await this.analysisService.closeImage(candidate.sessionId).catch(() => undefined);
 				throw new CancellationError();
 			}
@@ -426,6 +453,7 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 			case UpdatedTargetDecision.AddRevision:
 				if (!await this.projectService.addRevision(existing, candidate)) {
 					this.correctedSessions.delete(candidate.sessionId);
+					this.rederivedSessions.delete(candidate.sessionId);
 			await this.analysisService.closeImage(candidate.sessionId).catch(() => undefined);
 					throw new CancellationError();
 				}
@@ -435,6 +463,7 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 			case UpdatedTargetDecision.CreateProject:
 				if (!await this.projectService.createProject(candidate)) {
 					this.correctedSessions.delete(candidate.sessionId);
+					this.rederivedSessions.delete(candidate.sessionId);
 			await this.analysisService.closeImage(candidate.sessionId).catch(() => undefined);
 					throw new CancellationError();
 				}
@@ -443,6 +472,7 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 				return candidate;
 			default:
 				this.correctedSessions.delete(candidate.sessionId);
+				this.rederivedSessions.delete(candidate.sessionId);
 			await this.analysisService.closeImage(candidate.sessionId).catch(() => undefined);
 				throw new CancellationError();
 		}
@@ -507,12 +537,17 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 				continue;
 			}
 			// Deliberately not awaited: this is a reaction to an authored edit,
-			// not a step in the caller's operation. A backend that refuses the
-			// set leaves the facts as they were — see `reanalyze` — so the worst
-			// case is that the correction is not reflected until the next open,
-			// which is where it stood before this existed.
+			// not a step in the caller's operation. The failure is *not*
+			// swallowed, though. A refused set leaves the facts as they were
+			// while the review queue shows the correction accepted, so an
+			// analyst who is told nothing reads uncorrected facts believing
+			// they are corrected — the false-claim failure, arrived at through
+			// silence.
 			void this.applyFunctionCorrections(session.sessionId, session.contentHash)
-				.catch(() => undefined);
+				.catch(error => this._onDidRefuseCorrections.fire({
+					session,
+					reason: error instanceof Error ? error.message : String(error),
+				}));
 		}
 	}
 
@@ -521,11 +556,6 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 		const authored = functions.length + dataRanges.length;
 		if (authored === 0 && !this.correctedSessions.has(sessionId)) {
 			return;
-		}
-		if (authored === 0) {
-			this.correctedSessions.delete(sessionId);
-		} else {
-			this.correctedSessions.add(sessionId);
 		}
 		await this.analysisService.setCorrections(
 			sessionId,
@@ -536,6 +566,16 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 			})),
 			dataRanges.map(range => ({ rva: range.rva, end_rva: range.endRva })),
 		);
+		// Recorded only once the server has accepted the set. Marking the
+		// session corrected before the await left it bookkept as corrected
+		// while the server held nothing of the sort, and the next empty set
+		// would then be skipped as a no-op.
+		if (authored === 0) {
+			this.correctedSessions.delete(sessionId);
+		} else {
+			this.correctedSessions.add(sessionId);
+		}
+		this.rederivedSessions.add(sessionId);
 		// Announced only after the server has actually re-derived. A view that
 		// refreshed on the request rather than the result would read the
 		// previous facts back and cache them as the new ones.
@@ -680,6 +720,7 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 		} else {
 			this.correctedSessions.delete(session.sessionId);
 		}
+		this.rederivedSessions.add(session.sessionId);
 		this._onDidRederiveFacts.fire(session);
 		return result;
 	}
@@ -693,7 +734,13 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 		if (!session) {
 			return Promise.reject(new Error('No Delver project is open.'));
 		}
-		const serialized = this.projectService.projectSnapshot(session.contentHash)?.[category];
+		// A re-derivation supersedes the snapshot for every derived category
+		// below, and the sample is right there, so ask it rather than repeat a
+		// stale answer. The snapshot is still the only source for a project
+		// opened without its sample, which is why this is conditional on having
+		// one.
+		const stale = session.sessionId !== undefined && this.rederivedSessions.has(session.sessionId);
+		const serialized = stale ? undefined : this.projectService.projectSnapshot(session.contentHash)?.[category];
 		if (serialized !== undefined) {
 			try {
 				return Promise.resolve(parse(serialized));

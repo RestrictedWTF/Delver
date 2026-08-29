@@ -3174,7 +3174,7 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 		if (bytes > DELVER_AGENT_LIMITS.serializedBytes) {
 			throw new DelverAgentError(
 				DelverAgentErrorCode.ResultLimitExceeded,
-				`The rendered report is ${bytes} bytes, past the ${DELVER_AGENT_LIMITS.serializedBytes}-byte result limit. Ask the analyst to export it to a file; a report cut short loses the evidence of whichever claim it was cut inside.`,
+				`The rendered report is ${bytes} bytes, past the ${DELVER_AGENT_LIMITS.serializedBytes}-byte result limit, and is not truncated because a report cut short loses the evidence of whichever claim it was cut inside. Read the findings in pages with delver_list_findings instead, or ask the analyst to resolve some of them so fewer remain.`,
 			);
 		}
 
@@ -3259,6 +3259,20 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 	 */
 	private async handleListFindings(context: IHandlerContext): Promise<IHandlerOutput> {
 		const session = this.requireSession();
+		// Validated before `pageArgs`, deliberately. The filter fingerprint folds
+		// the raw argument in, so a typo checked afterwards surfaces as
+		// STALE_REVISION — "issued for different filter arguments" — which sends
+		// the caller looking for a revision problem it does not have. And a
+		// non-string value must be refused rather than coerced: silently
+		// answering `all` hands back an unfiltered list to a caller that asked
+		// for a filtered one, which is a wrong answer wearing a correct shape.
+		const status = context.args.status ?? 'all';
+		if (status !== 'all' && status !== 'undecided' && status !== 'accepted' && status !== 'rejected') {
+			throw new DelverAgentError(
+				DelverAgentErrorCode.InvalidArgument,
+				'status must be "all", "undecided", "accepted", or "rejected".',
+			);
+		}
 		const { startIndex, count, project, filter } = this.pageArgs(
 			context,
 			DelverAgentCapabilityId.ListFindings,
@@ -3266,14 +3280,6 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 			['status'],
 			this.findingStamp(session.contentHash),
 		);
-
-		const status = typeof context.args.status === 'string' ? context.args.status : 'all';
-		if (status !== 'all' && status !== 'undecided' && status !== 'accepted' && status !== 'rejected') {
-			throw new DelverAgentError(
-				DelverAgentErrorCode.InvalidArgument,
-				'status must be "all", "undecided", "accepted", or "rejected".',
-			);
-		}
 
 		const all = this.projectService.findingsFor(session.contentHash);
 		const decided = (finding: IDelverFinding) => this.projectService.findingDecisionFor(session.contentHash, finding.id);

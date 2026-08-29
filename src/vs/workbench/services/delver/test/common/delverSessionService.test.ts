@@ -49,11 +49,17 @@ class FakeAnalysisService implements Partial<IDelverAnalysisService> {
 	readonly openReachedGate = new DeferredPromise<void>();
 	private next = 1;
 
+	/** Set to make the server refuse the whole correction set, as it really does. */
+	correctionRefusal: string | undefined;
+
 	async setCorrections(
 		sessionId: string,
 		corrections: readonly IFunctionCorrectionWire[],
 		dataRanges: readonly IDataRangeCorrectionWire[] = [],
 	) {
+		if (this.correctionRefusal !== undefined) {
+			throw new Error(this.correctionRefusal);
+		}
 		this.correctionSets.push({ sessionId, corrections, dataRanges });
 		return {
 			image_id: sessionId,
@@ -373,6 +379,43 @@ suite('DelverSessionService', () => {
 			pushedOnProposal: 0,
 			pushedAfterAccept: [[{ rva: '0x2000', kind: 'undefine' }]],
 			announced: [contentHash],
+		});
+	});
+
+	test('a refused correction set is announced, not swallowed', async () => {
+		// A correction set applies whole or not at all, so one correction that
+		// conflicts with another leaves *every* correction unapplied while the
+		// review queue still shows them accepted. Swallowing that leaves the
+		// analyst reading uncorrected facts with nothing on screen disagreeing,
+		// which is a false claim about the sample arrived at through silence.
+		const { service, analysis, interpretation } = createService(store);
+		const contentHash = 'a'.repeat(64);
+		await service.openTarget('C:\samples\live.exe');
+
+		const refusals: string[] = [];
+		store.add(service.onDidRefuseCorrections(({ reason }) => refusals.push(reason)));
+		const rederived: string[] = [];
+		store.add(service.onDidRederiveFacts(session => rederived.push(session.contentHash)));
+
+		analysis.correctionRefusal = 'applying corrections: define at 0x1500 is inside data range 0x1000';
+		interpretation.accept({
+			seq: 1,
+			at: 0,
+			author: { kind: 'human', id: 'analyst' },
+			anchor: { kind: 'image', contentHash, rva: 0x1500n },
+			op: EditOp.FunctionBounds,
+			value: JSON.stringify({ kind: 'define' }),
+			status: EditStatus.Accepted,
+		});
+		await new Promise(resolve => setTimeout(resolve, 0));
+
+		assert.deepStrictEqual({
+			refusals,
+			// Nothing was re-derived, so nothing may claim it was.
+			rederived,
+		}, {
+			refusals: ['applying corrections: define at 0x1500 is inside data range 0x1000'],
+			rederived: [],
 		});
 	});
 

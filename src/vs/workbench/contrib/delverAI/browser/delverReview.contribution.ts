@@ -54,8 +54,17 @@ export class DelverReviewViewContribution extends Disposable {
 		@IDelverInterpretationService interpretationService: IDelverInterpretationService,
 		@IDelverProjectService projectService: IDelverProjectService,
 		@ITextModelService textModelService: ITextModelService,
+		@INotificationService notificationService: INotificationService,
 	) {
 		super();
+		// A correction set applies whole or not at all, so one correction that
+		// conflicts with another leaves *every* correction unapplied while this
+		// very view still shows them accepted. Silence here is the worst
+		// available outcome: the analyst reads uncorrected facts believing they
+		// are corrected, and nothing on screen disagrees.
+		this._register(sessionService.onDidRefuseCorrections(({ reason }) => notificationService.error(
+			localize('delverCorrectionsRefused', "Delver could not apply the accepted corrections, so analysis still reflects the previous ones. {0}", reason),
+		)));
 		const toolCallContentProvider = instantiationService.createInstance(DelverToolCallContentProvider);
 		this._register(textModelService.registerTextModelContentProvider(DELVER_TOOL_CALL_SCHEME, toolCallContentProvider));
 		const treeView = this._register(instantiationService.createInstance(TreeView, DELVER_REVIEW_VIEW_ID, viewName.value));
