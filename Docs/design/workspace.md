@@ -123,6 +123,21 @@ advertised a choice that did not exist. Pseudocode is registered as a
 and disappearing with its host. The mechanism is general; the descriptor field
 is `companions`.
 
+### Listing spans the image, not the code
+
+The Listing segment is one address-ordered sequence over the **whole image**:
+instructions where code was decoded, strings where the scanner found them, in
+address order. It used to be a block of instructions with the entire string
+table appended after the last one, which meant a string reached from Strings
+landed in that trailing block rather than at its address, and scrolling past the
+last instruction fell off the end of the code.
+
+The row space belongs to the analysis server, which owns the index that maps
+row to address — the renderer never merges two sequences of its own. See
+[ADR 0009](../history/adr/0009-unified-address-ordered-listing.md), which also
+records what is still missing: undefined bytes have no rows, so the listing
+still jumps over padding rather than showing `db` runs.
+
 ## 3. Surfaces are widgets, hosted twice
 
 A surface is a plain widget, not a `ViewPane` and not an `EditorPane`:

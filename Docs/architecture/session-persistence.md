@@ -62,8 +62,8 @@ The database stores:
 
 - target identity: content hash, format metadata, and an optional source locator
   used only for workspace-scoped, hash-verified automatic attachment;
-- derived facts: functions, instructions, strings, xrefs, imports, exports, and
-  other reproducible analysis;
+- derived facts: functions, strings, xrefs, imports, exports, and other
+  reproducible analysis;
 - decompiler results: text, address mappings, recovered variables, diagnostics,
   and backend-specific optional artifacts;
 - append-only interpretation, findings, recipes, and provenance;
@@ -74,6 +74,20 @@ projects, IDA databases, credentials, or licenses. This lets an analyst share a
 project without accidentally sharing malware. Views must degrade honestly when
 the sample is absent: cached results remain readable, while operations requiring
 bytes are disabled until the matching sample is attached.
+
+Most derived facts are stored as opaque per-revision analysis payloads. The
+cross-reference table is not: schema 8 stores it as a real indexed
+`xrefs (revision_id, from_rva, to_rva, kind)` table, written by walking the
+analysis server's table on save and read back by address, never loaded whole.
+Its RVAs are zero-padded fixed-width hex text so ordering is numeric rather than
+lexicographic. Each revision records whether that walk finished; a table that was
+only partly exported answers `partial`, and a revision that retained no table
+refuses with the same "attach the sample" error the live path uses rather than
+answering zero references, which would read as a fact about the binary. Schema 8
+is forward-only, as every `.delverdb` migration is. See ADR 0012.
+
+Listing rows are not retained. Disassembly and everything else that decodes
+bytes still requires the matching sample; retaining them is a separate decision.
 
 ## Identity, provenance, and invalidation
 

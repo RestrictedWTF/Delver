@@ -48,6 +48,7 @@ one-day monthly merge and a one-week one.
 | `src/vs/workbench/workbench.desktop.main.ts` | Register Delver renderer-side services | Low | — | Active: imports target, process, analysis, and interpretation-store remote services |
 | `build/gulpfile.vscode.ts` (and platform variants) | Stage provider/analysis binaries into the package | Medium | — | Model on `gulpfile.cli.ts` |
 | `package.json` | `delver:*` scripts | Low | — | Active: `delver:build`, `delver:test`, `delver:corpus`, `delver:protocol`, `delver:launch` |
+| `.gitignore` | Delver build output and local working artefacts | Low | — | Active: one `# DELVER` block at the end of the file — `delver/target/`, `resources/delver/bin/`, and the launch/watch/npm logs, `screenshots/`, `scripts/ghidra/__pycache__/`, and `.superpowers/` that land in the repo root because it is the working directory. Append-only at the end of the file, so an upstream edit anywhere above it cannot conflict — keep the trailing newline, or the next append joins onto the last entry |
 | `src/vs/workbench/browser/web.api.ts` | Only if Delver needs web-facing config | Low | — | Avoid if possible |
 
 Rows are placeholders until the corresponding work lands. Delete a row if the

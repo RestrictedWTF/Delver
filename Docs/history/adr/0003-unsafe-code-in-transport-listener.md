@@ -1,6 +1,6 @@
 # 0003 — Bounded unsafe code in `delver-rpc` local transport listener
 
-**Status:** accepted  
+**Status:** superseded by [0010](0010-unsafe-code-in-os-security-modules.md)  
 **Date:** 2026-08-06  
 **Affects:** `delver-rpc` crate-level `#![forbid(unsafe_code)]` · `CLAUDE.md`
 invariant 13

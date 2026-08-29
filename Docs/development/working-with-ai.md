@@ -151,9 +151,16 @@ yourself explaining the same sequence a third time.
 
 ## 7. What not to automate
 
-Per the working agreement, the model does not self-verify. Concretely, **do not**
-add hooks that run builds, typechecks, or test suites on every edit — they're
-slow, noisy, and you're doing that part.
+The model verifies its own work, but that is not an argument for verifying on
+every edit. Concretely, **do not** add hooks that run builds, typechecks, or test
+suites on write — they are slow and noisy, and they fire on half-finished states
+where a failure means nothing. Verification belongs at the end of a change, run
+deliberately, by whoever finished it.
+
+What stays the human's is anything needing a workbench, a rendered DOM, or an
+eye: launching Code OSS, driving the UI, judging how something looks. Those are
+faster done by hand than described, and a model reporting that a pane "looks
+right" is reporting nothing.
 
 Two hooks *are* worth it, because they're instant and serve codebase cleanliness
 directly:
@@ -166,18 +173,48 @@ The distinction: **automate cheap cleanliness, not expensive verification.**
 
 ---
 
-## 8. The golden corpus is your regression net
+## 8. Selecting the Delver test suites
 
-The corpus from P1 does double duty. It's how AI-introduced regressions get
-caught **without the model checking itself** — you run `npm run delver:corpus`
-when you feel like it, and a snapshot diff tells you what moved.
+`scripts\test.bat --grep Delver` **does not run the Delver tests.** Six suites
+are named for what they test rather than for the product, so the filter skips
+them silently — a skipped suite and a passing suite look identical in the output:
 
-That's the whole reason the "no self-verification" stance is safe here: the
-verification is cheap, batched, and yours.
+`GhidraDecompilerProtocol`, `GhidraHeadlessDecompiler`, `PyGhidraDecompiler`,
+`DecompilerWorkerHost`, `InterpretationLog`, `provider exit escalation`.
+
+The invocation that runs all of them:
+
+```
+scripts\test.bat --grep "Delver|Ghidra|InterpretationLog|DecompilerWorkerHost|provider exit escalation|PyGhidra"
+```
+
+What the short filter cost, concretely: a semantic-snapshot normalization bumped
+v1 to v2 and left `GhidraDecompilerProtocol › decodes a canonical accepted
+semantic snapshot` asserting the old shape. It stayed red for hours across
+several "green" verifications, because the suite it lives in was never selected.
+Every "N passing" figure recorded in `status.md` after that landed was counting a
+subset and reporting it as the whole.
+
+Two habits follow. **Name a suite after the product where you can** — a suite
+called `DelverGhidraDecompilerProtocol` cannot be missed this way. And when a
+count in `status.md` drops or fails to grow after new tests landed, suspect the
+filter before suspecting the tests.
 
 ---
 
-## 9. Sizing work
+## 9. The golden corpus is your regression net
+
+The corpus from P1 does double duty. It catches AI-introduced regressions that a
+targeted test run would not think to look for — you run `npm run delver:corpus`
+when you feel like it, and a snapshot diff tells you what moved.
+
+It is the backstop behind self-verification rather than a substitute for it: a
+model runs the tests it knows about, and the corpus is what notices the thing
+nobody wrote a test for. Cheap, batched, and yours.
+
+---
+
+## 10. Sizing work
 
 - **One change = one vertical slice that compiles.** Not "the listing editor" —
   "listing editor renders static rows from a fake data source." Big horizontal
@@ -193,7 +230,7 @@ verification is cheap, batched, and yours.
 
 ---
 
-## 10. Context hygiene
+## 11. Context hygiene
 
 - Don't load all of `Docs/` every session. `CLAUDE.md` invariants plus
   [`README.md`](../README.md)'s index is the default; specific docs on demand.
@@ -205,7 +242,7 @@ verification is cheap, batched, and yours.
 
 ---
 
-## 11. Setup checklist
+## 12. Setup checklist
 
 - [ ] Root `CLAUDE.md` with the invariants list
 - [ ] `Docs/STATUS.md`, `Docs/LEDGER.md`, `Docs/adr/` created

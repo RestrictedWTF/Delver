@@ -37,8 +37,16 @@ for reconsideration, and let the ADR carry the *change*, not the history.
 | --- | --- | --- | --- |
 | [0001](0001-wire-protocol-framing-and-encoding.md) | Wire protocol: framing, number encoding, and errors | accepted | 2026-08-06 |
 | [0002](0002-wire-types-separate-from-domain-types.md) | Wire types separate from domain types | accepted | 2026-08-06 |
-| [0003](0003-unsafe-code-in-transport-listener.md) | Unsafe code in the transport listener | accepted | 2026-08-07 |
+| [0003](0003-unsafe-code-in-transport-listener.md) | Unsafe code in the transport listener | superseded by 0010 | 2026-08-07 |
 | [0004](0004-interpretation-store-location.md) | Where authored interpretation is stored | superseded by 0005 | 2026-08-08 |
 | [0005](0005-portable-project-database.md) | Portable project database and session save lifecycle | accepted | 2026-08-11 |
 | [0006](0006-proposal-resolution-in-the-edit-log.md) | Accepting and rejecting proposals in an append-only log | accepted | 2026-08-19 |
 | [0007](0007-workspace-editor-over-sidebar-container.md) | Delver surfaces live in a workspace editor, not a sidebar container | accepted | 2026-08-26 |
+| [0008](0008-one-session-per-open-target.md) | One session per open target | accepted | 2026-08-26 |
+| [0009](0009-unified-address-ordered-listing.md) | One address-ordered listing over the whole image | accepted | 2026-08-26 |
+| [0010](0010-unsafe-code-in-os-security-modules.md) | Unsafe code in the OS security modules | accepted | 2026-08-27 |
+| [0011](0011-append-only-named-signatures.md) | Named signatures are append-only and authored | accepted | 2026-08-27 |
+| [0012](0012-retained-xref-table-in-portable-projects.md) | The xref table is retained in the project, as a table | accepted | 2026-08-28 |
+| [0013](0013-accepted-semantics-as-decompilation-input.md) | Accepted interpretation is an input to decompilation, not backend state | accepted | 2026-08-28 |
+| [0014](0014-type-anchors-for-authored-composites.md) | An anchor may name a type instead of a place | accepted | 2026-08-28 |
+| [0015](0015-authored-corrections-re-derive-facts.md) | An authored correction changes what analysis derives from, not what it derived | accepted | 2026-08-28 |

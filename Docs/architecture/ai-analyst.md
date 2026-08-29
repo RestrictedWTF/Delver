@@ -82,6 +82,31 @@ will stop checking.
 A claim with no evidence is not written to the workspace. It stays in the chat as
 conversation.
 
+### 2.1 Derived facts carry their method and their confidence
+
+Some facts are recovered rather than read. An indirect call site is the first
+case Delver resolves: `call [rip+X]` names no callee, but the memory operand
+reaches an IAT slot, and the import table names exactly one symbol for that
+slot. The chain — call site, data reference, IAT slot, import entry — is
+recomputable from retained facts, so the result is a fact, not interpretation,
+and it needs no author under invariant 5.
+
+What it does need is to say how it was obtained. A resolved import carries a
+`method` (`iatOperand` for a direct memory operand, `importThunk` for a
+one-instruction `jmp [IAT]` a direct call lands on) and a `confidence` (`exact`
+today; `probable` is reserved for future vtable- and dataflow-derived
+resolutions, which will not be exact and must not be able to disguise
+themselves as such). A caller that switches on those fields keeps working when
+a weaker method arrives.
+
+The rule this exists to serve: **completeness reflects what is still
+unresolved, not what was attempted.** `delver_call_graph` reports `complete`
+when every outgoing call is named, and `partial` when any indirect site remains
+unresolved — never merely because indirect sites exist. A flag that fires on
+every real binary is a flag a model learns to ignore, and the point of the
+envelope is that a truncated or incomplete answer cannot be read as a complete
+one.
+
 ## 3. The proposal layer
 
 The model does not mutate the interpretation layer. It appends edits with

@@ -1,4 +1,4 @@
-# Defect Audit — 2026-08-26, fix pass 2026-08-27
+# Defect Audit — 2026-08-26, fix passes 2026-08-27, 2026-08-28 and 2026-08-29
 
 A full read of the codebase for **defects in what exists**, not gaps in what is
 planned. Roadmap items live in [ledger.md](ledger.md); nothing here repeats them.
@@ -11,15 +11,18 @@ before being listed.
 **Delete a row when it is fixed.** A stale defect list is worse than none — the
 same rule the design docs live under.
 
-On 2026-08-27 every remaining row except #30 was fixed by eleven parallel agents,
-each verifying its rows against the code before changing anything. The rows below
-are what is *left*: one original item, plus thirteen defects the fix pass itself
-surfaced. **Nothing from that pass has been compiled or run** — see
-[Verification state](#verification-state).
+**Every row is now closed.** The 2026-08-27 pass fixed all but #30 and surfaced
+thirteen further defects; the 2026-08-28 pass verified each survivor against the
+code and closed the last two; the 2026-08-29 pass ran over the *uncommitted*
+session work and found ten more, all now fixed and verified against a green tree.
+What remains below is the part worth keeping: the themes, and what the passes got
+wrong about themselves.
 
 ---
 
 ## How to read the priority column
+
+The rows are gone, but the ranking they used is the durable part:
 
 | Tier | Meaning |
 | --- | --- |
@@ -30,11 +33,11 @@ surfaced. **Nothing from that pass has been compiled or run** — see
 The ordering principle: **a wrong answer outranks a crash.** A crash is visible
 and gets reported; a confident false claim about a binary is acted on. Items
 that let Delver assert something untrue about a sample sort to the top of their
-tier.
+tier. The ranking held up under both passes.
 
 ---
 
-## What the fix pass corrected about this audit
+## What the fix passes corrected about this audit
 
 Four rows named the wrong cause or the wrong size. Recorded because the same
 mistakes are easy to repeat:
@@ -53,53 +56,153 @@ mistakes are easy to repeat:
   swallowed-error sites and all six unsignalled caps — including TLS directory
   failures reported as "no TLS", where callbacks run before the entry point.
 
-Rows #56–#58 come from a different source: a real MCP trial against a live sample
-on 2026-08-27, not a code read. They are worth keeping distinguishable, because
-each survived four parallel audits and cost an actual caller time. The audits
-found what is *wrong*; the trial found what *misleads* — a denial that reads as
-authoritative, a target that changes without saying so, and a fixable
-misconfiguration wearing the word "internal".
-
 Two rows undersold the consequence. **#28**'s regex coercion accepted a 16-digit
 *number* as a registry id and a one-element *array* as a fingerprint, on data
 crossing a trust boundary. **#38**'s registry bound made a live rendezvous window
 undiscoverable behind 256 stale entries — self-inflicting, since every crashed
 window leaves one behind.
 
+Rows #56–#58 came from a different source: a real MCP trial against a live sample
+on 2026-08-27, not a code read. They were worth keeping distinguishable, because
+each survived four parallel audits and cost an actual caller time. The audits
+found what is *wrong*; the trial found what *misleads* — a denial that reads as
+authoritative, a target that changes without saying so, and a fixable
+misconfiguration wearing the word "internal".
+
+**And one thing the 2026-08-28 pass corrected about the 2026-08-27 pass: the
+list outlived the work.** Eleven of the thirteen rows the fix pass surfaced were
+already fixed in the tree when the next session opened the file, but no row had
+been deleted, so the audit claimed thirteen open defects and had two. A list that
+overstates what is broken costs the next reader the same re-verification the
+list existed to save. Deleting the row *is* part of the fix.
+
 ---
 
-## P0 — crashes, data loss, false claims
+## The last two, and why they were the last two
 
-| # | Defect | Where | Consequence |
-| --- | --- | --- | --- |
-| 56 | A string's reported address is the start of its *printable run*, not of the literal | `delver-analysis/src/strings.rs` `is_printable` | It accepts `0x20..0x7F` and tab, but not `
-` or ``, so a literal beginning with a newline is reported one byte late. `search_strings` gave `0x797671` for a Python template whose referenced literal starts at `0x797670`. `xrefs_to` matches an exact address, so the address the strings view hands you answers `total: 0` with `completeness: "complete"` — a confident denial that the string is referenced at all. The caller recovered the real site only by dumping bytes and finding the literal boundary by hand |
+Both were failures to tell the truth *after* something had already happened —
+the hardest class to notice by reading, because the code that lies is correct
+code sitting one statement too late.
 
-## P1 — wrong answers, wrong state
+**#44 — `RESULT_LIMIT_EXCEEDED` after a write handler committed**
+(`delverAgentService.ts` `invoke`). The dispatcher measured the serialized
+envelope and threw if it was over budget. For a read that is the useful answer.
+For a write the proposals or findings are already appended to an append-only
+log, so the caller is told a write it made did not happen — and an agent's
+correct response to a failed write is to make it again. `delver_report_finding`
+echoes 50 titles, descriptions and evidence texts back at the caller against a
+256 KB budget, so a 20-finding batch at the per-finding character bound clears
+the limit on its own. Handlers now supply a `reducedData` payload keeping only
+what the caller cannot reconstruct — the record identities — and an oversized
+*write* result is reduced, marked `partial`, and says so, rather than being
+reported as a failure. This follows the precedent already set immediately below
+it, where retention failure after a commit returns the result with a provenance
+note instead of throwing.
 
-| # | Defect | Where | Consequence |
-| --- | --- | --- | --- |
-| 43 | `analyze()` takes no coverage argument, so a partial read stops at the first hole | `delver-analysis/src/lib.rs`, `server-analysis/src/image.rs` | The residue of #5. Coverage is now *reported* (`coverage_complete`, `unreadable_ranges`), but sections past an unreadable hole are still never decoded — the alternative, zero-filling the gap to keep positions correct, would decode fabricated instructions, a worse P0. The real fix is teaching `analyze` about coverage |
-| 44 | `RESULT_LIMIT_EXCEEDED` throws after a write handler has already committed | `delverAgentService.ts` `invoke` | The same class as #23, which the fix pass closed for `recordToolCall` only. `delver_propose_comment` allows 100 proposals × 16 KB against a 256 KB budget, so a large accepted batch commits and *then* reports failure. The agent re-proposes, duplicating append-only authored edits. Needs a tool-facing decision: stop echoing proposal `value`, or define a reduced write-result shape |
-| 45 | `import_symbol_count` under-reports on a capped or failed thunk walk | `provider-file/src/lib.rs`, `delver-format/src/lib.rs` | Summed from returned lists. `ImportedModule` carries `symbols_failed`/`symbols_truncated` but no `symbol_total`, so no true total exists to source from — the last surviving instance of the count-from-page bug the #6 fix corrected for modules, exports and relocations |
-| 57 | An MCP session binds to a workspace root; every call answers for whichever target is active *now* | `delverAgentService.ts` — each handler resolves `sessionService.activeSession` | Switching workspace tabs mid-session silently redirects every later call to a different binary, and nothing on the wire says so; it was noticed only because a `contentHash` changed between two calls. Findings anchor to `contentHash` so nothing is corrupted, and cursors are already validated against `contentHash`+`revisionId` — a *fresh* call has no such check. A caller-supplied target or revision pin, rejected on mismatch, is what closes it |
-| 58 | Every non-tool request failure is flattened to `"Internal error"` | `delver-mcp/src/lib.rs`, the `Err(_)` arm reached with `tool_error: false` | The `tool_error` arms above it preserve `error.to_string()`; the catch-all discards it. `tools/list` is dispatched with `tool_error: false`, so a configuration problem the caller could fix — a root mismatch — arrives as an internal fault and sends them looking in the wrong place. Filed here rather than under P2's error paths because the blast radius is the caller's time, and it was the single most expensive item in the trial |
+**#58 — every non-tool request failure flattened to `"Internal error"`**
+(`delver-mcp/src/lib.rs`). The `tool_error` arms preserved `error.to_string()`;
+the catch-all discarded it. `tools/list` is dispatched with `tool_error: false`,
+so a root that matches no published window — the one failure the caller can
+actually fix — arrived as an internal fault. Every `BackendError` message is
+written to be safe to return, so the message now survives whichever arm the
+failure takes, and an `InvalidParams` kind maps to `INVALID_PARAMS` regardless
+of which method produced it.
 
-## P2 — bounded blast radius
+---
 
-| # | Defect | Where |
-| --- | --- | --- |
-| 30 | Invariant-9 violations: `delverSignaturesActions.ts` imports signature generation, `DelverListingInput` and `DELVER_NAVIGATION_ORIGIN` from **delverListing**; `delverListingNavigation.ts` imports `DelverPseudocodeInput` from **delverPseudocode**. 4 import statements, 2 files, 7 symbols — smaller than the "eight" originally recorded. The fix is moving signature generation and the editor inputs to `services/delver/browser/`, which is a placement decision, not a mechanical move |
-| 46 | A row splice is not height-neutral and the scroll offset is not compensated | `delverListingWidget.ts` `onDidChangeRows` — a page arriving above the viewport slides the listing under the analyst's cursor mid-read, and does not self-correct. `ListingLineMap` now has what a fix needs: line count before vs. after `refresh`, times `LISTING_LINE_HEIGHT` |
-| 47 | `delver-rpc` has `accept_shutdownable` but no `connect_shutdownable` | `listener.rs`, `listener_windows.rs` — `connect` returns two independent handles onto one connection, so dropping the write half never unblocks the reader. Forces `delver-mcp`'s reader join to be time-bounded rather than clean |
-| 48 | `agent-bridge-relay/src/lib.rs` uses `deny(unsafe_code)` where `forbid` would do | The ADR 0003/0010 carve-out spilled one crate too far; the relay lib contains no `unsafe` |
-| 49 | `listener_windows.rs` has zero SAFETY comments across ~25 `unsafe` blocks | The module [ADR 0003](../history/adr/0003-unsafe-code-in-transport-listener.md) was written about is the least-documented of the three. Named as debt by [ADR 0010](../history/adr/0010-unsafe-code-in-os-security-modules.md) |
-| 50 | `CallPathsResult.bounded` describes the source function's extent only | `message.rs` — frontier functions with inferred extents carry no flag. An extent that cannot be derived at all already clears `search_exhausted`, so this is narrower than #18, not the same gap |
-| 51 | `GetImageInfoResult` carries redundant pairs | `import_module_count`/`import_module_total`, `export_count`/`export_total`, `relocation_count`/`relocation_total` always hold the same value, because the result carries no lists. Both are set from one source so they cannot disagree; the honest resolution is to collapse each pair |
-| 52 | The string scanner caps entry *count* but not string *length* | `server-analysis/src/main.rs` — a 65 536-entry `analysis/strings` response can still exceed `MAX_JSON_FRAME_BYTES` on a sample with megabyte-long printable runs. Needs a byte budget, which is not a recorded decision |
-| 53 | `adoptSession` leaves `session.projectPath` undefined and keys `sessions` by the offline path | `delverSessionService.ts` — a plainly-opened target whose project is known still reports no project path, and after a successful attach `setActiveTarget(session.targetPath)` cannot find its own session. Fixing it breaks an existing identity-check test, so it is drift to decide on, not a mechanical fix |
-| 54 | `delver-format` has no export-directory regression test | A `.exe` has no export directory, so the `current_exe` fixture cannot reach that path, and `corpus`'s `PeBuilder` cannot be used (it depends on `delver-format`, so a dev-dependency would cycle). Needs export emission in `PeBuilder`, or a minimal builder in `delver-format`'s own tests |
-| 55 | Nothing connects an import-table parse failure to the unresolved call sites it explains | `call_graph.rs` — when `imports_failed` is set, indirect-call resolution silently loses its evidence and the call graph reports unresolved sites with no stated cause |
+## The 2026-08-29 pass — over uncommitted work
+
+Same shape as the others: four parallel read-only agents over the Rust
+workspace, the platform layer, the workbench services, and the contribs plus
+test quality, each verifying a finding against the code before reporting it.
+Same ranking. The difference is the scope — **this pass read work that had not
+been committed yet**, which is the cheapest place to run it: the reasoning that
+produced the code is still recoverable, and nothing has been built on top.
+
+Every row it found is fixed. They are not listed, per the rule above. What is
+worth keeping is that **none of the classes were new**.
+
+**A second bound never read.** `IStringsResult`, `IFunctionsResult`,
+`IGetImportsResult` and `IGetExportsResult` each carry two independent
+completeness signals — a scanner cap applied when the image was analysed, and a
+response bound applied on every call — and four agent handlers read one. Proven
+worst case: `delver_search_strings` returned zero matches marked **complete**
+having examined 2 of 70,000 strings, because the response bound fired while the
+scanner cap did not. The same defect had been fixed in `handleXrefs` earlier in
+the same session and left in its siblings. Alongside it, `OpenImageResult`
+omitted `strings_truncated` — a field already on the struct it was built from —
+so a capped image reported exactly `string_count: 200000` unqualified. This is
+[Truncation without a signal](#themes-worth-fixing-as-themes) again, with a
+sharper edge: it is no longer "no field says this was bounded" but **"a field
+says it and nobody reads it."** The review question grows a second half: *what
+field says this was bounded, and does every consumer read all of them?*
+
+**A cursor stable only until something re-derives.** `XrefIndexParams.start` was
+documented as safe because "the table is built once when the image is analysed
+and never mutated". `analysis/setCorrections` then made re-derivation a normal
+operation — `reanalyze` replaces the whole `AnalyzedImage` while the image handle
+survives — and the documented invariant was false without a line of the cursor
+code changing. A walk spanning a correction skips or duplicates rows and ends
+early, and a table retained from it answers a later "who references this" with
+the confident zero [ADR 0012](../history/adr/0012-retained-xref-table-in-portable-projects.md)
+exists to prevent. The fix is a `generation` counter on the loaded image, echoed
+in the result and optional in the params, with a mismatch refused naming both
+derivations. The durable form: **a cursor's stability is a claim about every
+other operation on the same handle, and a new mutating operation invalidates it
+silently.** Adding one is the moment to re-read every cursor's justification.
+
+**Two more of the standing themes, unchanged in shape.** `setCorrections`
+reported function and instruction counts with no `decoding` field, so on an
+unsupported architecture the reply read "your correction applied and the image
+has zero functions" — [Counting the page, not the
+image](#themes-worth-fixing-as-themes), one step out. And
+`analysis/scanStrings` shipped with no byte budget while its sibling
+`analysis/strings` has both a count bound and `STRING_LIST_JSON_BUDGET`, where an
+oversized frame kills the analysis server outright — one question, two
+implementations, and only one of them complete.
+
+**One class the earlier passes had not named: the fact re-derivation nothing
+watched.** `setCorrections` is the only operation whose entire purpose is
+re-deriving facts, and it was the only one no view listened for — `isSemanticOp`
+omitted `FunctionBounds` and no contrib subscribed. A new
+`IDelverSessionService.onDidRederiveFacts`, fired only after the server confirms
+the re-derivation, now drives the pseudocode pane and the Functions view. The
+general form is worth the row: **when an operation invalidates derived state, ask
+what refreshes, not just what is correct.**
+
+### Tests that could not fail
+
+Three findings were about the audit's own safety net, and they matter more than
+their tier suggests.
+
+- A `toolCount: DELVER_AGENT_CAPABILITIES.length` assertion **could never fail**,
+  because the tool list is built by mapping that same list. It had *replaced* a
+  literal that could — a tidy-looking edit that removed the only thing the
+  assertion was for. It now pins the set of no-argument tools *and* keeps a
+  literal count, and was verified to fail by forcing a capability onto the
+  fallback presentation path.
+- A refusal assertion accepted any rejection and compared facts by count only. It
+  now names the conflict and compares function identity.
+- The pseudocode reload classifier had no test at all, despite having been wrong
+  twice. `isSemanticOp` is exported and covered.
+
+The tell for the first is structural, not about tests specifically: **an
+assertion whose expected value is computed from the same source as the actual
+one is a tautology.** A literal in a test is not duplication; it is the test.
+
+### And what the pass found about the verification
+
+The largest finding was not a defect in the code. `scripts\test.bat --grep
+Delver`, used for verification throughout the session, **misses six suites**
+whose names do not begin with "Delver" — `GhidraDecompilerProtocol`,
+`GhidraHeadlessDecompiler`, `PyGhidraDecompiler`, `DecompilerWorkerHost`,
+`InterpretationLog` and `provider exit escalation`. Three cover files the session
+modified, and one test had been red for hours behind the filter. Every recorded
+"N passing" figure after the v1→v2 semantic-snapshot normalization was a subset
+reported as a whole. It is written up in
+[working-with-ai.md §8](../development/working-with-ai.md), because it belongs
+where the next session looks for how to run the tests, not in an audit it may
+never open.
 
 ---
 
@@ -107,23 +210,25 @@ window leaves one behind.
 
 **Truncation without a signal.** The original #5, #6, #18, #19 and the corpus
 snapshot were one bug repeated: a bound is applied and nothing on the wire says
-so. `StringScan.truncated` is the pattern that got it right. The fix pass adopted
-it across `ParseCompleteness`, the four bounded analysis results and the image
-read — but #45, #50, #51 and #52 show the theme is not fully discharged. The
-review question for any new bounded result stays: *what field says this was
-bounded?*
+so. `StringScan.truncated` is the pattern that got it right, and it is now
+carried across `ParseCompleteness`, the bounded analysis results, the image read,
+the string-list byte budget, and the reduced write result. The review question
+for any new bounded result stays: *what field says this was bounded?*
 
 **Counting the page, not the image.** A sharper instance of the same theme, and
 worth its own name because it reads as correct: `import_module_count`,
-`export_count` and `relocation_count` were all computed from post-cap lists, so a
-truncated parse reported a page size as an image total. Three were fixed; #45
-remains. Any `*_count` derived from a list that can be bounded is suspect.
+`export_count`, `relocation_count` and `import_symbol_count` were all computed
+from post-cap lists, so a truncated parse reported a page size as an image total.
+Any `*_count` derived from a list that can be bounded is suspect. The resolution
+that stuck was making the count `Option` and absent when the walk was cut, rather
+than reporting a number nobody can interpret.
 
 **One question, two implementations.** #13, #16 and the
 `is_local_endpoint`/`is_registry_id` pairs were all cases where a rule is
-implemented correctly in one place and re-derived incorrectly in another. Both
-fixes deleted the second implementation rather than repairing it, which is the
-standing preference. #30 is the remaining instance, at module scale.
+implemented correctly in one place and re-derived incorrectly in another. Every
+fix deleted the second implementation rather than repairing it, which is the
+standing preference. #30 was the same failure at module scale, and its fix moved
+the shared code to `services/delver/browser/` rather than duplicating it.
 
 **Errors that cannot survive a process boundary.** `instanceof CancellationError`
 was wrong in four places across three files, for one reason: the shared-process
@@ -131,12 +236,22 @@ channel rebuilds rejections from `{message, name, stack}`, so the prototype is
 gone. Identity checks on errors crossing IPC are always wrong here — match by
 name. The two worst instances reported a user's own cancellation as
 `DECOMPILER_UNAVAILABLE` and as `INTERNAL_ERROR`, a code an agent is entitled to
-retry.
+retry. #58 is the same family seen from the other side: a message discarded at a
+boundary rather than a type.
+
+**Failing a caller for something that already succeeded.** #23, #44 and the
+retention path are one rule, learned three times: once a handler has committed to
+an append-only log, nothing downstream of it may report failure. Cancellation,
+byte budgets and bookkeeping all have to become *reductions with a stated reason*
+past that line. The tell is any `throw` that sits below a commit.
 
 **Docs asserting safety the code does not provide.** The original #42 and
 [ADR 0003](../history/adr/0003-unsafe-code-in-transport-listener.md)'s "only
 module permitted to use `unsafe`" are the same failure — worse than missing docs,
-because they stop the next reader from checking. #49 is what remains of it.
+because they stop the next reader from checking.
+[ADR 0010](../history/adr/0010-unsafe-code-in-os-security-modules.md) supersedes
+it, and `listener_windows.rs` now carries a SAFETY comment on every one of its 23
+`unsafe` blocks.
 
 ---
 
@@ -151,31 +266,44 @@ other class in those files remains unknown rather than clean.
 
 ## Verification state
 
-**Nothing from the 2026-08-27 fix pass has been compiled, typechecked, or run.**
-Per `CLAUDE.md` rule 15 the agents wrote regression tests but executed nothing.
-The state recorded below is from before the pass and is now stale.
+**The 2026-08-29 pass is verified against a green tree**: Rust 234 passing,
+Delver TypeScript 397 passing under the full suite selection, Python worker 10,
+corpus 6/6, client typecheck, fresh transpilation and `valid-layers-check` clean.
+Counts and the exact invocation are in [status.md](status.md).
 
-Required before the pass can be verified, in order:
+**The first two fix passes were verified on 2026-08-28.** All four steps ran green:
 
-1. **`npm run delver:protocol`** — the wire changed and the generated files are
-   behind. `MomentWire.epoch` and `TlsWire.raw_data_size` are now hex strings
-   (ADR 0001); `OpenImageResult` gained `decoding`, `fully_parsed`,
-   `coverage_complete`, `bytes_read` and `unreadable_ranges`; six other result
-   types gained completeness or bound fields. Until this runs,
-   `protocol.generated.ts` still declares `epoch: number` and the TypeScript side
-   disagrees with the Rust side.
-2. **Rebuild and re-stage `provider-file.exe` and `server-analysis.exe`.** The new
-   wire fields are required, not `serde(default)` — deliberately, so a stale
-   binary fails loudly rather than answering half a shape. Expect every analysis
-   integration test to fail until this happens.
-3. `cargo test` across the workspace, then `typecheck-client`, then the Delver
-   TypeScript suites.
+1. **`npm run delver:protocol`** — `protocol.generated.ts` declares `epoch:
+   string` and carries `import_resolution_incomplete`, `coverage_complete`,
+   `unreadable_ranges` and the other new completeness fields, so the TypeScript
+   and Rust sides agree again.
+2. **`cargo build --workspace`, then `npm run delver:build`.** Both the debug
+   binaries the tests resolve and the staged release copies were rebuilt.
+3. **`cargo test --workspace`** — 195 passing. **`npm run typecheck-client`** —
+   clean. **Delver TypeScript suites** — 318 passing. (That figure was taken with
+   `--grep Delver` and so counted a subset; see the 2026-08-29 pass above.)
+4. **`npm run delver:corpus`** — 6 samples match.
 
-Known-stale from the prior pass: `provider-file.exe` and `server-analysis.exe`
-were locked by a running Delver instance, so six `DelverAnalysisSession`
-integration tests failed with `UnsupportedCapability: method analysis/callGraph
-is not supported` — stale binaries, not logic. The generated PE import fixture in
-`minimalPe.ts` is unverified until those binaries are rebuilt.
+Two things only the first green run could have surfaced, both now fixed:
+
+- **Four `DelverAnalysisSession` expectations were stale, in the direction the
+  plan did not predict.** The worry was that a *stale binary* would fail against
+  required new fields. What actually happened is the reverse: a fresh binary
+  emitted `bounded`, `block_total`, `edge_total`, `import_resolution_incomplete`,
+  `name_unreadable`, `symbol_total`, `symbols_failed` and `symbols_truncated`,
+  and four `deepStrictEqual` expectations written before those fields existed
+  rejected them. The expectations now assert every completeness field, because a
+  test that elided them would pass just as happily against a parser that had
+  given up.
+- **`resequence` materialized `compensates: undefined` and `resolves: undefined`
+  on imported edits that carried neither.** An own property holding `undefined`
+  is not an absent one — to `deepStrictEqual`, to `in`, or to anything
+  enumerating keys — so an imported edit stopped comparing equal to the
+  identical edit that never went through an import. The function's own comment
+  already said absent is how "no references" is spelled; the code did not do it.
+  Note the fix could not simply drop the assignment: spreading and then
+  conditionally re-adding would have kept the *original* references on an edit
+  whose set was fully unmappable, which is the case `remap` exists to collapse.
 
 One behaviour change to expect on the first green run: fixing #16 unified the two
 "where does the last function end" implementations, which changes the digest of
@@ -183,3 +311,13 @@ the **last function in every image**. Normalization is bumped
 `delver-server-listing-v2` → `v3`, so stored v2 fingerprints match nothing. That
 is the fail-safe direction, and matches the precedent recorded for the `Indirect`
 split.
+
+New regression tests from the 2026-08-28 pass, both unrun:
+
+- `delverAgentService.test.ts` — "an oversized write result is reduced rather
+  than reported as a failure": 20 findings at the description bound, asserting
+  `partial`, the surviving ids, the cleared provenance addresses, and that the
+  reduced envelope fits.
+- `delver-mcp/src/lib.rs` — `non_tool_failures_keep_their_message_instead_of_
+  reading_as_an_internal_fault`: a backend whose `list_tools` fails, asserting
+  the message reaches the client instead of `"Internal error"`.

@@ -21,7 +21,10 @@ these wrong by default — that's why they're here.
    ([ADR 0001](Docs/history/adr/0001-wire-protocol-framing-and-encoding.md)).
 3. Facts (bytes, instructions, xrefs — recomputable) and interpretation (names,
    comments, types — authored) are separate stores. Never mix them.
-4. Annotations anchor to `(contentHash, rva)`. Never to absolute addresses.
+4. Annotations anchor to `(contentHash, rva)` — or, for something with no
+   location, `(contentHash, name)`
+   ([ADR 0014](Docs/history/adr/0014-type-anchors-for-authored-composites.md)).
+   Never to absolute addresses. Narrow before reading `.rva`.
 5. Interpretation is append-only and always has an author. No silent mutation.
 
 **Targets** ([`Docs/architecture/target-providers.md`](Docs/architecture/target-providers.md))
@@ -50,8 +53,11 @@ these wrong by default — that's why they're here.
 
 14. **If a decision isn't recorded in `Docs/`, raise it — don't invent it.**
     Silent architectural drift is the main risk on this project.
-15. Don't run builds, typechecks, or test suites to verify your own work unless
-    asked. The human does that.
+15. Verify your own work by running builds, typechecks, and test suites — but
+    **not** anything needing a workbench, a rendered DOM, or a visual check.
+    Launching Code OSS, driving the UI, and judging how something looks are the
+    human's, who is faster at them. Report what you ran and what it said; a
+    claim of "done" with no output behind it is worth less than no claim.
 16. At the end of a working session, update [`Docs/planning/status.md`](Docs/planning/status.md).
     Add or update a [`Docs/planning/ledger.md`](Docs/planning/ledger.md) row when a feature's
     status changes.

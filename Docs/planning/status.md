@@ -4,14 +4,581 @@
 enough that reading it is faster than re-deriving it.
 
 For what exists and what was skipped, see [ledger.md](ledger.md). For why
-something is the way it is, see [adr/](../history/adr/).
+something is the way it is, see [adr/](../history/adr/). For what is *wrong*
+with what exists, see [defect-audit.md](defect-audit.md) — a full read of the
+codebase on 2026-08-26, ranked, with the fixed rows deleted as they land.
 
 ---
 
-**Last updated:** 2026-08-25
+**Last updated:** 2026-08-29
 **Current phase:** P3c/P3d — reviewed evidence plus static-analysis depth (P3b client conformance and P3a/P2b real-project smoke continue alongside)
 
 ## Just landed
+
+**A four-way audit over the session's uncommitted work, and the finding that the
+verification itself was partial.** Four read-only agents covered the Rust
+workspace, the platform layer, the workbench services, and the contribs plus
+test quality, each verifying findings against the code before reporting. Every
+row is fixed; the pass is written up in [defect-audit.md](defect-audit.md).
+
+**The finding that matters most is about the method.** `scripts\test.bat --grep
+Delver` — used for verification throughout the session — **misses six suites**,
+because their names do not start with "Delver": `GhidraDecompilerProtocol`,
+`GhidraHeadlessDecompiler`, `PyGhidraDecompiler`, `DecompilerWorkerHost`,
+`InterpretationLog` and `provider exit escalation`. Three cover files this
+session modified, and `GhidraDecompilerProtocol › decodes a canonical accepted
+semantic snapshot` had been **red for hours** unseen: the v1→v2 semantic-snapshot
+normalization made its assertion stale. Every "N passing" figure recorded here
+after that landed was measuring a subset. The correct invocation, which reports
+397 passing, is now in
+[working-with-ai.md §8](../development/working-with-ai.md) rather than only here,
+because a future session will reach for `--grep Delver` for the same reason.
+
+What the audit found, in the order it ranks:
+
+- **`openImage` reported the string-scan cap as the sample's string count.**
+  `AnalyzedImage.strings_truncated` existed on the same struct and was not on
+  `OpenImageResult`, so a capped image reported exactly `string_count: 200000`
+  unqualified — `mshtml.dll` wrong by 81,537. The struct already carries
+  `decoding` and `coverage_complete` to qualify the *code* counts.
+  `strings_truncated` is now on the wire and set.
+- **Three agent handlers read one bound and ignored a second.** `IStringsResult`,
+  `IFunctionsResult`, `IGetImportsResult` and `IGetExportsResult` each carry two
+  independent signals. Worst case, proven: `delver_search_strings` returned zero
+  matches marked **complete** having examined 2 of 70,000 strings, because the
+  response bound (`list_truncated`, 65,536) fired while the scanner cap (200,000)
+  did not. This is the defect fixed in `handleXrefs` earlier in the session and
+  left in its siblings. Fixed in `handleStrings`, `handleListFunctions`,
+  `handleImports` and `handleExports`; `delver_lookup_function` now qualifies a
+  miss against a bounded list instead of asserting absence.
+- **`analysis/setCorrections` invalidated `xrefIndex` cursors the protocol
+  documented as stable.** `XrefIndexParams.start` was documented as "the table is
+  built once when the image is analysed and never mutated", but `reanalyze`
+  replaces the whole `AnalyzedImage` while the handle survives. A walk spanning a
+  correction would skip or duplicate rows and end early, and a table retained
+  from it answers a later "who references this" with the confident zero
+  [ADR 0012](../history/adr/0012-retained-xref-table-in-portable-projects.md) exists to prevent.
+  `LoadedImage.generation` now increments on every re-derivation,
+  `XrefIndexParams.generation` is optional, and a mismatch is refused naming both
+  derivations.
+- **`setCorrections` reported unqualified zero counts** — no `decoding` field, so
+  on an architecture the decoder does not support the reply read "your correction
+  applied and the image has zero functions and zero instructions". Fixed by
+  adding `decoding`.
+- **Nothing in the workbench refreshed after an accepted correction.** The one op
+  whose whole purpose is re-deriving facts was the one op no view watched:
+  `isSemanticOp` omitted `FunctionBounds` and no contrib listened for it. A new
+  `IDelverSessionService.onDidRederiveFacts`, fired only after the server
+  confirms the re-derivation, is consumed by the pseudocode pane and the
+  Functions view.
+- **Four P2s.** `analysis/scanStrings` had no byte budget while its sibling
+  `analysis/strings` has both a count and `STRING_LIST_JSON_BUDGET` — an
+  oversized frame kills the analysis server outright. `refresh` was folded into
+  the decompile cursor's filter fingerprint, so continuing a walk required
+  repeating `refresh: true`, which re-ran Ghidra once per page. `semanticsIgnored`
+  was stored in the cache entry rather than applied on the way out, so an entry
+  kept warning about accepted types after they were retired. `correctedSessions`
+  was never cleared on release. Three misattached or dangling doc comments went
+  with them.
+
+Three test-quality defects, which are the same class one level up:
+
+- A `toolCount: DELVER_AGENT_CAPABILITIES.length` assertion **could never fail**,
+  because the tool list is built by mapping that same list; it had replaced a
+  literal that could. It now pins the set of no-argument tools *and* keeps a
+  literal count, verified to fail by forcing a capability onto the fallback
+  presentation path.
+- A refusal assertion accepted any rejection and compared facts by count only. It
+  now names the conflict and compares function identity.
+- The pseudocode reload classifier had no test at all despite being wrong twice.
+  `isSemanticOp` is exported and covered.
+
+### Previously — a capped string scan no longer hides the tail of a large image
+
+**A capped string scan no longer hides the tail of a large image.** The cap was
+written off as unreachable outside a hostile file. It is not. Scanning the 35
+largest binaries in a stock `C:\Windows\System32`, **9 hit the 200,000-string
+cap** — `mshtml.dll` at 24 MB among them, and a 228 MB `MRT.exe`. `mshtml.dll`
+now yields **281,537** strings, 81.5k of which no call could previously reach;
+`MRT.exe` yields **5,736,204**, 5.5M of them previously unreachable, over 28
+continuations. The measurement is the justification: it is what turned a
+theoretical bound into work worth doing.
+
+`find_strings_from` in `delver-analysis/src/strings.rs` is a resumable, bounded
+scan, and `find_strings` is now `find_strings_from(..., 0, MAX_STRINGS)`, so
+there is one implementation rather than two that could disagree at the cap.
+`StringScan` gained `next_rva`. `analysis/scanStrings` serves a bounded window
+over the image, capped at `MAX_SCANNED_STRINGS` — a cap on one *response* rather
+than on the binary. `delver_list_strings` and `delver_search_strings` walk in two
+phases: an index into the list retained when the image was analysed, then a
+position in the image once past it. The cursor carries which phase it is in, in a
+new optional field, because an offset into a list and an address in an image are
+not the same number.
+
+**Offline projects cannot scan and say so.** The retained list is all a project
+without its sample has, so the old answer — some strings were never extracted and
+no cursor will reach them — is still correct there and is still what it returns.
+
+Four findings from building it that a reader cannot re-derive:
+
+- **ASCII and UTF-16 need separate budgets.** A shared one spent by the ASCII
+  pass would leave UTF-16 strings sitting at addresses *below* the cut, which no
+  forward cursor could ever recover. Each encoding gets the whole allowance.
+- **`next_rva = last.rva + 1` resumes inside the last string** and re-emits its
+  tail as a string of its own — `"lpha"@0x1001` after `"alpha"@0x1000` — a string
+  that is not in the image at all. Each run start now takes an O(1) look-back at
+  the byte (or character pair) before it and declines a run that reaches back
+  across the cursor.
+- **The cut must not split an address.** Two strings can share an RVA — an ASCII
+  run and a UTF-16 run at one place — and cutting between them orphans the second
+  permanently, because the cursor resumes one past that address. The cut is
+  walked back to an address boundary, or forward when walking back would keep
+  nothing, which is also what guarantees every page makes progress.
+- **A known limit, deliberately not fixed.** Address-ordered progress holds
+  because sorted sections and merged coverage give disjoint ascending chunks. If
+  two sections genuinely *overlap* in virtual address — which a hostile file can
+  arrange — a later chunk can contain addresses below `next_rva`, and a page walk
+  would skip them. The whole-image scan is unaffected. It is a real hole in a
+  hostile case; it is recorded in the ledger rather than softened.
+
+`truncated` and `next_rva` are now exactly redundant — `truncated ==
+next_rva.is_some()`. `truncated` was kept because the wire protocol and
+`AnalyzedImage` consume it.
+
+**The lesson worth carrying forward:** a bound is worth measuring precisely
+because the measurement can reverse the decision. This one was assumed
+unreachable and left alone for that reason; checking instead of guessing found a
+quarter of the largest ordinary system binaries sitting against it, which is the
+whole case for the work. The same move — check the assumption against real
+binaries — is what killed the entry-point heuristics two sessions ago.
+
+### Previously — function detection can be corrected
+
+**Function detection can now be corrected, and no hand-edit reaches the fact
+store.** Every authored edit Delver had was a *decoration* on a derived fact — a
+name, a comment, a type. A correction is the first authored thing that
+contradicts one. Linear sweep invents a function in data it mistook for code; a
+function nothing references and nothing lands on is missed entirely; an analyst
+could see both and had no way to say so.
+
+`EditOp.FunctionBounds` records the decision in the append-only log,
+image-anchored, as canonical JSON. It cost no new lifecycle: propose, accept,
+compensation, revert-by-author, `.delverlog` export and import all key on
+`(anchor, op)`, so they reached corrections the day the op existed. The one thing
+that needed teaching was the JSONL validator, which admits ops by explicit list
+and fails closed on the whole log for one it does not know — without that row the
+op was inert.
+
+The facts are **re-derived, not patched**. `analyze_corrected` takes the
+corrected seed set and recomputes instructions, function starts, blocks and the
+xref table from the image bytes; it and `analyze` are one implementation, so a
+corrected image is exactly as reproducible as an uncorrected one.
+`FunctionSource::Authored` outranks every derived source, the exception directory
+included. A set applies whole or not at all, and `reanalyze` replaces nothing
+until the new analysis succeeds, so a refused set leaves the image as it was
+rather than emptied. `analysis/setCorrections` re-derives an open image without a
+provider round trip and reports the function count before and after — S5's
+disclosure requirement in the only terms the server can state it. `derive` in
+`server-analysis/src/image.rs` is the single place the analysis and the listing
+index are produced together, so a re-analysis cannot serve rows for instructions
+that no longer exist. The session service pushes the accepted set during open,
+before any caller sees the session, and tracks which sessions have one in effect
+so a *withdrawal* is pushed too.
+
+`delver_propose_function` is the agent route: review-only `define`/`undefine`,
+validation-atomic, bringing the dispatcher to thirty-five capabilities. A
+`define` must land in mapped executable memory. An `undefine` is checked against
+nothing on purpose — the address may not be a detected entry by the time a human
+reviews it, and refusing it there would stop an analyst pre-empting a seed the
+next analysis is about to invent. `undefine` is also narrower than the word
+suggests: it withdraws a function start, not the claim that the bytes are code,
+so the instructions stay in the index and inbound call xrefs stay in the table.
+[ADR 0015](../history/adr/0015-authored-corrections-re-derive-facts.md) records
+the decision and the four alternatives that lost.
+
+**The lesson worth carrying forward:** the obvious repair was actively worse than
+the bug. Removing a seed does not implement `Undefine` — recursive descent
+rediscovers the address the moment anything calls it, and linear sweep re-guesses
+it — and making the sweep *skip* an undefined start manufactures a guess: a skip
+advances a single byte, so undefining `0x1004` leaves those bytes unvisited and a
+fresh `LinearSweep` guess appears at `0x1005`. Withdrawing one function start
+would have created a neighbouring one. The refusal has to sit where addresses
+*become* functions — `Descent::add_function`, the choke point every discovery
+path funnels through — not where they are listed.
+
+### Previously — a long function can be read to the end
+
+**A long function can now be read to the end.** `delver_decompile` used to slice
+its text at a byte offset and stop; everything past roughly 157 KB was
+unreachable by any call an agent could make, and `lineMappings` still described
+every line of the function — inviting a citation of line 4,000 from a caller that
+had been shown 900. It now pages on line boundaries with `nextCursor`,
+`firstLine`, and `totalLines`, mappings scoped to the lines in front of the
+caller, and `variables` on the first page only, since it describes the whole
+function rather than any page of it.
+
+The cursor is bound to the exact text it was issued against, not just to the
+project revision. Re-decompiling — or accepting a type — produces different lines
+under the same numbers, and continuing into that would splice two different
+bodies together and present the result as one function. A stale cursor is refused
+with `STALE_REVISION` instead. Two guarantees hold the walk together: a page
+always emits at least one line even when that single line is over budget, so a
+walk can never stall reissuing the same cursor; and a cursor past the end is an
+explicit error rather than an empty page that looks like completion.
+
+### Previously — the entry point now says it is not your code
+
+The PE `Subsystem` was not parsed anywhere — it is now, exactly,
+and it reaches the wire as a tagged union whose unrecognized case keeps the
+number it held rather than collapsing into a named variant. That plus labelling
+the image entry as the C runtime stub is real: an analyst is told whether to
+expect a `main` or a `WinMain`, and told that the address the header names is
+scaffolding.
+
+**The detection half was measured rather than assumed, and it fails.** A
+call-graph walk for the MSVC startup shape is written and tested in
+`delver-analysis/src/entry_role.rs`; run against 80 real System32 binaries it
+resolved **none** of them, declining to the CRT entry every time. Two heuristics
+were falsified against actual samples: the startup path is a fan-out, not a
+chain of single-call forwarders, so a walk following one call stops at once; and
+"the call between `_initterm` and `exit`" is meaningless because address order is
+not execution order — on `where.exe` the `exit` call sits below the `_initterm`
+call. Newer binaries link the CRT statically and expose no marker imports at all.
+The walk is kept, unwired and recorded as incomplete on the P5 roadmap, because it
+is correct on the shapes it does recognize and produced no false positive in
+those 80 samples.
+
+**The lesson worth carrying forward:** a heuristic is a claim about real binaries
+and can only be checked against real binaries. Both rules were plausible, both
+survived review, and both died in one afternoon against `System32`. The cost of
+measuring was an hour; the cost of not measuring would have been a feature that
+confidently mislabels the wrong function as `main`.
+
+### Previously — accepting one type no longer empties the pane
+
+It did, and silently. Headless has no route for declarations, so it refused any request
+carrying them; meanwhile the saved pseudocode for every function had been
+produced against the empty snapshot and no longer matched the accepted one, so
+it was skipped. Saved text rejected, live text refused, nothing left — for the
+whole image, discovered one function at a time.
+
+The fix is an attribution, not a special case. A backend that cannot apply
+declarations is answering against *no* accepted semantics, so that is the
+snapshot its request carries, the snapshot its result is cached under, and the
+snapshot the saved result records. Pseudocode saved before any type was accepted
+then matches again and is served without starting a backend at all; the cache
+stops missing on every call; and configuring a backend that *can* apply
+declarations moves the effective snapshot back, which re-decompiles exactly as it
+should. The result carries `semanticsIgnored`, so the pane appends "accepted
+types not applied" to its provenance and an agent gets `partial` with the reason
+spelled out — pseudocode that quietly ignored the analyst's types would be a
+confident answer to a question nobody asked.
+
+**The lesson worth carrying forward:** refusing is not automatically the honest
+option. [ADR 0013](../history/adr/0013-accepted-semantics-as-decompilation-input.md)
+argued that returning type-free text would be dishonest and concluded the backend
+should refuse — and the refusal turned one accepted type into total data loss,
+which is a worse failure and a quieter one. The honest move was never "answer or
+refuse"; it was to attribute the answer to the inputs it was actually produced
+with, and say so. The ADR now records both the correction and why the first
+reading was wrong.
+
+### Previously — an agent can introduce a structure
+
+**An agent can now introduce a structure, not just name one the program already
+carried.** This was the gap blocking S4's exit criterion. The worker's only route
+to a data type was `DataTypeParser.parse` over a declaration string, which
+resolves type *references* and cannot define one, so an agent could use
+`struct _IMAGE_DOS_HEADER` because Ghidra shipped it and could never propose a
+layout it worked out from the code. The analyst was capped the same way: a struct
+recovered by hand had nowhere to live but a comment.
+
+`Anchor` is now `IImageAnchor | ITypeAnchor`, where a type anchor is
+`{ kind: 'type', contentHash, name }`, and `EditOp.CompositeType` records one
+named layout as canonical JSON — kind, size, and fields at explicit offsets, not
+a C declaration string. A composite is the first authored thing with no location.
+**Invariant 4 is intact**: a type anchor is still scoped to `contentHash` and
+still carries nothing relocation can move; what widened is only the claim that an
+anchor names a *place*. `anchorKey` puts the kind in the key —
+`<hash>:type:<name>` beside `<hash>:rva:<hex>` — so a name can never share a slot
+with an address that renders the same way, and `isImageAnchor` / `isTypeAnchor`
+exist so every new consumer has to choose deliberately, with the compiler asking.
+[ADR 0014](../history/adr/0014-type-anchors-for-authored-composites.md) records
+the decision and the three alternatives that lost.
+
+The composite reuses the entire edit log unchanged. Propose and accept through
+Review, undo by compensation, per-author revert, `.delverlog` export and import
+all reached composites the day the op existed, because that machinery keys on
+`(anchor, op)` and never on an address. `.delverdb` needed no migration either:
+`interpretations` stores each edit as an opaque payload, and the schema stayed at
+v8.
+
+The semantic snapshot is now `schemaVersion: 2`
+([ADR 0013](../history/adr/0013-accepted-semantics-as-decompilation-input.md),
+amended). Its `composites` array is applied **before** `dataTypes` and
+`functionPrototypes`, so a declaration can name a struct the same snapshot
+introduced. Both decoders — TypeScript `readSemanticDependencies` and the
+worker's `required_semantics` — accept v1 and v2 and normalize a v1 payload up to
+v2, because a v1 snapshot *is* a v2 one with no composites; that normalization is
+what stops pseudocode saved before composites existed from comparing as stale. A
+v1 payload that carries composites is refused all the same, since that sender is
+confused about its own shape.
+
+PyGhidra defines the structures in two passes — register every name as an empty
+`StructureDataType` with packing disabled, then populate fields at the offsets
+they were authored with — so a field typed `struct Other *` resolves whichever
+direction the reference runs, and mutually referencing structs both land. Packing
+stays off because padding in a real binary is something the analyst measured, not
+a flaw to tidy up. All of it still happens inside the transaction that is
+unconditionally rolled back, so the persistent content-hash project is untouched.
+
+`delver_propose_type` accepts `target: "composite"` with `name`, `size`, and
+`fields` in place of `address` and `declaration`. The tool schema is a `oneOf`
+rather than one object with optional fields, so a composite cannot be sent with an
+address that would be silently ignored.
+
+**Two defects were fixed on the way through.** `IDelverFindingEvidence` declared
+`anchor: Anchor` while its own wire type had always required `kind: 'image'` — the
+domain type was the loose one, and the two disagreed for as long as both existed.
+Findings are now permanently `IImageAnchor`, by decision rather than by accident:
+a finding is a claim about bytes, and there is nothing to cite in a range with no
+address. And `validateEdit` in the JSONL store
+(`platform/delver/node/delverInterpretationStoreService.ts`) still required
+`kind === 'image'` and listed only the five original ops, so a composite could not
+survive `.delverlog` append, export, or import at all. It now validates each
+anchor kind on its own terms and checks the *pairing* too: a `compositeType` at an
+address and a rename on a type are both refused, because the snapshot builder
+looks only at type anchors, so a looser validator would accept an edit nothing
+would ever read.
+
+**The lesson worth carrying forward:** a union of one is not a union. A
+discriminated union with a single member cannot be narrowed wrongly, so every
+claim resting on it is unverified until the second case arrives — which is why a
+domain type saying `Anchor` while its wire form said `image` sat there disagreeing
+with itself, uncaught, for as long as both existed. Widening the union is what ran
+the check for the first time.
+
+### Previously — accepting a type changes the C on screen
+
+**Accepting a type now changes the C on screen.** The pseudocode pane
+re-decompiles when an accepted `DataType` or `FunctionPrototype` edit lands for
+the bytes it is showing. Its interpretation handler previously did one thing —
+re-render comment decorations — which is right for names, comments and tags,
+because those decorate C that is still correct, and wrong for types, which change
+the C itself. Until now the pane kept showing output produced against the
+superseded type model, and nothing in it said so.
+
+The reload is an ordinary request rather than a `refresh`. The cache is keyed on
+the semantic snapshot, so the new snapshot misses on its own, the old entry stays
+valid for whoever still wants it, and saved pseudocode that legitimately matches
+the new snapshot is still reused. A `proposed` edit deliberately does not trigger
+it: only accepted edits are in the snapshot, so re-decompiling on a proposal would
+spend a backend round trip to arrive at the same text. Failure is swallowed by
+design — the analyst accepted a type, they did not ask for a decompilation, so a
+backend that is down leaves the previous text alone instead of replacing it with
+an error.
+
+Three smaller things were fixed on the way through. The snapshot is folded to a
+digest in the cache key rather than spelled out — inlining it put a copy of every
+accepted declaration into all 128 keys and re-serialized the whole set on the hot
+path of every pseudocode load. An empty snapshot is no longer written into saved
+results, because the decoder already reads an absent one as empty and a project
+with no authored types is the common case. And a snapshot past the worker's bound
+of 10,000 declarations per kind is now refused *before* the request is built,
+rather than by the worker after 20 MB has crossed the pipe: refused rather than
+truncated, since a decompilation against some of the analyst's accepted types
+would present as though all of them applied.
+
+Both load-bearing decisions behind this — that accepted interpretation is an
+input to one decompilation rather than a mutation of the backend's own state, and
+that the snapshot is part of decompilation identity — are recorded in
+[ADR 0013](../history/adr/0013-accepted-semantics-as-decompilation-input.md).
+
+**The lesson worth carrying forward:** an authored edit is either an *input* to
+the decompiler or an *overlay* on its output, and one subscription cannot serve
+both. Everything the interpretation layer carried until this slice was an overlay,
+so the single handler was correct right up to the moment it wasn't — and it failed
+in this project's most dangerous direction, showing plausible C for a type model
+the analyst had already replaced.
+
+### Previously — accepted types reach PyGhidra
+
+**Accepted S4 types now reach PyGhidra without letting stale pseudocode survive.**
+Every decompilation carries the complete accepted data-type/function-prototype
+snapshot that produced it. The snapshot is embedded in portable saved results
+and in the bounded memory-cache key, so acceptance, clearing, undo, and replay
+cannot reuse output produced against different semantics.
+
+PyGhidra validates and applies that snapshot inside a rollback transaction:
+global data declarations are restricted to mapped non-executable memory, and
+function prototypes are applied only to exact entries before decompilation.
+Rolling the transaction back keeps the persistent content-hash project clean,
+so revising or clearing an authored declaration is deterministic. The legacy
+headless backend declares that it cannot apply accepted semantics, and is
+answered against the empty snapshot with the result marked `semanticsIgnored`
+rather than refused.
+
+Invalidation is correct but intentionally conservative: the first durable
+schema records the whole content-wide semantic snapshot, so any accepted type
+change invalidates every saved function for those bytes. The next refinement is
+to retain the exact globals and callees each function consumed and narrow the
+stamp without changing its versioned envelope.
+
+### Previously — semantic proposals
+
+`delver_propose_type` adds validation-atomic, review-only data types and exact-
+entry function prototypes to the append-only interpretation log. Accepted
+values materialize independently and survive replay and reopen.
+
+### Previously — observed globals
+
+`delver_list_globals` inventories non-executable addresses actually named by
+retained data references, while `delver_global_accesses` returns the referencing
+instructions and containing functions. They remain intentionally partial
+observations, not recovered declarations: no size, type, read/write mode,
+register-derived pointer, or runtime-only access is inferred.
+
+### Previously — retained cross-references
+
+**A portable project now retains its cross-reference table, so an offline
+`.delverdb` can answer who references an address.** This was the top item on the
+plan's result-loss list, and the reason it was worth paying before anything in
+S4: every revision saved without a retained table stays permanently unanswerable
+for the one question most analysis turns on.
+
+The shape is recorded in
+[ADR 0012](../history/adr/0012-retained-xref-table-in-portable-projects.md). The
+decision that mattered was **table, not blob**. The five existing analysis
+payloads are opaque JSON in `analysis_snapshots`, and a sixth would have been the
+cheapest thing to write — but a real module has millions of references, so that
+blob is tens of megabytes read into memory on every open, and any bound applied
+to keep it tractable becomes a silent false negative. So: a real indexed
+`xrefs` table, queried by address, never read whole. Schema **7 → 8**, forward
+only, no downgrade path.
+
+- **The wire.** A new paged `analysis/xrefIndex` exports the whole table from
+  the analysis server. The cursor is a plain index into the table's own source
+  ordering, which is stable because the table is built once when the image is
+  analysed and never mutated. `next_start` is absent exactly when the walk is
+  complete — a caller must be able to tell "the table ended" from "this page was
+  bounded", so the absence is the signal and nothing normalises it to a number.
+- **The storage.** Addresses are stored as sixteen zero-padded hex digits.
+  Variable-width hex does not compare numerically as `TEXT` — `"0x9000"` sorts
+  after `"0x1ffffffffffffff"` — and an `INTEGER` column was not an option,
+  because SQLite hands the value back as a double and truncates it above 2⁵³,
+  which is invariant 2 exactly. Padded `TEXT` is both sortable and still a valid
+  wire address.
+- **The refusal.** A project that retained no table still answers
+  `TARGET_NOT_ATTACHED`. A table exported only partly always answers `partial`,
+  never `complete`. Both cases exist so that "no references" is never returned
+  as a fact the caller can act on when it is really a gap in the project.
+
+**Listing rows are still not retained, deliberately.** They are an order of
+magnitude larger than the xref table and the decision is left open;
+`delver_disassemble` and the other byte-decoding tools still require the sample.
+
+**A P0-class defect in the same handler, found while extending it.**
+`handleXrefs` was reporting the *returned slice's* length as `total` and calling
+the result `complete` once a caller paged to the end of it — even when the
+analysis server had capped the reference list at 4,096. For any hot address, an
+agent was told there are exactly 4,096 references and that the answer was whole.
+That is a confident false claim about the sample, which this project's own
+ranking puts above a crash. It now reports the server's true pre-cap `total`,
+exposes `sourceBounded`, and marks the result `partial`. The convention it should
+have followed was already sitting in `handleStrings`, which has kept the scan cap
+and the page boundary apart as two different truncations since it was written.
+
+**The lesson worth carrying forward:** every truncation is a claim, and the
+dangerous ones are the bounds a caller cannot see. Three now meet in this one
+handler — the page boundary, the server's per-address cap, and a partly exported
+retained table — and only the first is fixable by asking again. The code names
+which one fired, because "partial" without a reason sends a caller back around a
+loop that cannot terminate.
+
+### Previously — the defect audit reached empty
+
+**The defect audit is empty.** Every row of
+[defect-audit.md](defect-audit.md) is fixed. This session re-verified the
+thirteen rows the 2026-08-27 pass had left listed and found eleven of them
+already closed in the tree — the work had landed, the rows had not been deleted.
+Two were genuinely open, and both are now fixed:
+
+- **`RESULT_LIMIT_EXCEEDED` could fire after a write had committed.** The
+  dispatcher measured the serialized envelope and threw if it was over budget,
+  which for a write means telling an agent that proposals or findings already
+  appended to an append-only log did not happen — and an agent's correct response
+  to a failed write is to make it again. `delver_report_finding` echoes 50
+  titles, descriptions and evidence texts against a 256 KB budget, so a
+  20-finding batch at the per-finding character bound cleared the limit on its
+  own. Write handlers now supply a `reducedData` payload holding only the record
+  identities the caller cannot reconstruct; an oversized write result is reduced,
+  marked `partial`, and says so. This follows the precedent already sitting one
+  statement below it, where retention failure after a commit returns the result
+  with a provenance note rather than throwing.
+- **`delver-mcp` flattened every non-tool failure to `"Internal error"`.** The
+  `tool_error` arms preserved the message; the catch-all discarded it. `tools/list`
+  is dispatched with `tool_error: false`, so a root matching no published window —
+  the one failure a caller can actually fix — arrived as an internal fault. Every
+  `BackendError` message is written to be safe to return, so the message now
+  survives whichever arm the failure takes, and an `InvalidParams` kind maps to
+  `INVALID_PARAMS` regardless of which method produced it.
+
+**The lesson from this session is about the list, not the code.** A defect list
+that outlives its fixes costs the next reader exactly the re-verification the
+list existed to save. Deleting the row is part of the fix, and the audit now says
+so in its own header.
+
+`npm run delver:protocol` has since been run — `protocol.generated.ts` declares
+`epoch: string` and carries the new completeness fields, so step 1 of the
+verification sequence is done. Steps 2 and 3 are not.
+
+### Previously — the 2026-08-27 defect-audit fix pass
+
+Every row except #30 was fixed — 3 P0, 13 P1 and 19 P2 —
+across the Rust workspace, the platform and service layers, eleven view
+contributions and the agent-bridge extension. Eleven agents worked in parallel on
+disjoint file sets; each verified its rows against the code before changing
+anything, and four rows turned out to name the wrong cause or the wrong size (the
+audit now records which, and why).
+
+**Both passes are now verified.** The binaries were rebuilt and everything ran
+green — 195 Rust tests, 318 Delver TypeScript tests, a clean client typecheck,
+and 6 matching corpus samples. The first green run cost two fixes of its own, in
+the audit's Verification state.
+
+Three changes are larger than a defect fix and are recorded as decisions:
+
+- **`.delverdb` schema 6 → 7.** Named signatures are now an append-only,
+  authored record log ([ADR 0011](../history/adr/0011-append-only-named-signatures.md)).
+  In-place `UPDATE`/`DELETE` was destroying the prior pattern, proof and
+  `sourceCallId` — exactly what `cross-revision-stable` reads as evidence, so
+  renaming a signature silently corrupted the basis for matching later revisions.
+  Forward migration is automatic; **there is no downgrade path.**
+- **The function fingerprint changed.** Two implementations of "where does the
+  last function end" were unified onto the tested one, which changes the digest of
+  the last function in every image. Normalization is bumped
+  `delver-server-listing-v2` → `v3`, so stored v2 fingerprints match nothing —
+  the fail-safe direction, as with the `Indirect` split.
+- **The unsafe-code posture is now described accurately.**
+  [ADR 0010](../history/adr/0010-unsafe-code-in-os-security-modules.md) supersedes
+  0003, which claimed one module was "the only module permitted to use `unsafe`"
+  while two others already did.
+
+**The lesson worth carrying forward:** the highest-value defects were not crashes.
+They were *confident false claims about the sample* — a malformed import table
+reported as "no imports", a TLS directory failure reported as "no TLS" (where
+callbacks run before the entry point), an ARM64 PE reported as zero instructions,
+a page size reported as an image total, and a user's own cancellation reported to
+an agent as `INTERNAL_ERROR`, a code it is entitled to retry. Every one of them
+reads as a successful answer. That is why the audit ranks a wrong answer above a
+crash, and the ranking held up under the fix pass.
+
+A second, narrower lesson: `instanceof` on an error that crossed the
+shared-process boundary is always wrong here — the channel rebuilds rejections
+from `{message, name, stack}` and the prototype is gone. It was wrong in four
+places, in three files, written by different hands.
+
+## Previously — workspace redesign
 
 The workspace redesign is structurally complete. Delver's eleven analysis
 surfaces no longer live as `ViewPane`s in one sidebar container; they are
@@ -62,6 +629,124 @@ Delver console errors.
    them indistinguishable. Segments only pay for themselves if they are legible.
 
 ### Earlier this phase
+
+The first defect-audit repair pass is verified. File-provider image reads now
+clamp attacker-controlled section offsets to the real mmap; dense analysis state
+is bounded by actual file-backed bytes and by one aggregate file-sized budget;
+and only real iced `NearBranch*` operands can produce a direct target, so
+`syscall`, `sysenter`, and far calls no longer manufacture a function and call
+xref at RVA 0. Five session-driven sidebar views clear another target's rows
+when their replacement refresh fails. Review actions resolve invocation-scoped
+services before awaiting, signature policies render exhaustively, bounded
+revision scans name what they omitted, and byte-search results are discarded
+after a target switch. The audit rows have been moved to its fixed section.
+
+The previously locked native binaries were restaged after closing the old
+workbench. Verification is clean: 154 Rust workspace tests, 15 live
+`DelverAnalysisSession` integration tests (including the generated PE import
+directory and both IAT-resolution paths), and 246 Delver TypeScript tests pass;
+client typechecking and fresh transpilation are clean.
+
+S3 reaches its exit criterion. `delver_call_paths` traces a source-to-sink path
+and returns the complete ordered address evidence — every step carries the exact
+calling instruction, because a path of function names an analyst cannot go and
+look at is not evidence. The sink may be a function entry *or* an IAT slot,
+which is the form the question actually takes on a sample: "what reaches
+`VirtualAlloc`?" The search is a breadth-first walk over partial paths, each
+carrying its own visited set, so recursion terminates while two genuinely
+distinct routes through the same function both survive. Edges are derived when a
+frontier is popped, never precomputed — the plan's requirement that this work
+without materializing the program graph.
+
+Its real subject is the negative answer. An empty path list is a claim about the
+program only when the search was exhausted, no depth or visit limit fired, no
+path was truncated, and no unresolved indirect call site sat on the frontier —
+`CallPaths::proves_absence()` is that condition, executable rather than
+described. Anything less is `partial`, with the specific cause named. A call
+through a register or a vtable is exactly where a real sample hides the edge
+being looked for, so a bounded search that reported "no path" as proof of
+absence would clear code that should have been flagged.
+
+The call graph can now name the calls that matter most. On a Windows binary the
+most common outgoing call is a call to an imported API, and it goes through the
+IAT — so it used to show up as an unnameable indirect site. It is now resolved
+from facts already retained: a `call [rip+X]` emits a data reference to the slot
+its memory operand names, and the import table names exactly one symbol for that
+slot. A direct call landing on a one-instruction `jmp [IAT]` import thunk
+resolves the same way, one hop and no chains. Both report `method`
+(`iatOperand` or `importThunk`) and `confidence` (`exact`); `probable` exists
+in the enum for future vtable and dataflow resolutions so a weaker method cannot
+arrive disguised as an exact one. Ambiguity fails closed everywhere — two data
+references from one site, a slot no import claims, or a slot two modules claim
+all stay unresolved rather than guessing a symbol.
+
+That changed the completeness rule, and the change matters more than the
+feature. `delver_call_graph` used to report `partial` whenever a function
+contained any indirect call site, which on real binaries is nearly always — a
+flag that fires every time is a flag a model learns to ignore. It now reports
+`partial` only when a site remains *unresolved*, so a function whose every
+outgoing call is named can finally say so, and a partial result is a real
+warning. [`ai-analyst.md`](../architecture/ai-analyst.md) §2.1 records the rule
+and the derived-fact vocabulary.
+
+S3 program structure now answers "how big is this and who talks to it?" in two
+calls instead of hundreds. `delver_function_profile` sizes one detected
+function — instruction, block, edge, call-site, and return counts — so a model
+can judge a function before reading it. `delver_call_graph` returns its bounded
+direct callers and callees, each cited function-relatively the way xrefs are,
+and pages callers and callees as one concatenated sequence so a cursor cannot
+skip or repeat a row at the boundary. Both derive from facts the analysis
+already retains: the bidirectional xref table, the detected function bounds,
+and the instruction-flow records added for basic blocks. Neither decodes again.
+
+The call graph refuses to let a direct answer read as a complete one. Call
+sites whose target is not statically known are returned as evidence rather
+than dropped, and their presence alone forces `partial` — a model that reads an
+untruncated first page as "these are all the functions this one calls" is wrong
+in exactly the cases that matter. Paging, the server's own bound, and an
+unresolvable call site are reported as three distinct reasons, because only the
+first is fixable by asking again.
+
+Two facts the analysis had been eliding were separated to make that claim
+honest. `FlowKind::Indirect` conflated an indirect call with an indirect branch,
+so a jump-table dispatch counted as an unnameable call; it is now
+`IndirectCall` and `IndirectBranch`. Splitting it also fixed a decoding gap —
+an indirect call *does* return to the following instruction, and the conflated
+variant stopped recursive descent there. Both fingerprint normalizations are
+bumped to v2 accordingly; a stored v1 fingerprint no longer matches anything,
+which is the fail-safe direction. `terminates_block` was corrected to agree
+with `falls_through` about an indirect call, so the corpus snapshot and
+`control_flow::basic_blocks` cannot cut the same function into different
+blocks.
+
+A function with no recorded end and no following function — the last function
+in every PE, because the entry-point seed carries no end — previously had no
+extent at all, so every structure request refused it. The extent now falls back
+to the end of the contiguous decoded-instruction run from the entry, stopping
+at the first gap. `bounded` continues to mean *recorded*, not *inferred*, and a
+profile over an inferred extent reports `partial` and says every count below it
+is an estimate of size rather than a measurement.
+
+S3 now has its first provider-derived program-structure slice.
+`delver_basic_blocks` resolves one detected function by containing address or
+exact name and returns bounded half-open blocks plus typed fallthrough, jump,
+and conditional-taken edges. Native analysis retains exact instruction-flow
+facts, splits blocks across undecoded gaps, restricts truncated edges to the
+returned block set, and labels bounded graphs partial instead of presenting
+them as complete control-flow proof.
+
+S2 instruction search is live. `delver_search_instructions` performs exact
+case-insensitive mnemonic matching with an optional case-insensitive substring
+over the displayed operand text. Pagination is revision- and query-bound,
+retains the held-back match, and complete negative results require scanning the
+remaining decoded instruction list. It deliberately does not claim structured
+immediate or constant semantics.
+
+The **Review** tree now supports group-level **Accept All** and **Reject All**
+actions for interpretation proposals and findings. Each action snapshots the
+currently pending ids and submits one existing validation-atomic domain batch;
+proposal resolutions and finding decisions remain separate append-only models,
+and untitled projects enter the normal dirty/Save lifecycle.
 
 **Generate Signature...** now starts with an explicit policy choice:
 relocation-stable remains the recommended first item, cross-revision-stable
@@ -313,13 +998,15 @@ one of them resolves a function boundary for itself there are two analysis
 implementations that disagree, and the disagreement surfaces as a model citing
 an address no pane ever showed.
 
-Twenty-six capabilities are live: session info, capability discovery,
+Thirty-four capabilities are live: session info, capability discovery,
 current context, focus, image info, function listing and lookup, RVA/VA/file
-address conversion, disassembly, raw byte reads, wildcard search, instruction-aware
+address conversion, disassembly, raw byte reads, wildcard and mnemonic/operand-text
+search, provider-derived basic blocks and typed direct CFG edges, instruction-aware
 signature generation, offline named-signature listing, evidence-gated signature
 persistence, decompilation, both xref
 directions, string listing and search, imports,
-exports, interpretation lookup, review-only rename/comment/tag proposals, and
+exports, interpretation lookup, review-only rename/comment/tag and
+data-type/function-prototype proposals, and
 evidence-backed provisional findings.
 Every result is a versioned envelope
 carrying byte identity, revision, provenance, and `completeness`, so a
@@ -739,11 +1426,57 @@ with the OS icons, so the whole set regenerates from one master.
 
 ## Verification
 
+Last full run 2026-08-29, against freshly built debug and staged release
+binaries. The TypeScript figure is from the full suite selection —
+`scripts\test.bat --grep "Delver|Ghidra|InterpretationLog|DecompilerWorkerHost|provider exit escalation|PyGhidra"`.
+`--grep Delver` alone misses six suites; see
+[working-with-ai.md §8](../development/working-with-ai.md).
+
+- Rust workspace: 234 passing, including the resumable string scan (a page walk
+  at every page size from 0 upward reproducing one whole-image scan exactly, over
+  a tidy fixture and over pseudo-random printable-heavy images; resuming inside a
+  string; an oversized first address group that must still advance; and sections
+  handed over out of virtual-address order), the correction set's atomic refusal,
+  `FunctionSource::Authored` outranking every derived source, the undefined sweep
+  guess that must not reappear one byte later, the undefined call target whose
+  instructions and inbound call xref survive, the S3 call-graph/path corpus,
+  split indirect-flow classification, RVA-0 syscall regression, provider mmap
+  clamp, file-bounded hostile-section allocation, the paged xref export's
+  end-of-walk bounds, observed global-data inventory, subsystem parsing that
+  keeps an unrecognized value rather than collapsing it, and the entry-role
+  walk's decline conditions — which is all it does on a real binary
+- Golden corpus: 6 samples match
+- `DelverAnalysisSession`: passing against the rebuilt binaries; the generated PE
+  import directory is accepted by the real parser, both direct-IAT and
+  import-thunk resolution paths are exercised, and the whole xref table walks out
+  one reference per page with `next_start` dropped exactly at the end
+- Delver TypeScript suites: 397 passing, including the two-phase strings walk
+  (the retained list, the continuation into a scanned image, and an offline
+  project that refuses to scan and says no cursor will reach the rest), function corrections through
+  the `.delverlog` validator and into the accepted set pushed at open,
+  dispatcher/tool contracts, signature policy/scan presentation, project interpretation isolation, retained
+  cross-reference storage and its v7→v8 migration, offline xref answers, the
+  `schemaVersion: 2` semantic snapshot in the decompilation cache key and against
+  saved pseudocode, both refusals that keep a partial type model from reaching the
+  backend, composite anchors through the `.delverlog` validator and into the
+  semantic snapshot, the empty-snapshot attribution that keeps saved pseudocode
+  readable on a backend that cannot apply types, and the now-live native
+  integration suite
+- Golden corpus: 6 samples match; `valid-layers-check` clean
+- Python decompiler worker: 10 passing
+  (`python -m unittest discover -s scripts/ghidra -p "test_*.py"`), including
+  `test_semantics_are_canonical_bounded_and_sorted` — a snapshot is refused
+  unless its schema version is 1 or 2 and every declaration is non-empty,
+  bounded, and in ascending unique RVA order, and
+  `test_composites_are_identified_bounded_and_offset_ordered` — composites
+  ascending and unique by name, fields ascending by offset and inside the
+  declared size, and any `kind` other than `struct` refused
+- Client typecheck and fresh transpilation: clean
 - Signature UI/migration focused run: 25 passing, covering generation policies,
   earlier-revision classification and promotion gating, SQLite `signature`
   mappings, retained proof validation, conflict-preserving annotation transfer,
   idempotent Review proposals, and fail-closed single/bulk IDAPython generation
-- Agent dispatcher and contract: 32 passing. They cover zero-analysis
+- Agent dispatcher and contract: 61 passing. They cover zero-analysis
   discovery, per-capability missing-project handling, attachment refusal, the
   zero-backend saved pseudocode path, an address above 2⁵³, unsafe JSON
   numbers, count clamping, cursor binding to bytes/capability/filter,
@@ -758,12 +1491,13 @@ with the OS icons, so the whole set regenerates from one master.
   untrusted string labelling, authored names beating placeholders,
   cancellation, envelope shape, attributed offline rename/comment/tag
   proposals, validation-atomic malformed batches, and the write commit boundary
-- Agent tool presentation: 3 focused tests cover catalog/tool identity, exact
-  byte/address and signature schemas, and bounded review-only proposal schemas;
-  generated discovery reports 26 tools
-- Named-signature/project focused run: 57 passing (10 SQLite store, 4 project
-  service, 32 dispatcher, 3 tool-definition, and 8 command-gateway tests),
-  including v1-to-v6 migration, reopen, per-revision isolation, atomic upsert,
+- Agent tool presentation: 7 focused tests cover catalog/tool identity, exact
+  byte/address and signature schemas, bounded review-only proposal schemas, and
+  the composite and function-correction arms; generated discovery reports 35
+  tools
+- Named-signature/project focused run: 95 passing (19 SQLite store, 8 project
+  service, 61 dispatcher, 7 tool-definition), plus 8 command-gateway tests,
+  including v1-to-v8 migration, reopen, per-revision isolation, atomic upsert,
   and case-insensitive replacement with a stable id
 - Session/decompiler regression run: 41 passing
 - Provider/analysis session: 7 passing, including verified image-RVA and raw
@@ -903,12 +1637,31 @@ with the OS icons, so the whole set regenerates from one master.
 
 ## Next
 
-P3c continues with graph-path evidence and bulk review operations. The static
-baseline now retains proposals/findings and
-their cited tool results, lets a human decide them, and navigates concrete range
-evidence. Next add the bytes/search and program-graph capabilities needed to
-make deeper evidence retrievable without reconstructing it from hundreds of
-narrow calls.
+S3 is functionally complete: profiles, callers/callees, bounded call graphs,
+path queries, and the first confidence-bearing indirect targets all exist. What
+remains is the weaker half of resolution — a vtable or dataflow-derived target,
+which lands on the `probable` confidence tier the enum already reserves. Until
+then every such site is counted honestly rather than guessed at, and it is those
+counts that hold `delver_call_graph` and `delver_call_paths` to `partial`.
+
+S4 now has the observed-global substrate, reviewed authored types/prototypes,
+content-wide semantic cache stamps, and transactional PyGhidra application.
+Next narrow each stamp to the globals and callees actually consumed by one
+function, then extend the authored model to structures, enums, and local
+variables. Do not infer sizes or read/write modes in the native global pass
+merely to make the inventory look richer.
+
+The static baseline retains proposals/findings and their cited tool results,
+lets a human decide them, and navigates concrete range evidence. The xref half of
+the plan's result-loss list is now paid (see Just landed). What remains on it is
+**listing rows**, which were deliberately not taken in the same pass: they are an
+order of magnitude larger than the xref table, and the choice between retaining
+them whole, retaining only what an investigation touched, and not retaining them
+at all is a real decision rather than a mechanical repeat of ADR 0012. Until it
+is made, an offline project still cannot disassemble.
+
+The two other named gaps are unchanged: long pseudocode is prefix-truncated with
+no continuation cursor, and a capped string scan cannot be reached by paging.
 
 For P3b, root-v1, the per-window lifecycle/backoff owner, production extension
 composition, approval adapter, root-scoped private relay ownership,
@@ -959,8 +1712,9 @@ still have no unit UI harness in this fork.
 After the host boundary is covered by backend-neutral contract tests, add an IDA
 test double so Ghidra-specific names cannot creep back into the protocol. Exact
 discontiguous pseudocode selection painting remains the next UI-side P2 slice.
-Types remain a later interpretation extension; merge and conflict detection
-remain collaboration work.
+Types are no longer a later extension — `dataType` and `functionPrototype` are
+authored interpretation like any other edit, and accepted ones reach the
+decompiler. Merge and conflict detection remain collaboration work.
 
 ## Known limitation
 

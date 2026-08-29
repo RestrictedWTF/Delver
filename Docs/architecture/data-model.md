@@ -182,6 +182,8 @@ move them.
 export type Anchor =
 	/** Preferred: stable across ASLR, re-dumps, and other processes. */
 	| { kind: 'image'; contentHash: string; rva: number }
+	/** A named type belonging to one image, which is not at any address. */
+	| { kind: 'type'; contentHash: string; name: string }
 	/** Symbol-relative; survives version bumps better than RVA. */
 	| { kind: 'symbol'; module: string; name: string; offset: number }
 	/** Dynamically allocated / injected code with no file backing. */
@@ -189,6 +191,16 @@ export type Anchor =
 	/** Last resort. Explicitly scoped to one moment. */
 	| { kind: 'absolute'; space: SpaceId; addr: bigint; moment: IMoment };
 ```
+
+**Not every anchor names a place.** `type` is the exception and the reason the
+rule is worth stating: a composite belongs to the image, not to an address —
+several addresses may hold one and none of them owns the layout. It is still
+scoped to `contentHash` and still carries nothing relocation can invalidate,
+which is what §4 exists to guarantee. Code that needs a location must narrow
+first; `isImageAnchor` and `isTypeAnchor` exist for that, and findings are
+deliberately restricted to `image` because a claim about bytes has nothing to
+cite without one. See
+[ADR 0014](../history/adr/0014-type-anchors-for-authored-composites.md).
 
 `contentHash` for an in-memory image should be computed over the *file* bytes
 where available, or over a normalized form of the memory image (relocations
@@ -284,7 +296,8 @@ One SQLite database per saved project (WAL mode while open), holding:
 | Table group | Rewritable? | Notes |
 | --- | --- | --- |
 | `target_*` | yes | Content hash, format metadata, and optional source locator; never sample bytes |
-| `fact_*` | yes | Derived analysis, keyed by content hash and schema version. Deletable. |
+| `analysis_snapshots` | yes | Opaque per-revision derived payloads — image info, functions, imports, exports, strings. Keyed by content hash and schema version. Deletable. |
+| `xrefs` | yes | The cross-reference table as real indexed rows, queried by address and never loaded whole. Each revision records whether its export finished, so an incomplete table is never answered as complete. See [ADR 0012](../history/adr/0012-retained-xref-table-in-portable-projects.md). |
 | `decompile_*` | yes | Text, mappings, variables, and provenance qualified by backend/version/profile |
 | `edit_log` | **no** | Append-only interpretation. The user's actual work. |
 | `finding`, `recipe` | no | Investigation output |
@@ -298,6 +311,11 @@ Design constraints worth honoring:
   change incrementally.
 - The project must open with **no target attached** — reviewing yesterday's
   analysis on a laptop is the common case.
+- Retention is per fact kind, not all-or-nothing. A project answers only what it
+  retained, and it must be able to say which: listing rows are **not** retained,
+  so anything that decodes bytes still needs the sample. A fact kind that was
+  retained only partly answers `partial` and a kind that was never retained
+  refuses — neither may answer zero, which reads as a fact about the binary.
 - The project must be shareable as a single file, and must be openable by
   someone who does not have the sample.
 - Never store captured sample bytes in `.delverdb`; a sample is attached

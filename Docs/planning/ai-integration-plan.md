@@ -157,7 +157,12 @@ interface IDelverAgentResult<T> {
 Addresses remain normalized `"0x..."` strings across JSON boundaries. Results
 say when a string scan, graph walk, decompilation, or analysis is partial.
 Opaque cursors include the content hash and revision so they cannot silently
-continue against different bytes.
+continue against different bytes, plus a fingerprint of the filter arguments
+and — for a sequence whose membership or order is *authored*, such as a
+name-filtered function list or the name-sorted signature list — a stamp of that
+collection's state. An accepted rename or a saved signature mid-walk therefore
+ends the walk with `STALE_REVISION` and an instruction to restart, rather than
+handing back a page that skips or repeats rows.
 
 Stable error codes are:
 

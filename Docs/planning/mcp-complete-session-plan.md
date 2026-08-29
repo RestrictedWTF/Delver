@@ -31,10 +31,14 @@ These claims are deliberately separate:
 
 ## Current baseline
 
-Twenty-one canonical capabilities cover session state, focus, image facts,
-functions, raw byte reads, disassembly, decompilation, xrefs, strings, imports, exports,
-accepted interpretation, review-only rename/comment/tag proposals, and
-evidence-backed provisional findings. Every
+Thirty-five canonical capabilities cover session state, focus, image facts,
+functions, raw byte reads, byte and instruction search, address conversion,
+signature generation and persistence, basic blocks, function profiles, call
+graphs and bounded call paths, observed globals and their static accesses,
+disassembly, decompilation, xrefs, strings,
+imports, exports, accepted interpretation, review-only rename/comment/tag,
+data-type/function-prototype and function-bounds proposals, and evidence-backed
+provisional findings. Every
 result carries project identity, provenance, completeness, and bounded
 pagination where the underlying operation supports it.
 
@@ -77,7 +81,9 @@ Portable-project schema v6 also retains each successful project-bound dispatcher
 request/result envelope. Finding ranges can cite earlier results by `callId`;
 references are validated against the same target revision and appear beneath the
 range in Review. Selecting one opens its complete retained request/result in a
-read-only JSON editor. Graph-path evidence and batch review operations remain.
+read-only JSON editor. Group-level Accept All/Reject All now submit one validation-atomic domain
+batch per queue. Graph-path evidence in Review, and threshold-based review
+policy, remain.
 
 **Exit:** an external agent proposes a validation-atomic batch of interpretations
 and a finding; the analyst can inspect its cited bytes and accept or reject it.
@@ -105,7 +111,8 @@ pattern must have an exact one-match proof saved for the same function identity
 in an earlier revision and remain exactly unique in the current revision. It
 never reads a historical source path and makes no claim for revisions without
 saved proof.
-Instruction search and structured data/global reads remain.
+Exact mnemonic and formatted operand-text instruction search is implemented.
+Structured immediate/constant search and structured data/global reads remain.
 
 The listing and Signatures-view generator action exposes all three policies in
 a policy picker, with relocation-stable first and recommended. Cross-revision
@@ -133,13 +140,46 @@ claim is possible only after a complete scan.
 
 ### S3 — Expose program structure
 
-Add function profiles, callers/callees, basic blocks, CFG edges, bounded call
-graphs, path queries, and confidence-bearing indirect targets. Prefer summary or
-batch operations over forcing the model to reconstruct a function graph through
+Three vertical slices are implemented. `delver_basic_blocks` returns bounded,
+provider-derived half-open blocks and typed direct CFG edges for one detected
+function; truncation remains explicit and edges never point outside the returned
+block set. `delver_function_profile` sizes one function — instruction, block,
+edge, call-site, and return counts — so a model can judge it before reading it.
+`delver_call_graph` returns its bounded direct callers and callees, cited
+function-relatively, paging both as one ordered sequence.
+
+All three derive from retained facts — the bidirectional xref table, detected
+function bounds, and instruction-flow records — rather than decoding again, and
+all three are batch answers rather than something a model reconstructs from
 hundreds of single-address xref calls.
 
-**Exit:** an agent can trace a source-to-sink path and return the complete ordered
-address evidence without materializing the entire program graph.
+Two honesty constraints came out of the slice and now bind the rest of S3. An
+indirect call site is returned as evidence and forces `partial` on its own, so a
+direct call graph can never be read as the complete set of what a function
+calls; this required splitting `FlowKind::Indirect` into `IndirectCall` and
+`IndirectBranch`, since a jump-table dispatch is not an outgoing call. And an
+extent inferred from the contiguous decoded run — the only extent available for
+the last function in a PE — is reported as inferred, so `bounded` keeps meaning
+*recorded*.
+
+Indirect targets are resolved where the evidence allows it. A `call [rip+X]`
+whose memory operand names an IAT slot, and a direct call landing on a
+one-instruction `jmp [IAT]` thunk, both resolve to the imported API with
+`method` and `confidence: exact`. Ambiguity fails closed. Vtable- and
+dataflow-derived targets remain, and land on the `probable` tier.
+
+`delver_call_paths` closes the exit criterion: bounded source-to-sink paths
+carrying every intermediate call site, over a function or an import-slot sink,
+with edges derived on demand rather than by materializing the graph. A negative
+result is a claim about the program only when the search was exhausted, no
+depth/visit/path limit fired, and no unresolved indirect site sat on the
+frontier.
+
+**Exit:** met.
+
+The original exit statement, now met: *an agent can trace a source-to-sink path
+and return the complete ordered address evidence without materializing the
+entire program graph.*
 
 ### S4 — Refine semantics
 
@@ -155,23 +195,166 @@ starts with MSVC RTTI/vtables and ranks adjacent symbol, unwind, prototype,
 layout, and runtime-metadata enrichers. It remains a proposal until its corpus
 spike demonstrates precise recovery and honest degradation.
 
-**Exit:** an agent proposes a structure and function signature, a human accepts
-them, and a subsequent decompilation reflects the accepted types.
+The globals and semantic-proposal slices are implemented. `delver_list_globals` inventories
+non-executable addresses actually named by retained data references, and
+`delver_global_accesses` returns their referencing instructions and containing
+functions. These are explicitly observed candidates, not source declarations:
+no type, size, read/write mode, register-derived pointer, or runtime-only access
+is inferred, and both tools remain partial after paging ends so absence cannot be
+misread as proof. This is the stable address substrate for the type work that
+follows. `delver_propose_type` then adds validation-atomic, attributed data-type
+and exact-function-entry prototype proposals to the append-only interpretation
+log and the existing Review workflow. Accepted declarations persist and
+materialize independently. Decompilation now carries a versioned content-wide
+semantic snapshot: memory and portable-project caches reject any different
+snapshot, while PyGhidra applies the accepted declarations inside a rollback
+transaction before producing replacement output. This is correct but
+conservative; narrowing each snapshot to the globals and callees one function
+actually consumed remains the next slice. The legacy headless backend fails
+closed when accepted semantics are present. The open pseudocode pane
+re-decompiles when an accepted data type or prototype lands for the bytes it is
+showing, so an acceptance changes the C in front of the analyst rather than
+waiting for the next request.
+
+Composites close the structure half of the exit. An anchor may now name a type
+instead of a place — `{ kind: 'type', contentHash, name }` beside the image
+anchor — and `EditOp.CompositeType` records one named layout as canonical JSON
+with fields at explicit offsets ([ADR 0014](../history/adr/0014-type-anchors-for-authored-composites.md)).
+It reuses the whole edit log unchanged: propose, accept in Review, compensate,
+revert by author, export and import, and no `.delverdb` migration, because that
+machinery keys on `(anchor, op)` and never on an address. The semantic snapshot
+moved to `schemaVersion: 2` and applies its `composites` array before `dataTypes`
+and `functionPrototypes`, so a declaration can name a struct the same snapshot
+introduced; both decoders accept v1 and normalize it up to v2, which is what
+keeps pseudocode saved before composites existed from comparing as stale. The
+worker defines the structures in two passes — every name registered as an empty
+`StructureDataType` with packing disabled, then fields placed at the offsets they
+were authored with — so mutually referencing structs resolve whichever direction
+the reference runs, still inside the transaction that is always rolled back.
+`delver_propose_type` takes `target: "composite"` with `name`/`size`/`fields`
+instead of `address`/`declaration`, through a `oneOf` schema so a composite
+cannot be sent with an address that would be silently ignored.
+
+**Exit:** met.
+
+The original exit statement, now met: *an agent proposes a structure and function
+signature, a human accepts them, and a subsequent decompilation reflects the
+accepted types.* Both go in through `delver_propose_type` as review-only
+proposals, Review accepts them, both enter the versioned snapshot, PyGhidra
+defines the composites and then applies the declarations before decompiling, and
+the snapshot is part of decompilation identity — so no memory or portable cache
+can serve text produced against the previous type model.
+
+Four limits remain, all visible in the code.
+
+- **The snapshot is content-wide, not a dependency graph.** Every accepted
+  declaration for a content hash is carried into every request for those bytes,
+  so accepting one type invalidates every saved function in the image. It can
+  never serve pseudocode built against different semantics, which is the property
+  worth having first, but it discards more than it must.
+- **Only PyGhidra applies accepted semantics.** The headless backend has no
+  route for declarations, so a request carrying them is answered against the
+  empty snapshot and marked `semanticsIgnored` — correct C for the bytes, openly
+  not reflecting the accepted type model, and reported `partial` to an agent.
+  Headless users keep their pseudocode and lose only the type awareness. What is
+  still missing is headless actually applying the declarations.
+- **Only `struct`.** `kind` is a `struct`-only allow-list at three layers: the
+  dispatcher writes it, the result decoder requires it, and the worker's
+  `COMPOSITE_KINDS` refuses anything else rather than laying out storage the
+  analyst never described. The tool exposes no `kind` at all, so a union or an
+  enum cannot be proposed in the first place.
+- **The reload is coarse, by construction.** Accepting a composite reloads the
+  open pane like any other semantic edit, because whether *this* function uses
+  that layout is not knowable without the dependency graph the snapshot
+  deliberately does not have. Correct and wasteful, in the same direction as the
+  content-wide snapshot itself.
+
+Local variables, stack frames, and type propagation are untouched. Nothing
+invalidates *summaries* because no durable summary store exists yet.
 
 ### S5 — Correct analysis safely
 
-Add capability-gated operations to define or undefine code, data, and functions;
-adjust function bounds; force reanalysis/recompilation; and patch bytes or
-assembly. These mutate facts or target state rather than interpretation, so they
-need a separate unsafe profile, explicit confirmation, before/after bytes, and
-an auditable recovery story.
+The phase covers capability-gated operations to define or undefine code, data,
+and functions; adjust function bounds; force reanalysis/recompilation; and patch
+bytes or assembly. These change facts or target state rather than interpretation,
+so they need a separate unsafe profile, explicit confirmation, before/after bytes,
+and an auditable recovery story.
 
 Arbitrary Python execution is not part of the default MCP surface. Prefer
 bounded recipes or a separately enabled and separately authorized scripting
 profile.
 
-**Exit:** a user can approve one disclosed correction, inspect its exact effect,
-and recover the prior state.
+**Function starts are done.** An authored correction is an addition to, or a
+suppression within, the *function seed set*, and analysis re-derives every fact
+from the image bytes plus the corrected seeds — nothing is written into the fact
+store ([ADR 0015](../history/adr/0015-authored-corrections-re-derive-facts.md)).
+`EditOp.FunctionBounds` carries the decision as canonical JSON on an image
+anchor, so propose, accept, compensate, revert-by-author, `.delverlog` export and
+import all reached it unchanged; the JSONL validator had to be taught the op,
+which fails closed on the whole log for one it does not know.
+`delver_propose_function` is the agent route — review-only `define`/`undefine`,
+validation-atomic, with a `define` required to land in mapped executable memory
+and an `undefine` deliberately checked against nothing, so an analyst can
+pre-empt a seed the next analysis is about to invent. In Rust,
+`FunctionSource::Authored` outranks every derived source, a correction set applies
+whole or not at all, and `analyze` and `analyze_corrected` are one implementation
+so corrected facts stay comparable to uncorrected ones.
+`analysis/setCorrections` re-derives an open image without a provider round trip
+and reports the function count before and after; the session service pushes the
+accepted set during open, before any caller sees the session.
+
+**Exit:** met, for function starts only.
+
+The exit statement — *a user can approve one disclosed correction, inspect its
+exact effect, and recover the prior state* — is met by four distinct pieces:
+
+- **Approve.** A correction arrives as a `proposed` edit and is accepted or
+  rejected in Review like any other, with the row labelled by what it will do
+  rather than by its JSON. A proposal contributes an address to review and
+  nothing to the derivation, because `functionCorrectionsFor` reads the
+  materialized view.
+- **Disclosed.** `analysis/setCorrections` returns `function_count_before`,
+  `function_count`, `instruction_count`, and `corrections_applied` — the effect
+  stated in the only terms the server can state it.
+- **Exact effect.** The facts are re-derived, not patched: instructions, function
+  starts, basic blocks, the xref table, and the listing index all come from
+  `derive`, which is the single place the analysis and the listing are produced
+  together, so they cannot drift.
+- **Recover.** Two routes. An `undefine` withdraws a start the analysis invented,
+  and compensation or revert-by-author withdraws the correction itself — the
+  compensation is an accepted edit, so it re-derives on the spot, and because
+  nothing was mutated the previous facts return exactly.
+
+What S5 still does not have, all verified absent rather than assumed:
+
+- **Undefining *code* and *data*, as distinct from undefining a function.**
+  `Undefine` withdraws a function start only; the instructions stay in the index
+  and inbound call xrefs stay in the table, because a call is still a fact about
+  the image. There is no operation that says "these bytes are not code" or "these
+  bytes are data", and no edit op for one.
+- **Adjusting the bounds of an existing function, as an operation.** A `define`
+  carrying an explicit exclusive end does pin an extent at an address detection
+  already found — that much works, and suppresses sweep guesses inside the range.
+  What does not exist is an operation whose subject is an existing function:
+  moving a start is an `undefine` plus a `define` that the log records as two
+  unrelated corrections at two addresses, and nothing ties them together.
+- **Forced reanalysis.** `analysis/setCorrections` is pushed by the session
+  service — at open, and when an accepted `functionBounds` edit lands. No
+  capability lets a caller ask for a re-derivation, so there is no way to say
+  "analyse this again" without authoring a correction. Forced *recompilation* is
+  the one piece of this bullet that exists: `delver_decompile` takes
+  `refresh: true`, which bypasses the cache and re-runs the backend.
+- **Byte and assembly patching.** Nothing in the correction path reads or
+  modifies target bytes, and there is no write path to a target at all. ADR 0015
+  excludes it explicitly: a patch changes the bytes, so facts derived from them
+  are facts about something the sample no longer is. It needs its own decision,
+  its own unsafe profile and confirmation, before-and-after bytes, and its own
+  recovery story, and must not be bolted onto `FunctionCorrection` because the
+  two look superficially alike.
+
+Every change to the correction set also costs a full re-analysis of the image.
+That is acceptable now and would force incremental re-derivation on an image
+where it reads as a stall.
 
 ### S6 — Make investigations durable
 
@@ -202,13 +385,15 @@ requirements for a complete local static session.
 
 ## Current result-loss and offline gaps
 
-- Long pseudocode is prefix-truncated without a continuation cursor or artifact.
-- A capped string scan can be permanently partial; paging cannot reach strings
-  that were never extracted.
+- ~~Long pseudocode is prefix-truncated without a continuation cursor.~~ Fixed: `delver_decompile` pages on line boundaries and returns `nextCursor`, `firstLine`, and `totalLines`, with `lineMappings` scoped to the lines a page actually carries. The cursor is bound to the exact text, so continuing into a re-decompiled function is refused rather than splicing two bodies together under one set of line numbers.
+- ~~A capped string scan can be permanently partial; paging cannot reach strings that were never extracted.~~ Fixed wherever the sample is attached. Scanning the 35 largest binaries in a stock `C:\Windows\System32` found **9 at the 200,000-string cap**, `mshtml.dll` and a 228 MB `MRT.exe` among them, so the bound was reachable on ordinary system binaries rather than only on hostile ones. `analysis/scanStrings` re-scans a bounded window of the image on demand, and `delver_list_strings`/`delver_search_strings` walk in two phases: an index into the list retained when the image was analysed, then a position in the image once past it, with the cursor carrying which phase it is in. `mshtml.dll` now yields 281,537 strings and `MRT.exe` 5,736,204, the latter over 28 continuations. **The offline case is unchanged and still refuses:** the retained list is all a project without its sample has, so it answers that some strings were never extracted and no cursor will reach them. One residual hole, deliberate: a page walk assumes sections are disjoint in virtual address, so a hostile file whose sections genuinely *overlap* can hide strings below a cursor. The whole-image scan is unaffected.
 - DTP applies one fixed 60-second deadline even though live decompilation has no
   fixed latency claim.
-- Portable snapshots do not currently retain listing rows or xrefs, so offline
-  projects cannot answer those tools without the original sample.
+- Portable snapshots retain the cross-reference table from schema 8 (ADR 0012),
+  so an offline project answers `delver_xrefs_to` and `delver_xrefs_from`;
+  a project saved without one refuses rather than answering zero. Listing rows
+  are still not retained, so `delver_disassemble` and the other byte-decoding
+  tools still need the original sample.
 - The decompiled-function batch limit exists in the contract, but the current
   capability accepts only one function.
 

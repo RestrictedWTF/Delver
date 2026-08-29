@@ -301,12 +301,47 @@ its file on disk, and land on a real inline hook. Adding providers required
 | Item | Size |
 | --- | --- |
 | Type system: structs, enums, function signatures, propagation | XL |
-| Type application feeding back into the decompiler responder | L |
+| ~~Type application feeding back into the decompiler responder~~ — **done** | L |
 | CFG per function with layered layout | L |
 | Stack frame / local variable recovery beyond what the decompiler gives | L |
 | ELF and Mach-O loaders | L |
 | Signature matching for library code | L |
+| **Entry-point role recovery — started, incomplete** | M |
 | Demangling (MSVC, Itanium) | M |
+
+Accepted data types and function prototypes already reach the decompiler: they
+travel with each request as a versioned snapshot, PyGhidra applies them inside a
+rolled-back transaction, and the snapshot is part of decompilation identity so no
+cache can serve text built against a superseded type model
+([ADR 0013](../history/adr/0013-accepted-semantics-as-decompilation-input.md)).
+
+**Entry-point role recovery is half-built and does not work yet.** What landed:
+the PE `Subsystem` is parsed and carried (exact), and the image entry point is
+labelled as the C runtime stub rather than presented as the user's entry —
+useful, since it is the difference between "your code starts here" and "this is
+scaffolding". What did *not* land is finding `main`/`WinMain` behind it.
+`delver-analysis/src/entry_role.rs` holds a call-graph walk for the MSVC startup
+shape; it is written, tested, fails closed, and **resolved 0 of 80 real
+System32 binaries** — every one declined to the CRT entry alone. Two heuristics
+were falsified against real samples rather than reasoned about:
+
+- The startup path is a **fan-out, not a chain of forwarders**. `mainCRTStartup`
+  branches to the security-cookie init and the CRT frame; the frame then calls
+  six or more helpers with `main` among them. A walk that follows single calls
+  stops immediately.
+- "The call between `_initterm` and `exit`" fails because **address order is not
+  execution order** — on `where.exe` the `exit` call sits *below* the `_initterm`
+  call. It would need control flow, which the walk does not use.
+- On newer binaries the CRT is statically linked, so there are no marker imports
+  to anchor on at all.
+
+The real answer is the row above it: recognize the CRT functions themselves by
+**signature**, which is what other tools do and which Delver already has the
+machinery for — named signatures carry retained proofs and match across
+revisions. The walk is kept because it is correct on the shapes it does
+recognize, never produced a false positive across those 80 samples, and would
+otherwise be rebuilt from scratch when signatures land. It must not be described
+as working until it does.
 
 ---
 
