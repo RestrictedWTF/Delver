@@ -34,7 +34,7 @@ interface ISchemaNode {
 	readonly $ref?: string;
 }
 
-type DefinitionKind = 'interface' | 'enum';
+type DefinitionKind = 'interface' | 'enum' | 'union';
 
 const schema: { definitions: Record<string, ISchemaNode> } = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
 const definitions = schema.definitions;
@@ -43,6 +43,12 @@ const definitions = schema.definitions;
 function kindOf(node: ISchemaNode): DefinitionKind {
 	if (node.enum || node.oneOf?.every(v => Array.isArray(v.enum))) {
 		return 'enum';
+	}
+	// A serde-tagged enum: `oneOf` over objects, each carrying the tag as a
+	// single-valued `kind`. Emitted as a discriminated union so a consumer must
+	// narrow before touching a branch's fields.
+	if (node.oneOf?.every(v => v.properties !== undefined)) {
+		return 'union';
 	}
 	return 'interface';
 }
@@ -107,7 +113,7 @@ function docComment(description: string | undefined, indent: string): string {
 	if (lines.length === 1) {
 		return `${indent}/**\n${indent} * ${lines[0]}\n${indent} */\n`;
 	}
-	return `${indent}/**\n${lines.map(l => `${indent} * ${l}`).join('\n')}\n${indent} */\n`;
+	return `${indent}/**\n${lines.map(line => line.length === 0 ? `${indent} *` : `${indent} * ${line}`).join('\n')}\n${indent} */\n`;
 }
 
 /** Property names come from serde and may not be valid TS identifiers. */
@@ -115,17 +121,37 @@ function propertyKey(name: string): string {
 	return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) ? name : `['${name}']`;
 }
 
-function emitInterface(name: string, node: ISchemaNode): string {
+function emitMembers(node: ISchemaNode, indent: string): string {
 	const required = new Set(node.required ?? []);
-	let out = docComment(node.description, '');
-	out += `export interface ${typeName(name)} {\n`;
+	let out = '';
 	for (const [prop, propNode] of Object.entries(node.properties ?? {})) {
 		const { nullable } = withoutNull(propNode);
 		const optional = !required.has(prop) || nullable;
-		out += docComment(propNode.description, '\t');
-		out += `\t${propertyKey(prop)}${optional ? '?' : ''}: ${tsType(propNode)};\n`;
+		out += docComment(propNode.description, indent);
+		// A single-valued enum is a union's tag. Emit the literal so TypeScript
+		// can discriminate on it instead of widening it to `string`.
+		const type = propNode.enum?.length === 1 ? `'${propNode.enum[0]}'` : tsType(propNode);
+		out += `${indent}${propertyKey(prop)}${optional ? '?' : ''}: ${type};\n`;
 	}
+	return out;
+}
+
+function emitInterface(name: string, node: ISchemaNode): string {
+	let out = docComment(node.description, '');
+	out += `export interface ${typeName(name)} {\n`;
+	out += emitMembers(node, '\t');
 	out += '}\n';
+	return out;
+}
+
+/** A serde-tagged enum, as a discriminated union of its branches. */
+function emitUnion(name: string, node: ISchemaNode): string {
+	let out = docComment(node.description, '');
+	out += `export type ${typeName(name)} =\n`;
+	out += (node.oneOf ?? [])
+		.map(branch => `${docComment(branch.description, '\t')}\t| {\n${emitMembers(branch, '\t\t')}\t}`)
+		.join('\n');
+	out += ';\n';
 	return out;
 }
 
@@ -164,7 +190,11 @@ const blocks = Object.keys(definitions)
 	.sort()
 	.map(name => {
 		const node = definitions[name];
-		return kinds.get(name) === 'enum' ? emitEnum(name, node) : emitInterface(name, node);
+		switch (kinds.get(name)) {
+			case 'enum': return emitEnum(name, node);
+			case 'union': return emitUnion(name, node);
+			default: return emitInterface(name, node);
+		}
 	});
 
 fs.writeFileSync(outPath, `${header}\n${blocks.join('\n')}`, 'utf8');

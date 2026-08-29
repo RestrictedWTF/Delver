@@ -1,3 +1,10 @@
+//! Command-line entry point for the Delver file provider.
+//!
+//! The mapping exemption lives in the library crate; this binary only wires up
+//! transports, so it forbids `unsafe` outright.
+
+#![forbid(unsafe_code)]
+
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;

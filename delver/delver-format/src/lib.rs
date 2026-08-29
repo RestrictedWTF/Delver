@@ -16,6 +16,8 @@
 
 mod pe;
 
+use object::pe::{IMAGE_SUBSYSTEM_NATIVE, IMAGE_SUBSYSTEM_UNKNOWN, IMAGE_SUBSYSTEM_WINDOWS_CUI, IMAGE_SUBSYSTEM_WINDOWS_GUI};
+
 pub use pe::parse_pe;
 
 /// Parsed image metadata, extracted once when the image is opened.
@@ -24,7 +26,18 @@ pub struct ParsedImage {
 	/// Architecture string, e.g. "X86_64".
 	pub arch: String,
 	/// Entry point as an RVA. Zero when the image has no entry point.
+	///
+	/// For a linked executable this is the C runtime's startup stub, not the
+	/// `main` the analyst is looking for: the CRT initializes and only then
+	/// calls user code. Naming which is which is `delver-analysis`'s job; this
+	/// field is only the address the image itself declares.
 	pub entry: u64,
+	/// Windows subsystem the image declares.
+	///
+	/// Exact, straight out of the optional header, and the cheapest signal there
+	/// is for what the user entry point should look like: a console image is
+	/// entered through `main`/`wmain`, a GUI image through `WinMain`/`wWinMain`.
+	pub subsystem: Subsystem,
 	/// Preferred image base.
 	pub image_base: u64,
 	/// Loadable sections.
@@ -39,6 +52,147 @@ pub struct ParsedImage {
 	pub relocations: Vec<BaseRelocation>,
 	/// TLS directory, when present.
 	pub tls: Option<TlsInfo>,
+	/// What the parse could not deliver in full.
+	///
+	/// Read this before reading any list above. An empty list means "the image
+	/// has none of these" **only** when the matching signal here is clear.
+	pub completeness: ParseCompleteness,
+}
+
+/// Windows subsystem an image declares in its optional header.
+///
+/// Only the values that change how the image is entered are named. Everything
+/// else is [`Subsystem::Other`] carrying the raw value rather than a guess:
+/// a caller deciding what an entry point should look like must be able to tell
+/// "this is a console program" from "this is something I was not taught about",
+/// and a catch-all that silently read as `Console` would erase that difference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Subsystem {
+	/// `IMAGE_SUBSYSTEM_WINDOWS_CUI` — entered through `main` or `wmain`.
+	Console,
+	/// `IMAGE_SUBSYSTEM_WINDOWS_GUI` — entered through `WinMain` or `wWinMain`.
+	Gui,
+	/// A native or driver image. It has no C runtime entry of either family.
+	Native,
+	/// Anything else, including a value this build does not recognize.
+	Other(u16),
+}
+
+impl Default for Subsystem {
+	/// An image nothing has parsed yet declares nothing, which is `Unknown` —
+	/// not `Console`, which would be a claim.
+	fn default() -> Self {
+		Self::Other(IMAGE_SUBSYSTEM_UNKNOWN)
+	}
+}
+
+impl Subsystem {
+	/// Reads the optional header value.
+	fn from_value(value: u16) -> Self {
+		match value {
+			IMAGE_SUBSYSTEM_WINDOWS_GUI => Self::Gui,
+			IMAGE_SUBSYSTEM_WINDOWS_CUI => Self::Console,
+			IMAGE_SUBSYSTEM_NATIVE => Self::Native,
+			other => Self::Other(other),
+		}
+	}
+}
+
+/// What a parse could not deliver in full.
+///
+/// Every field answers a question the lists on [`ParsedImage`] cannot answer
+/// themselves. An empty `imports` is either "this sample imports nothing" — a
+/// strong claim about a binary, and a rare one — or "the import directory is
+/// malformed and the parse gave up". Those must never look alike: reporting the
+/// second as the first tells an analyst that a packed sample calls no APIs.
+///
+/// This is the format layer's version of the rule `StringScan::truncated`
+/// already states one layer up. A cap is a real defence — a hostile file must
+/// not be able to turn parsing into an allocation attack — but a bounded result
+/// that does not admit it is worse than no result at all.
+///
+/// Two signals, kept apart on purpose:
+///
+/// * `*_failed` — the directory is present but could not be read to the end.
+///   The matching list holds whatever was recovered before the parse stopped,
+///   and there may be more.
+/// * `*_truncated` — the directory parsed cleanly, but one of the parser's
+///   caps stopped the walk. The matching `*_total` says how many there were,
+///   recorded wherever counting the rest costs one linear pass and no
+///   allocation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ParseCompleteness {
+	/// The import directory is present but could not be parsed to the end.
+	///
+	/// [`ParsedImage::imports`] then holds only what was recovered first. It is
+	/// not the image's import list and must never be presented as one.
+	pub imports_failed: bool,
+	/// Whether modules were dropped at the module cap.
+	pub imports_truncated: bool,
+	/// Import descriptors present before the cap was applied.
+	pub import_module_total: usize,
+	/// The export directory is present but could not be parsed.
+	pub exports_failed: bool,
+	/// Whether exports were dropped at the export cap.
+	pub exports_truncated: bool,
+	/// Exports present before the cap was applied.
+	pub export_total: usize,
+	/// The exception directory is present but could not be read whole.
+	///
+	/// Either its bytes are not mapped by any section, or its declared size
+	/// runs past the data backing it, or that size is not a whole number of
+	/// `RUNTIME_FUNCTION` entries. Function starts are missing in every case,
+	/// and on x64 those are the compiler-emitted ones.
+	pub exception_directory_failed: bool,
+	/// Whether exception-directory seeds were dropped at the seed cap.
+	///
+	/// Names its source rather than [`ParsedImage::function_seeds`], which is a
+	/// merge of several sources and so cannot carry one total.
+	pub function_seeds_truncated: bool,
+	/// The relocation directory is present but could not be parsed to the end.
+	///
+	/// An empty relocation list reads as "this image cannot be rebased", so a
+	/// swallowed failure here is a claim about the sample's behaviour under
+	/// ASLR.
+	pub relocations_failed: bool,
+	/// Whether relocation targets were dropped at the relocation cap.
+	pub relocations_truncated: bool,
+	/// Relocation targets of a recognized width present before the cap.
+	pub relocation_total: usize,
+	/// The TLS directory is present but could not be parsed.
+	///
+	/// [`ParsedImage::tls`] is then `None` for a reason that is not "the image
+	/// has no TLS directory" — and TLS callbacks run before the entry point, so
+	/// anti-analysis code hides there precisely because it is easy to miss.
+	pub tls_failed: bool,
+	/// At least one section header carries a name that could not be decoded.
+	///
+	/// Those sections report an empty name, which is not the name they have.
+	pub section_names_unreadable: bool,
+}
+
+impl ParseCompleteness {
+	/// Whether any directory failed to parse.
+	pub fn any_failed(&self) -> bool {
+		self.imports_failed
+			|| self.exports_failed
+			|| self.exception_directory_failed
+			|| self.relocations_failed
+			|| self.tls_failed
+			|| self.section_names_unreadable
+	}
+
+	/// Whether any image-level cap dropped results.
+	///
+	/// Per-module symbol caps live on [`ImportedModule::symbols_truncated`] and
+	/// the TLS callback cap on [`TlsInfo::callbacks_truncated`]; use
+	/// [`ParsedImage::is_fully_parsed`] to account for all of them at once.
+	pub fn any_truncated(&self) -> bool {
+		self.imports_truncated
+			|| self.exports_truncated
+			|| self.function_seeds_truncated
+			|| self.relocations_truncated
+	}
 }
 
 /// One PE base-relocation field that must change when the image is rebased.
@@ -51,6 +205,39 @@ pub struct BaseRelocation {
 }
 
 impl ParsedImage {
+	/// Whether the import directory and every retained module parsed completely.
+	///
+	/// This is narrower than [`Self::is_fully_parsed`]: call-graph consumers use
+	/// it to explain when a missing import identity may be parser fallout rather
+	/// than a genuinely opaque indirect call.
+	pub fn imports_fully_parsed(&self) -> bool {
+		!self.completeness.imports_failed
+			&& !self.completeness.imports_truncated
+			&& self.imports.iter().all(|module| {
+				!module.name_unreadable
+					&& !module.symbols_failed
+					&& !module.symbols_truncated
+					&& module.symbol_total.is_some()
+					&& module.symbols.iter().all(|symbol| !symbol.name_unreadable)
+			})
+	}
+
+	/// Whether every directory parsed to the end with no cap applied.
+	///
+	/// Folds in the per-module and per-TLS signals as well as
+	/// [`ParseCompleteness`], so a consumer that wants one question answered —
+	/// "may I present these lists as the whole truth?" — asks this and nothing
+	/// else.
+	pub fn is_fully_parsed(&self) -> bool {
+		!self.completeness.any_failed()
+			&& !self.completeness.any_truncated()
+			&& self.imports_fully_parsed()
+			&& !self
+				.tls
+				.as_ref()
+				.is_some_and(|t| t.callbacks_failed || t.callbacks_truncated)
+	}
+
 	/// Returns the section containing `rva`, if any.
 	pub fn section_containing(&self, rva: u64) -> Option<&Section> {
 		self.sections
@@ -166,16 +353,52 @@ impl Section {
 }
 
 /// A module the image imports from.
+///
+/// The signals below are per module on purpose: the symbol cap is applied per
+/// module, and one unreadable thunk array must not cast doubt on the other four
+/// thousand modules that parsed cleanly.
 #[derive(Debug, Clone)]
 pub struct ImportedModule {
 	/// Module name as written in the import descriptor, e.g. "KERNEL32.dll".
+	///
+	/// Empty when `name_unreadable` is set — check that before showing it.
 	pub name: String,
 	/// Symbols imported from this module.
 	pub symbols: Vec<ImportedSymbol>,
+	/// Total symbols in this module before the return cap was applied.
+	///
+	/// Absent when the thunk walk failed, because the recovered prefix is not a
+	/// true total and must not be presented as one.
+	pub symbol_total: Option<usize>,
+	/// Whether the descriptor's name string could not be read.
+	///
+	/// A module rendered as `""` is not a module named `""`.
+	pub name_unreadable: bool,
+	/// Whether the symbol list is incomplete because reading it failed.
+	///
+	/// Either the thunk array could not be located at all — in which case
+	/// `symbols` is empty and this is emphatically not a module the image
+	/// imports nothing from — or the walk hit an error partway and stopped.
+	pub symbols_failed: bool,
+	/// Whether symbols were dropped at the per-module symbol cap.
+	pub symbols_truncated: bool,
+}
+
+impl Default for ImportedModule {
+	fn default() -> Self {
+		Self {
+			name: String::new(),
+			symbols: Vec::new(),
+			symbol_total: Some(0),
+			name_unreadable: false,
+			symbols_failed: false,
+			symbols_truncated: false,
+		}
+	}
 }
 
 /// A single imported symbol.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ImportedSymbol {
 	/// Symbol name, absent for imports by ordinal.
 	pub name: Option<String>,
@@ -184,6 +407,12 @@ pub struct ImportedSymbol {
 	/// RVA of the import address table slot the loader writes the resolved
 	/// address into. This is the address a call site indirects through.
 	pub iat_rva: u64,
+	/// Whether the hint/name entry this thunk points at could not be read.
+	///
+	/// Both `name` and `ordinal` are then `None`, which no real import is. The
+	/// slot exists and the call site indirecting through it is real; only the
+	/// symbol's identity is unknown.
+	pub name_unreadable: bool,
 }
 
 /// A single exported symbol.
@@ -251,6 +480,15 @@ pub struct TlsInfo {
 	pub raw_data_size: u64,
 	/// TLS callback RVAs, in the order the loader invokes them.
 	pub callbacks: Vec<u64>,
+	/// Whether the directory names a callback array that could not be read.
+	///
+	/// `callbacks` is then empty for a reason that is not "this image has no
+	/// TLS callbacks".
+	pub callbacks_failed: bool,
+	/// Whether callbacks were dropped at the callback cap.
+	pub callbacks_truncated: bool,
+	/// Callbacks present before the cap was applied.
+	pub callback_total: usize,
 }
 
 #[cfg(test)]
@@ -296,6 +534,49 @@ mod tests {
 		let file = vec![0x00, 0x00, 0x00, 0x00, b'a', b'b', b'a', b'b', 0x00, 0x00];
 
 		assert!((section.entropy(&file) - 1.0).abs() < 1e-9);
+	}
+
+	/// Completeness is a property of the whole image, not just of the image-level
+	/// flags. A module that was cut short is an image that was cut short, and a
+	/// consumer asking one question must get the answer that accounts for both.
+	#[test]
+	fn a_per_module_signal_alone_makes_the_image_incomplete() {
+		let mut image = ParsedImage {
+			imports: vec![ImportedModule {
+				name: "KERNEL32.dll".to_string(),
+				..Default::default()
+			}],
+			..Default::default()
+		};
+		let clean = image.is_fully_parsed();
+
+		image.imports[0].symbols_truncated = true;
+
+		assert_eq!((clean, image.is_fully_parsed()), (true, false));
+	}
+
+	/// "No imports" and "the import table could not be read" must never be the
+	/// same value. This is the whole point of the type.
+	#[test]
+	fn an_empty_list_and_a_failed_parse_are_distinguishable() {
+		let nothing_imported = ParsedImage::default();
+		let unreadable = ParsedImage {
+			completeness: ParseCompleteness {
+				imports_failed: true,
+				..Default::default()
+			},
+			..Default::default()
+		};
+
+		assert_eq!(
+			(
+				nothing_imported.imports.is_empty(),
+				nothing_imported.is_fully_parsed(),
+				unreadable.imports.is_empty(),
+				unreadable.is_fully_parsed()
+			),
+			(true, true, true, false)
+		);
 	}
 
 	#[test]

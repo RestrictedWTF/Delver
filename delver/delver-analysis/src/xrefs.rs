@@ -77,6 +77,22 @@ impl XrefTable {
 		&self.by_to[start..end]
 	}
 
+	/// References made *by* every instruction in the half-open range
+	/// `[start, end)`, ordered by source address.
+	///
+	/// This is how a function's outgoing edges are found. Scanning
+	/// [`Self::all`] and filtering would work, but at module scale that is
+	/// millions of rows per question, so both bounds come from a binary search
+	/// over the source ordering instead.
+	pub fn range_from(&self, start: u64, end: u64) -> &[Xref] {
+		if end <= start {
+			return &[];
+		}
+		let lo = self.by_from.partition_point(|x| x.from < start);
+		let hi = self.by_from.partition_point(|x| x.from < end);
+		&self.by_from[lo..hi]
+	}
+
 	/// Every reference, ordered by source address.
 	pub fn all(&self) -> &[Xref] {
 		&self.by_from
@@ -121,6 +137,27 @@ mod tests {
 
 		let to_2000: Vec<_> = table.to(0x2000).iter().map(|x| x.from).collect();
 		assert_eq!(to_2000, vec![0x1000, 0x1010]);
+	}
+
+	#[test]
+	fn a_range_scan_returns_only_sources_inside_the_half_open_bounds() {
+		let table = table();
+		assert_eq!(
+			(
+				table
+					.range_from(0x1000, 0x1020)
+					.iter()
+					.map(|x| (x.from, x.to))
+					.collect::<Vec<_>>(),
+				table.range_from(0x1020, 0x1020).len(),
+				table.range_from(0x1021, 0x1000).len(),
+			),
+			(
+				vec![(0x1000, 0x2000), (0x1000, 0x3000), (0x1010, 0x2000)],
+				0,
+				0,
+			)
+		);
 	}
 
 	#[test]

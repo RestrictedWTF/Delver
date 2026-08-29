@@ -1,4 +1,11 @@
 //! Windows current-user-only directory creation and ACL auditing.
+//!
+//! Like the named-pipe listener this module exists because Win32 security is
+//! the only way to restrict an object to the current user's SID, and no crate
+//! in the dependency tree wraps it safely. It follows the same terms ADR 0003
+//! set for `listener_windows`: the crate-level `deny(unsafe_code)` is lifted
+//! only here, every call is an FFI call whose preconditions are argued at the
+//! call site, and no unsafe code touches bytes read off a transport.
 
 #![allow(unsafe_code)]
 
@@ -39,9 +46,12 @@ pub(super) fn ensure(chain: &[PathBuf]) -> Result<(), PrivateDirectoryError> {
 	let user_sid = current_user_sid()?;
 	for directory in chain {
 		let wide = wide_path(directory);
+		// SAFETY: `wide` outlives the call and `wide_path` NUL-terminates it.
 		let attributes = unsafe { GetFileAttributesW(wide.as_ptr()) };
 		if attributes == INVALID_FILE_ATTRIBUTES {
 			let security = create_directory_security(user_sid.as_sid())?;
+			// SAFETY: both pointers are to live locals that outlive the call, and
+			// `security` owns the descriptor and ACL its attributes point at.
 			let created =
 				unsafe { CreateDirectoryW(wide.as_ptr(), ptr::addr_of!(security.attributes)) };
 			if created == FALSE {
@@ -60,6 +70,8 @@ pub(super) fn ensure(chain: &[PathBuf]) -> Result<(), PrivateDirectoryError> {
 }
 
 fn audit_directory(path: &[u16], user_sid: PSID) -> Result<(), PrivateDirectoryError> {
+	// SAFETY: `path` is a NUL-terminated wide string that outlives the call and
+	// the optional-pointer arguments are passed as null.
 	let handle = unsafe {
 		CreateFileW(
 			path.as_ptr(),
@@ -76,6 +88,8 @@ fn audit_directory(path: &[u16], user_sid: PSID) -> Result<(), PrivateDirectoryE
 	}
 	let handle = OwnedHandle(handle);
 	let mut file_information = BY_HANDLE_FILE_INFORMATION::default();
+	// SAFETY: `handle` is open for the call and the output struct is a live local
+	// of exactly the type the API writes.
 	if unsafe { GetFileInformationByHandle(handle.0, &mut file_information) } == FALSE {
 		return Err(last_error("reading private directory attributes"));
 	}
@@ -90,6 +104,9 @@ fn audit_directory(path: &[u16], user_sid: PSID) -> Result<(), PrivateDirectoryE
 	let mut owner: PSID = ptr::null_mut();
 	let mut dacl: *mut ACL = ptr::null_mut();
 	let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+	// SAFETY: `handle` is open, each out-pointer addresses a live local, and the
+	// unrequested outputs are passed as null. On success the descriptor is a
+	// `LocalAlloc` block, taken over by `LocalAllocation` immediately below.
 	let status = unsafe {
 		GetSecurityInfo(
 			handle.0,
@@ -109,6 +126,9 @@ fn audit_directory(path: &[u16], user_sid: PSID) -> Result<(), PrivateDirectoryE
 			status
 		)));
 	}
+	// SAFETY: the null checks run first, and short-circuiting means the SID and
+	// ACL pointers reach the API only once `GetSecurityInfo` has populated them;
+	// they stay valid while `descriptor` owns the enclosing block.
 	if owner.is_null()
 		|| dacl.is_null()
 		|| unsafe { IsValidSid(owner) } == FALSE
@@ -122,6 +142,8 @@ fn audit_directory(path: &[u16], user_sid: PSID) -> Result<(), PrivateDirectoryE
 
 	let mut control = 0_u16;
 	let mut revision = 0_u32;
+	// SAFETY: `descriptor` owns a descriptor the API validated, and both outputs
+	// are live locals of the expected width.
 	if unsafe { GetSecurityDescriptorControl(descriptor.0 as _, &mut control, &mut revision) }
 		== FALSE
 		|| control & SE_DACL_PROTECTED == 0
@@ -132,6 +154,8 @@ fn audit_directory(path: &[u16], user_sid: PSID) -> Result<(), PrivateDirectoryE
 	}
 
 	let mut information = ACL_SIZE_INFORMATION::default();
+	// SAFETY: `dacl` was validated by `IsValidAcl` above, and the output buffer is
+	// a live `ACL_SIZE_INFORMATION` described by its own `size_of`.
 	if unsafe {
 		GetAclInformation(
 			dacl,
@@ -148,16 +172,23 @@ fn audit_directory(path: &[u16], user_sid: PSID) -> Result<(), PrivateDirectoryE
 	}
 
 	let mut ace_pointer: *mut c_void = ptr::null_mut();
+	// SAFETY: `dacl` is a validated ACL with exactly one ACE, so index 0 exists,
+	// and the out-pointer addresses a live local.
 	if unsafe { GetAce(dacl, 0, ptr::addr_of_mut!(ace_pointer)) } == FALSE || ace_pointer.is_null()
 	{
 		return Err(last_error("reading private directory access rule"));
 	}
+	// SAFETY: `GetAce` succeeded and returned a non-null pointer into the ACL
+	// `descriptor` still owns. The type is only assumed here; `AceType` is
+	// checked below before any field beyond the common header is trusted.
 	let ace = unsafe { &*(ace_pointer as *const ACCESS_ALLOWED_ACE) };
 	let required_flags = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
 	let ace_sid = ptr::addr_of!(ace.SidStart) as PSID;
 	if ace.Header.AceType != ACCESS_ALLOWED_ACE_TYPE as u8
 		|| ace.Header.AceFlags as u32 != required_flags
 		|| ace.Mask != FILE_ALL_ACCESS
+		// SAFETY: reached only once the ACE is confirmed to be an access-allowed
+		// ACE, so `SidStart` begins a SID inside the ACL that is still alive.
 		|| unsafe { EqualSid(ace_sid, user_sid) } == FALSE
 	{
 		return Err(PrivateDirectoryError::new(
@@ -174,6 +205,15 @@ struct DirectorySecurity {
 }
 
 fn create_directory_security(user_sid: PSID) -> Result<DirectorySecurity, PrivateDirectoryError> {
+	// SAFETY: every allocation is null-checked before use and is owned by a
+	// `LocalAllocation` from the moment it is created, so no pointer outlives its
+	// block. `user_sid` comes from `current_user_sid` and is checked by
+	// `IsValidSid` before its length is read. The ACL is sized as the `ACL`
+	// header, plus the fixed 8 bytes of an access-allowed ACE ahead of its
+	// `SidStart` placeholder, plus the SID — exactly what
+	// `AddAccessAllowedAceEx` writes into it. The returned
+	// `DirectorySecurity` keeps the descriptor and ACL alive for as long as the
+	// `SECURITY_ATTRIBUTES` that point at them.
 	unsafe {
 		let descriptor = LocalAllocation(LocalAlloc(LPTR, 256));
 		if descriptor.0.is_null() {
@@ -237,6 +277,12 @@ fn create_directory_security(user_sid: PSID) -> Result<DirectorySecurity, Privat
 }
 
 fn current_user_sid() -> Result<LocalAllocation, PrivateDirectoryError> {
+	// SAFETY: the token handle and both allocations are owned by RAII wrappers
+	// and null-checked before use. `GetTokenInformation` is called first with a
+	// null buffer purely to learn the required size, and the `TOKEN_USER` cast is
+	// only performed on a buffer the same call then filled with `TokenUser` data.
+	// The SID is copied out with `CopySid` so the result does not borrow from the
+	// token buffer, which is freed on return.
 	unsafe {
 		let mut token: HANDLE = ptr::null_mut();
 		if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == FALSE {
@@ -284,6 +330,9 @@ impl LocalAllocation {
 impl Drop for LocalAllocation {
 	fn drop(&mut self) {
 		if !self.0.is_null() {
+			// SAFETY: the pointer came from `LocalAlloc` or a Win32 call
+			// documented to return `LocalFree`-able memory, is non-null, and is
+			// freed exactly once because `LocalAllocation` owns it.
 			unsafe {
 				LocalFree(self.0);
 			}
@@ -296,6 +345,8 @@ struct OwnedHandle(HANDLE);
 impl Drop for OwnedHandle {
 	fn drop(&mut self) {
 		if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
+			// SAFETY: the handle came from a successful Win32 open, is owned
+			// solely by this wrapper, and is closed exactly once.
 			unsafe {
 				CloseHandle(self.0);
 			}

@@ -1,11 +1,18 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-//! A small, transport-only Model Context Protocol server core.
+//! A small Model Context Protocol server.
 //!
-//! The Delver rendezvous and DTP backend are intentionally outside this crate's
-//! core. Consumers inject a [`ToolBackend`], keeping MCP framing and lifecycle
-//! behavior independently testable.
+//! This root module is transport-only: it owns MCP framing, lifecycle, and
+//! dispatch, and reaches Delver only through the injected [`ToolBackend`], so
+//! protocol behavior stays independently testable. The Delver-specific
+//! rendezvous, bootstrap, and DTP client are siblings rather than dependencies
+//! of it, in [`backend`], [`registry`], and [`root_fingerprint`].
+//!
+//! Every byte this crate handles arrives over a transport, so per CLAUDE.md
+//! invariant 13 it forbids `unsafe` outright.
+
+#![forbid(unsafe_code)]
 
 pub mod backend;
 pub mod registry;
@@ -678,22 +685,27 @@ where
 		if cancellation.is_cancelled() || !was_active {
 			return Ok(());
 		}
+		// Every `BackendError` message is written to be safe to return to the
+		// client, so the message survives whichever arm the failure takes. A
+		// non-tool request — `tools/list` — used to be flattened to a bare
+		// "Internal error", which turned the one class of failure the caller can
+		// actually fix, a root that does not match any published window, into an
+		// internal fault and sent them looking in the wrong place.
 		match result {
 			Ok(result) => output.write_message(&success_response(id.value, result)),
-			Err(error) if tool_error && error.kind == BackendErrorKind::InvalidParams => output
-				.write_message(&error_response(
-					id.value,
-					INVALID_PARAMS,
-					&error.to_string(),
-				)),
+			Err(error) if error.kind == BackendErrorKind::InvalidParams => output.write_message(
+				&error_response(id.value, INVALID_PARAMS, &error.to_string()),
+			),
 			Err(error) if tool_error => {
 				let result = serde_json::to_value(ToolCallResult::error(error.to_string()))
 					.expect("tool error result is serializable");
 				output.write_message(&success_response(id.value, result))
 			}
-			Err(_) => {
-				output.write_message(&error_response(id.value, INTERNAL_ERROR, "Internal error"))
-			}
+			Err(error) => output.write_message(&error_response(
+				id.value,
+				INTERNAL_ERROR,
+				&error.to_string(),
+			)),
 		}
 	})
 }
@@ -968,6 +980,42 @@ mod tests {
 					"content": [{ "type": "text", "text": "downstream refused the call" }],
 					"isError": true
 				}),
+			)
+		);
+	}
+
+	/// Fails discovery the way an unreachable or mismatched root does.
+	struct UnavailableBackend;
+
+	impl ToolBackend for UnavailableBackend {
+		fn list_tools(&self, _cancellation: CancellationToken) -> Result<Vec<Tool>, BackendError> {
+			Err(BackendError::new(
+				"Delver rendezvous discovery is unavailable.",
+			))
+		}
+
+		fn call_tool(
+			&self,
+			_name: &str,
+			_arguments: &Map<String, Value>,
+			_cancellation: CancellationToken,
+		) -> Result<ToolCallResult, BackendError> {
+			Err(BackendError::invalid_params("Unknown Delver tool."))
+		}
+	}
+
+	#[test]
+	fn non_tool_failures_keep_their_message_instead_of_reading_as_an_internal_fault() {
+		let mut input = initialized_messages(LATEST_PROTOCOL_VERSION);
+		input.push(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} }));
+		let messages = run_session(McpServer::new(UnavailableBackend), input);
+
+		assert_eq!(
+			response(&messages, 2).clone(),
+			error_response(
+				json!(2),
+				INTERNAL_ERROR,
+				"Delver rendezvous discovery is unavailable.",
 			)
 		);
 	}

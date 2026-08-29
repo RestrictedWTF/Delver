@@ -9,10 +9,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use delver_rpc::{connect, Message, Transport, TransportLimits};
-use serde::Deserialize;
+use delver_rpc::{connect_shutdownable, Message, Transport, TransportLimits};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
@@ -88,7 +89,11 @@ impl DelverBackend {
 		let dtp = Arc::new(DtpSession::connect(&credential, cancellation)?);
 		let capabilities = dtp.request("agent/capabilities", json!({}), cancellation)?;
 		let tools = parse_capability_tools(&capabilities)?;
-		let session = Arc::new(ConnectedSession { dtp, tools });
+		let session = Arc::new(ConnectedSession {
+			dtp,
+			tools,
+			project_binding: Mutex::new(ProjectBinding::Unbound),
+		});
 		*cached = Some(Arc::clone(&session));
 		Ok(session)
 	}
@@ -120,14 +125,25 @@ impl ToolBackend for DelverBackend {
 		if !session.tools.iter().any(|tool| tool.name == name) {
 			return Err(BackendError::invalid_params("Unknown Delver tool."));
 		}
+		let expected_project = session.bound_project(&cancellation)?;
 		let response = match session.dtp.request(
 			"agent/invoke",
-			json!({ "capability": name, "args": arguments }),
+			json!({
+				"capability": name,
+				"args": arguments,
+				"expectedProject": expected_project,
+			}),
 			&cancellation,
 		) {
 			Ok(response) => response,
 			Err(error) => {
-				self.invalidate(&session);
+				// A cancelled, timed-out, or rejected request says nothing
+				// about the transport. Only a connection that actually closed
+				// invalidates the cached session; tearing down a healthy one
+				// costs the next call a full rendezvous and bootstrap.
+				if session.dtp.is_closed() {
+					self.invalidate(&session);
+				}
 				return Err(error);
 			}
 		};
@@ -146,6 +162,46 @@ impl Drop for DelverBackend {
 struct ConnectedSession {
 	dtp: Arc<DtpSession>,
 	tools: Vec<Tool>,
+	project_binding: Mutex<ProjectBinding>,
+}
+
+#[derive(Clone)]
+enum ProjectBinding {
+	Unbound,
+	Bound(Option<ProjectPin>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectPin {
+	content_hash: String,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	revision_id: Option<String>,
+}
+
+impl ConnectedSession {
+	fn bound_project(
+		&self,
+		cancellation: &CancellationToken,
+	) -> Result<Option<ProjectPin>, BackendError> {
+		let mut binding = self
+			.project_binding
+			.lock()
+			.map_err(|_| BackendError::new("The Delver connection is unavailable."))?;
+		if let ProjectBinding::Bound(project) = &*binding {
+			return Ok(project.clone());
+		}
+
+		// Bind at the first actual tool call, not at tools/list. MCP clients tend
+		// to discover tools immediately, before the analyst has opened a sample.
+		// Holding this lock makes two concurrent first calls choose one identity.
+		let capabilities = self
+			.dtp
+			.request("agent/capabilities", json!({}), cancellation)?;
+		let project = capability_project(&capabilities)?;
+		*binding = ProjectBinding::Bound(project.clone());
+		Ok(project)
+	}
 }
 
 #[derive(Debug, Deserialize)]
@@ -166,7 +222,7 @@ fn claim_bootstrap(
 	if cancellation.is_cancelled() {
 		return Err(BackendError::new("The Delver request was cancelled."));
 	}
-	let (reader, writer) = connect(&entry.bootstrap_endpoint)
+	let (reader, writer, shutdown) = connect_shutdownable(&entry.bootstrap_endpoint)
 		.map_err(|_| BackendError::new("The Delver bootstrap endpoint is unavailable."))?;
 	let limits = TransportLimits {
 		max_header_bytes: BOOTSTRAP_MAX_HEADER_BYTES,
@@ -204,10 +260,12 @@ fn claim_bootstrap(
 	let deadline = Instant::now() + BOOTSTRAP_RESPONSE_TIMEOUT;
 	loop {
 		if cancellation.is_cancelled() {
+			shutdown();
 			drop(writer);
 			return Err(BackendError::new("The Delver request was cancelled."));
 		}
 		if Instant::now() >= deadline {
+			shutdown();
 			drop(writer);
 			return Err(BackendError::new(
 				"The Delver connection request timed out.",
@@ -264,6 +322,8 @@ fn parse_bootstrap_response(response: &str) -> Result<BootstrapCredential, Backe
 
 struct DtpSession {
 	state: Arc<DtpState>,
+	reader: Mutex<Option<JoinHandle<()>>>,
+	shutdown: Arc<dyn Fn() + Send + Sync>,
 }
 
 struct DtpState {
@@ -278,7 +338,7 @@ impl DtpSession {
 		credential: &BootstrapCredential,
 		cancellation: &CancellationToken,
 	) -> Result<Self, BackendError> {
-		let (reader, writer) = connect(&credential.endpoint)
+		let (reader, writer, shutdown) = connect_shutdownable(&credential.endpoint)
 			.map_err(|_| BackendError::new("The Delver private endpoint is unavailable."))?;
 		let state = Arc::new(DtpState {
 			writer: Mutex::new(Some(writer)),
@@ -286,8 +346,12 @@ impl DtpSession {
 			next_request_id: AtomicU64::new(1),
 			closed: AtomicBool::new(false),
 		});
-		spawn_dtp_reader(reader, Arc::clone(&state));
-		let session = Self { state };
+		let reader = spawn_dtp_reader(reader, Arc::clone(&state));
+		let session = Self {
+			state,
+			reader: Mutex::new(Some(reader)),
+			shutdown,
+		};
 		let initialized = session.request(
 			"initialize",
 			json!({
@@ -336,6 +400,14 @@ impl DtpSession {
 impl Drop for DtpSession {
 	fn drop(&mut self) {
 		self.state.fail_all();
+		(self.shutdown)();
+		let Some(reader) = self.reader.lock().ok().and_then(|mut reader| reader.take()) else {
+			return;
+		};
+		// The transport shutdown callback unblocks the independent reader half,
+		// so this join is deterministic instead of a timed detach that leaks the
+		// thread until the peer happens to close.
+		let _ = reader.join();
 	}
 }
 
@@ -385,7 +457,7 @@ impl DtpState {
 	}
 }
 
-fn spawn_dtp_reader(reader: Box<dyn io::Read + Send>, state: Arc<DtpState>) {
+fn spawn_dtp_reader(reader: Box<dyn io::Read + Send>, state: Arc<DtpState>) -> JoinHandle<()> {
 	std::thread::spawn(move || {
 		let limits = TransportLimits {
 			max_header_bytes: DTP_MAX_HEADER_BYTES,
@@ -407,7 +479,7 @@ fn spawn_dtp_reader(reader: Box<dyn io::Read + Send>, state: Arc<DtpState>) {
 			}
 		}
 		state.fail_all();
-	});
+	})
 }
 
 fn parse_dtp_response(message: &str) -> Option<(u64, Result<Value, String>)> {
@@ -535,6 +607,46 @@ fn parse_capability_tools(value: &Value) -> Result<Vec<Tool>, BackendError> {
 		));
 	}
 	Ok(tools)
+}
+
+fn capability_project(value: &Value) -> Result<Option<ProjectPin>, BackendError> {
+	let gateway = value
+		.as_object()
+		.filter(|gateway| {
+			gateway.get("schemaVersion").and_then(Value::as_u64) == Some(1)
+				&& gateway.get("ok").and_then(Value::as_bool) == Some(true)
+		})
+		.ok_or_else(|| BackendError::new("The Delver capability response is invalid."))?;
+	let result = gateway
+		.get("result")
+		.and_then(Value::as_object)
+		.ok_or_else(|| BackendError::new("The Delver capability response is invalid."))?;
+	let Some(project) = result.get("project") else {
+		return Ok(None);
+	};
+	let project = project
+		.as_object()
+		.ok_or_else(|| BackendError::new("The Delver project identity is invalid."))?;
+	let content_hash = project
+		.get("contentHash")
+		.and_then(Value::as_str)
+		.filter(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+		.ok_or_else(|| BackendError::new("The Delver project identity is invalid."))?
+		.to_ascii_lowercase();
+	let revision_id = match project.get("revisionId") {
+		None => None,
+		Some(value) => Some(
+			value
+				.as_str()
+				.filter(|revision| !revision.is_empty() && revision.len() <= 256)
+				.ok_or_else(|| BackendError::new("The Delver project identity is invalid."))?
+				.to_owned(),
+		),
+	};
+	Ok(Some(ProjectPin {
+		content_hash,
+		revision_id,
+	}))
 }
 
 fn capability_kinds(result: Option<&Value>) -> Result<HashMap<String, String>, BackendError> {
@@ -742,6 +854,40 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_the_project_identity_used_to_bind_tool_calls() {
+		let hash = "A".repeat(64);
+		let response = json!({
+			"schemaVersion": 1,
+			"ok": true,
+			"result": {
+				"project": {
+					"contentHash": hash,
+					"revisionId": "revision-7",
+					"projectPath": "ignored.delverdb"
+				},
+				"data": {}
+			}
+		});
+
+		assert_eq!(
+			capability_project(&response).expect("parse project"),
+			Some(ProjectPin {
+				content_hash: "a".repeat(64),
+				revision_id: Some("revision-7".to_owned()),
+			}),
+		);
+		assert_eq!(
+			capability_project(&json!({
+				"schemaVersion": 1,
+				"ok": true,
+				"result": { "data": {} }
+			}))
+			.expect("parse no project"),
+			None,
+		);
+	}
+
+	#[test]
 	fn maps_gateway_success_and_failure_to_mcp_tool_results() {
 		let success = gateway_tool_result(json!({
 			"schemaVersion": 1,
@@ -780,6 +926,65 @@ mod tests {
 		assert!(parse_bootstrap_response(r#"{"id":1,"result":{"protocolVersion":1,"endpoint":"tcp://127.0.0.1","leaseId":"abcdefghijklmnop","token":"secret","expiresAt":9007199254740991}}"#).is_err());
 		assert!(!is_safe_display_name("Delver\nMCP"));
 		assert!(!is_safe_display_name("Delver\u{202e}MCP"));
+	}
+
+	fn test_state() -> Arc<DtpState> {
+		Arc::new(DtpState {
+			writer: Mutex::new(Some(Box::new(io::sink()))),
+			pending: Mutex::new(HashMap::new()),
+			next_request_id: AtomicU64::new(1),
+			closed: AtomicBool::new(false),
+		})
+	}
+
+	#[test]
+	fn a_cancelled_request_leaves_the_session_usable() {
+		let state = test_state();
+		let (sender, receiver) = mpsc::sync_channel(1);
+		state.pending.lock().unwrap().insert(1, sender);
+		let cancellation = CancellationToken::default();
+		cancellation.cancel();
+
+		let error = wait_for_dtp_response(&state, 1, receiver, &cancellation).unwrap_err();
+
+		// The connection stays open and the pending slot is reclaimed, so
+		// `call_tool` keeps the cached session instead of invalidating it.
+		assert_eq!(
+			(
+				error.to_string(),
+				state.closed.load(Ordering::Acquire),
+				state.pending.lock().unwrap().len()
+			),
+			("The Delver request was cancelled.".to_owned(), false, 0)
+		);
+	}
+
+	#[test]
+	fn dropping_a_session_joins_a_finished_reader() {
+		let state = test_state();
+		let reader = spawn_dtp_reader(Box::new(io::empty()), Arc::clone(&state));
+		let session = DtpSession {
+			state: Arc::clone(&state),
+			reader: Mutex::new(Some(reader)),
+			shutdown: Arc::new(|| {}),
+		};
+
+		let deadline = Instant::now() + Duration::from_secs(5);
+		while !session.is_closed() && Instant::now() < deadline {
+			std::thread::sleep(DTP_POLL_INTERVAL);
+		}
+		let retained_and_finished = session
+			.reader
+			.lock()
+			.unwrap()
+			.as_ref()
+			.is_some_and(JoinHandle::is_finished);
+		drop(session);
+
+		assert_eq!(
+			(retained_and_finished, Arc::strong_count(&state)),
+			(true, 1)
+		);
 	}
 
 	#[test]

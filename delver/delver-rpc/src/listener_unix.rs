@@ -1,4 +1,11 @@
 //! Unix domain socket listener implementation.
+//!
+//! Binding and accepting need no unsafe code; peer authentication does, because
+//! `SO_PEERCRED` and `getpeereid` have no safe wrapper in the dependency tree.
+//! The exemption is granted on the same terms ADR 0003 set for
+//! `listener_windows`: it is confined to `libc` calls that read the kernel's
+//! own view of the connected process, each argued at its call site, and no
+//! unsafe code touches bytes read off the socket.
 
 #![allow(unsafe_code)]
 
@@ -10,8 +17,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::listener::{
-	ensure_private_parent, DuplexStream, Endpoint, ListenerError, PeerAuthenticatedDuplexStream,
-	PeerIdentity,
+	ensure_private_parent, Endpoint, ListenerError, PeerAuthenticatedDuplexStream, PeerIdentity,
+	ShutdownableDuplexStream,
 };
 
 pub(super) fn effective_user_id() -> u32 {
@@ -25,7 +32,9 @@ pub(crate) struct UnixListenerImpl {
 }
 
 impl UnixListenerImpl {
-	pub(crate) fn connect(endpoint: &Endpoint) -> Result<DuplexStream, ListenerError> {
+	pub(crate) fn connect_shutdownable(
+		endpoint: &Endpoint,
+	) -> Result<ShutdownableDuplexStream, ListenerError> {
 		use std::os::unix::net::UnixStream;
 
 		let Endpoint::UnixSocket(path) = endpoint else {
@@ -39,7 +48,16 @@ impl UnixListenerImpl {
 		let read = stream
 			.try_clone()
 			.map_err(|e| ListenerError::io(e, "cloning unix stream"))?;
-		Ok((Box::new(read), Box::new(stream)))
+		let shutdown_stream = stream
+			.try_clone()
+			.map_err(|e| ListenerError::io(e, "cloning unix stream for shutdown"))?;
+		Ok((
+			Box::new(read),
+			Box::new(stream),
+			Arc::new(move || {
+				let _ = shutdown_stream.shutdown(Shutdown::Both);
+			}),
+		))
 	}
 
 	pub(crate) fn bind(endpoint: &Endpoint) -> Result<Self, ListenerError> {

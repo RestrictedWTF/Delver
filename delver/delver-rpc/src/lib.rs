@@ -19,7 +19,9 @@ mod listener_windows;
 
 pub use client::Client;
 pub use framed::{Message, Transport, TransportLimits};
-pub use listener::{connect, Endpoint, Listener, ListenerError, PeerIdentity};
+pub use listener::{
+	connect, connect_shutdownable, Endpoint, Listener, ListenerError, PeerIdentity,
+};
 pub use private_directory::{ensure_private_directory, PrivateDirectoryError};
 pub use server::Server;
 

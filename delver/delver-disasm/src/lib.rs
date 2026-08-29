@@ -12,16 +12,27 @@
 //!   say so ([`Disassembler::decode_facts_at`]) rather than paying for text it
 //!   discards: whole-image analysis decodes millions of instructions and
 //!   displays none of them.
-//! - **Decoding never starts mid-instruction on its own authority.** x86 is
+//! - **Every decode starts from an anchor the caller vouches for.** x86 is
 //!   variable-length and not self-synchronising, so decoding from an arbitrary
-//!   offset yields plausible garbage. Callers supply an anchor they vouch for.
+//!   offset yields plausible garbage. Nothing in this crate can tell an anchor
+//!   from an offset — encoded bytes carry no boundary marks — so it does not
+//!   claim to check one. The obligation sits with the caller and is discharged
+//!   upstream: an anchor is a function seed, a section start, the end of an
+//!   instruction this crate just decoded, or an address that
+//!   `delver-analysis`'s `InstructionIndex` already records as a boundary. An
+//!   address arriving from a user or the wire is resolved through that index
+//!   (`ListingIndex::row_containing`) *before* it reaches a decode. The linear
+//!   sweep is the one deliberate exception, and it marks everything it finds as
+//!   a guess.
 //!
 //! All addresses are **RVAs**, matching `delver-format`.
 
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
-use iced_x86::{ConstantOffsets, Decoder, DecoderOptions, Formatter, Instruction, IntelFormatter};
+use iced_x86::{
+	ConstantOffsets, Decoder, DecoderOptions, Formatter, Instruction, IntelFormatter, OpKind,
+};
 
 /// Target architecture width. No default — a 32-bit image decoded as 64-bit
 /// produces confident nonsense, which is the worst failure mode available.
@@ -62,9 +73,13 @@ pub enum FlowKind {
 	ConditionalJump,
 	/// Direct call.
 	Call,
-	/// Branch or call through a register or memory operand. The target is not
-	/// statically known from this instruction alone.
-	Indirect,
+	/// Call through a register or memory operand. The callee is not statically
+	/// known from this instruction alone, but control returns to the following
+	/// address just as it does for a direct call.
+	IndirectCall,
+	/// Branch through a register or memory operand — a jump-table dispatch or a
+	/// tail call through a thunk. Neither the target nor a fallthrough is known.
+	IndirectBranch,
 	/// Returns from the current function.
 	Return,
 	/// Interrupt or syscall.
@@ -82,13 +97,27 @@ impl FlowKind {
 	pub fn falls_through(self) -> bool {
 		matches!(
 			self,
-			Self::Sequential | Self::ConditionalJump | Self::Call | Self::Interrupt
+			Self::Sequential
+				| Self::ConditionalJump
+				| Self::Call | Self::IndirectCall
+				| Self::Interrupt
 		)
 	}
 
 	/// Whether this instruction ends a basic block.
+	///
+	/// A call does not end a block, direct or indirect: control comes back to
+	/// the following instruction. Only [`Self::ConditionalJump`] both ends a
+	/// block and falls through; every other variant answers "does the next
+	/// address belong to this block?" the same way here and in
+	/// [`Self::falls_through`]. They must not drift apart — `control_flow`
+	/// builds blocks from one and the corpus snapshot from the other, and two
+	/// disagreeing answers would cut the same function into different blocks.
 	pub fn terminates_block(self) -> bool {
-		!matches!(self, Self::Sequential | Self::Call | Self::Interrupt)
+		!matches!(
+			self,
+			Self::Sequential | Self::Call | Self::IndirectCall | Self::Interrupt
+		)
 	}
 }
 
@@ -185,20 +214,6 @@ impl DecodedInstruction {
 	}
 }
 
-/// Why a decode request could not be served as asked.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DecodeError {
-	/// The requested address is not an instruction boundary the caller vouched
-	/// for. Carries the supplied anchor so the caller can decide whether to
-	/// decode forward from it, rather than being handed a guess.
-	UnanchoredAddress {
-		/// The address that was requested.
-		requested: u64,
-		/// The nearest anchor at or below it.
-		anchor: u64,
-	},
-}
-
 /// Decodes instructions from a byte window.
 pub struct Disassembler {
 	bitness: Bitness,
@@ -218,8 +233,10 @@ impl Disassembler {
 	/// Decodes forward from `anchor_rva` until `bytes` is exhausted.
 	///
 	/// `bytes` must begin exactly at `anchor_rva`, and `anchor_rva` must be a
-	/// real instruction boundary — a function seed, a section start, or the end
-	/// of a previously decoded instruction. See [`Self::decode_at`].
+	/// real instruction boundary — a function seed, a section start, an address
+	/// held by the instruction index, or the end of a previously decoded
+	/// instruction. Nothing here can verify that; see the module docs for who
+	/// owes the guarantee.
 	pub fn decode_from(&self, anchor_rva: u64, bytes: &[u8]) -> Vec<DecodedInstruction> {
 		self.decode_bounded(anchor_rva, bytes, usize::MAX)
 	}
@@ -236,26 +253,6 @@ impl Disassembler {
 		count: usize,
 	) -> Vec<DecodedInstruction> {
 		self.decode_bounded(anchor_rva, bytes, count)
-	}
-
-	/// Decodes a window that starts at `requested_rva`.
-	///
-	/// Succeeds only when `requested_rva` equals `anchor_rva`; otherwise it
-	/// reports [`DecodeError::UnanchoredAddress`] rather than decoding from a
-	/// position it cannot justify.
-	pub fn decode_at(
-		&self,
-		requested_rva: u64,
-		anchor_rva: u64,
-		bytes: &[u8],
-	) -> Result<Vec<DecodedInstruction>, DecodeError> {
-		if requested_rva != anchor_rva {
-			return Err(DecodeError::UnanchoredAddress {
-				requested: requested_rva,
-				anchor: anchor_rva,
-			});
-		}
-		Ok(self.decode_from(anchor_rva, bytes))
 	}
 
 	/// Decodes the structure of the single instruction at `anchor_rva`.
@@ -373,11 +370,16 @@ fn signature_fields(
 /// branch goes.
 fn facts(instruction: &Instruction) -> InstructionFacts {
 	let flow = flow_kind(instruction);
-	let branch_target = match flow {
-		FlowKind::Jump | FlowKind::ConditionalJump | FlowKind::Call => {
-			Some(instruction.near_branch_target())
-		}
-		_ => None,
+	let branch_target = if matches!(
+		flow,
+		FlowKind::Jump | FlowKind::ConditionalJump | FlowKind::Call
+	) && matches!(
+		instruction.op0_kind(),
+		OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64
+	) {
+		Some(instruction.near_branch_target())
+	} else {
+		None
 	};
 	let memory_target = if instruction.is_ip_rel_memory_operand() {
 		Some(instruction.ip_rel_memory_address())
@@ -405,7 +407,8 @@ fn flow_kind(instruction: &Instruction) -> FlowKind {
 		FlowControl::UnconditionalBranch => FlowKind::Jump,
 		FlowControl::ConditionalBranch => FlowKind::ConditionalJump,
 		FlowControl::Call => FlowKind::Call,
-		FlowControl::IndirectBranch | FlowControl::IndirectCall => FlowKind::Indirect,
+		FlowControl::IndirectCall => FlowKind::IndirectCall,
+		FlowControl::IndirectBranch => FlowKind::IndirectBranch,
 		FlowControl::Return => FlowKind::Return,
 		FlowControl::Interrupt => FlowKind::Interrupt,
 		FlowControl::Exception => FlowKind::Invalid,
@@ -457,6 +460,25 @@ mod tests {
 	}
 
 	#[test]
+	fn system_and_far_calls_do_not_invent_a_near_target() {
+		let system =
+			Disassembler::new(Bitness::Bits64).decode_from(0x1000, &[0x0F, 0x05, 0x0F, 0x34]);
+		// CALL FAR 0x9abc:0x12345678. The segmented target cannot be represented
+		// as an RVA and must not collapse to RVA 0.
+		let far_call = Disassembler::new(Bitness::Bits32)
+			.decode_from(0x2000, &[0x9A, 0x78, 0x56, 0x34, 0x12, 0xBC, 0x9A]);
+
+		assert_eq!(
+			system
+				.iter()
+				.map(|instruction| (&*instruction.mnemonic, instruction.branch_target))
+				.collect::<Vec<_>>(),
+			vec![("syscall", None), ("sysenter", None)]
+		);
+		assert_eq!(far_call[0].branch_target, None);
+	}
+
+	#[test]
 	fn resolves_a_rip_relative_memory_target() {
 		// mov rax,[rip+0x10] at 0x2000; 7 bytes, so the target is 0x2017.
 		let bytes = &[0x48, 0x8B, 0x05, 0x10, 0x00, 0x00, 0x00];
@@ -487,6 +509,30 @@ mod tests {
 		assert_eq!(ret.flow, FlowKind::Return);
 		assert!(!ret.flow.falls_through());
 		assert!(ret.flow.terminates_block());
+	}
+
+	#[test]
+	fn indirect_calls_and_indirect_branches_are_classified_apart() {
+		let disasm = Disassembler::new(Bitness::Bits64);
+		// call rax at 0x1000, then jmp rax at 0x1002.
+		let decoded = disasm.decode_from(0x1000, &[0xFF, 0xD0, 0xFF, 0xE0]);
+
+		assert_eq!(
+			decoded
+				.iter()
+				.map(|instruction| (
+					instruction.flow,
+					instruction.flow.falls_through(),
+					instruction.branch_target
+				))
+				.collect::<Vec<_>>(),
+			// An indirect call returns to the following instruction, so descent
+			// must continue past it; an indirect branch never comes back.
+			vec![
+				(FlowKind::IndirectCall, true, None),
+				(FlowKind::IndirectBranch, false, None),
+			]
+		);
 	}
 
 	#[test]
@@ -526,18 +572,30 @@ mod tests {
 	}
 
 	#[test]
-	fn unanchored_address_is_refused_rather_than_guessed() {
+	fn decoding_from_a_mid_instruction_offset_yields_plausible_garbage() {
+		// Why the anchoring rule exists, and why this crate cannot enforce it:
+		// one byte into `mov rax,rbx` decodes cleanly into different, entirely
+		// wrong instructions. Nothing in the bytes marks the boundary, so the
+		// caller has to supply one it can justify.
 		let disasm = Disassembler::new(Bitness::Bits64);
-		let err = disasm
-			.decode_at(0x1001, 0x1000, SIMPLE)
-			.expect_err("decoding mid-instruction must not silently succeed");
+		let anchored = disasm.decode_from(0x1000, SIMPLE);
+		let unanchored = disasm.decode_from(0x1001, &SIMPLE[1..]);
 
+		// Both decode cleanly and neither reports a problem. Only the anchor
+		// distinguishes them, and the anchor is not in the bytes.
 		assert_eq!(
-			err,
-			DecodeError::UnanchoredAddress {
-				requested: 0x1001,
-				anchor: 0x1000
-			}
+			(
+				anchored[0].len,
+				anchored[0].flow,
+				unanchored[0].len,
+				unanchored[0].flow,
+			),
+			(3, FlowKind::Sequential, 2, FlowKind::Sequential),
+		);
+		assert_ne!(
+			anchored[0].text(),
+			unanchored[0].text(),
+			"a mid-instruction decode must not be mistaken for the real one"
 		);
 	}
 

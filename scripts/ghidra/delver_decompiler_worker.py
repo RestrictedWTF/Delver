@@ -29,6 +29,20 @@ RESULT_SCHEMA_VERSION = 1
 DECOMPILE_TIMEOUT_SECONDS = 60
 BACKEND_ID = "ghidra-pyghidra"
 GHIDRA_GENERATED_FUNCTION_PATTERN = re.compile(r"\bFUN_([0-9A-Fa-f]+)\b")
+MAX_SEMANTIC_DECLARATIONS = 10000
+MAX_DECLARATION_CHARACTERS = 2048
+MAX_SEMANTIC_COMPOSITES = 1000
+MAX_COMPOSITE_FIELDS = 1000
+MAX_COMPOSITE_SIZE_BYTES = 1024 * 1024
+COMPOSITE_KINDS = ("struct",)
+IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Each accepted schema version pins its own key set. A sender whose payload does
+# not match the version it claims is out of step with this worker, and guessing
+# which half is right would decompile against a type model nobody authored.
+SEMANTICS_SCHEMA_KEYS = {
+	1: frozenset({"schemaVersion", "dataTypes", "functionPrototypes"}),
+	2: frozenset({"schemaVersion", "dataTypes", "functionPrototypes", "composites"}),
+}
 
 
 class WorkerError(Exception):
@@ -80,6 +94,13 @@ class PyGhidraDriver:
 		self._decomp_interface_type: Any = None
 		self._decompile_options_type: Any = None
 		self._pretty_printer_type: Any = None
+		self._function_signature_parser_type: Any = None
+		self._apply_function_signature_command_type: Any = None
+		self._source_type: Any = None
+		self._data_type_parser_type: Any = None
+		self._allowed_data_types: Any = None
+		self._structure_data_type_type: Any = None
+		self._data_type_conflict_handler: Any = None
 		self._targets: dict[str, Target] = {}
 		self._active_monitors: dict[str, Any] = {}
 		self._monitor_lock = threading.Lock()
@@ -101,7 +122,12 @@ class PyGhidraDriver:
 			with contextlib.redirect_stdout(sys.stderr):
 				pyghidra.start(install_dir=self._ghidra_home)
 				from ghidra.app.decompiler import DecompInterface, DecompileOptions, PrettyPrinter
+				from ghidra.app.cmd.function import ApplyFunctionSignatureCmd
+				from ghidra.app.util.parser import FunctionSignatureParser
 				from ghidra.framework import Application
+				from ghidra.program.model.data import DataTypeConflictHandler, StructureDataType
+				from ghidra.program.model.symbol import SourceType
+				from ghidra.util.data import DataTypeParser
 		except Exception as error:
 			raise WorkerError("backend_unavailable", f"Could not start PyGhidra: {error}") from error
 
@@ -110,6 +136,13 @@ class PyGhidraDriver:
 		self._decomp_interface_type = DecompInterface
 		self._decompile_options_type = DecompileOptions
 		self._pretty_printer_type = PrettyPrinter
+		self._function_signature_parser_type = FunctionSignatureParser
+		self._apply_function_signature_command_type = ApplyFunctionSignatureCmd
+		self._source_type = SourceType
+		self._data_type_parser_type = DataTypeParser
+		self._allowed_data_types = DataTypeParser.AllowedDataTypes
+		self._structure_data_type_type = StructureDataType
+		self._data_type_conflict_handler = DataTypeConflictHandler
 		self._backend_version = str(Application.getApplicationVersion())
 		self._started = True
 
@@ -219,6 +252,7 @@ class PyGhidraDriver:
 	def decompile_function(self, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
 		target_id = required_string(params, "targetId")
 		function_rva = required_rva(params, "functionRva")
+		semantics = required_semantics(params)
 		target = self._targets.get(target_id)
 		if target is None:
 			raise WorkerError("target_not_open", f"Target '{target_id}' is not open.")
@@ -226,11 +260,15 @@ class PyGhidraDriver:
 		monitor = self._pyghidra.task_monitor()
 		with self._monitor_lock:
 			self._active_monitors[request_id] = monitor
+		transaction_id: int | None = None
 		try:
 			recovery_started = time.perf_counter()
 			function_address = target.program.getImageBase().add(function_rva)
 			function = resolve_function(target, function_address, function_rva)
 			function_recovery_ms = elapsed_ms(recovery_started)
+			if semantics["composites"] or semantics["dataTypes"] or semantics["functionPrototypes"]:
+				transaction_id = target.program.startTransaction("Apply Delver semantic interpretation")
+				apply_semantics(self, target, semantics, monitor)
 
 			decompilation_started = time.perf_counter()
 			with contextlib.redirect_stdout(sys.stderr):
@@ -263,6 +301,11 @@ class PyGhidraDriver:
 			}
 			return result
 		finally:
+			if transaction_id is not None:
+				# Accepted interpretation is an input to this decompilation, not a
+				# mutation of the persistent content-hash project. Rolling it back
+				# makes clearing or revising a declaration deterministic next time.
+				target.program.endTransaction(transaction_id, False)
 			with self._monitor_lock:
 				self._active_monitors.pop(request_id, None)
 
@@ -312,6 +355,114 @@ def resolve_function(target: Target, function_address: Any, function_rva: int) -
 			f"Ghidra considers RVA {encode_rva(function_rva)} part of the function at {encode_rva(containing_rva)} instead of a distinct function.",
 		)
 	raise WorkerError("function_not_found", f"Ghidra could not find or create a function at RVA {encode_rva(function_rva)}.")
+
+
+def apply_semantics(driver: PyGhidraDriver, target: Target, semantics: dict[str, list[dict[str, Any]]], monitor: Any) -> None:
+	"""Applies one validated semantic snapshot inside the caller's rollback transaction."""
+	image_base = target.program.getImageBase()
+	data_type_manager = target.program.getDataTypeManager()
+	try:
+		data_type_parser = driver._data_type_parser_type(
+			data_type_manager,
+			data_type_manager,
+			None,
+			driver._allowed_data_types.ALL,
+		)
+		apply_composites(driver, data_type_manager, data_type_parser, semantics["composites"])
+
+		for authored in semantics["dataTypes"]:
+			address = image_base.add(authored["rva"])
+			block = target.program.getMemory().getBlock(address)
+			if block is None or block.isExecute():
+				raise WorkerError(
+					"semantic_application_failed",
+					f"Data type at {encode_rva(authored['rva'])} is not in mapped non-executable memory.",
+				)
+			data_type = data_type_parser.parse(authored["declaration"])
+			length = int(data_type.getLength())
+			if length <= 0:
+				raise WorkerError(
+					"semantic_application_failed",
+					f"Data type at {encode_rva(authored['rva'])} has no fixed storage length.",
+				)
+			end = address.add(length - 1)
+			if not block.contains(end):
+				raise WorkerError(
+					"semantic_application_failed",
+					f"Data type at {encode_rva(authored['rva'])} crosses its mapped memory block.",
+				)
+			target.flat_api.clearListing(address, end)
+			target.flat_api.createData(address, data_type)
+
+		function_parser = driver._function_signature_parser_type(data_type_manager, None)
+		for authored in semantics["functionPrototypes"]:
+			address = image_base.add(authored["rva"])
+			function = resolve_function(target, address, authored["rva"])
+			signature = function_parser.parse(function.getSignature(), authored["declaration"])
+			command = driver._apply_function_signature_command_type(address, signature, driver._source_type.USER_DEFINED)
+			if not command.applyTo(target.program, monitor):
+				raise WorkerError(
+					"semantic_application_failed",
+					f"Ghidra refused the function prototype at {encode_rva(authored['rva'])}.",
+				)
+	except WorkerError:
+		raise
+	except Exception as error:
+		raise WorkerError("semantic_application_failed", f"Could not apply accepted semantic interpretation: {error}") from error
+
+
+def apply_composites(driver: PyGhidraDriver, data_type_manager: Any, data_type_parser: Any, composites: list[dict[str, Any]]) -> None:
+	"""Defines the snapshot's composites so later declarations can name them."""
+	# Two passes, because a field typed 'Foo *' may name another composite from
+	# this same snapshot, in either direction. Registering every name as an empty
+	# structure first is what lets the parser resolve those references at all;
+	# laying out fields in one pass would fail on the first forward reference.
+	registered: dict[str, Any] = {}
+	for composite in composites:
+		try:
+			structure = driver._structure_data_type_type(composite["name"], composite["size"], data_type_manager)
+			# Padding in a real binary is something the analyst measured, not a
+			# flaw to tidy up. Packing off means Ghidra keeps the declared size
+			# and every field stays at the offset it was given.
+			structure.setPackingEnabled(False)
+			registered[composite["name"]] = data_type_manager.addDataType(
+				structure,
+				driver._data_type_conflict_handler.REPLACE_HANDLER,
+			)
+		except Exception as error:
+			raise WorkerError(
+				"semantic_application_failed",
+				f"Could not define composite '{composite['name']}': {error}",
+			) from error
+
+	for composite in composites:
+		try:
+			populate_composite(data_type_parser, registered[composite["name"]], composite)
+		except WorkerError:
+			raise
+		except Exception as error:
+			raise WorkerError(
+				"semantic_application_failed",
+				f"Could not lay out composite '{composite['name']}': {error}",
+			) from error
+
+
+def populate_composite(data_type_parser: Any, structure: Any, composite: dict[str, Any]) -> None:
+	"""Places each field at the offset it was authored with, never one Ghidra inferred."""
+	for field in composite["fields"]:
+		field_type = data_type_parser.parse(field["type"])
+		length = int(field_type.getLength())
+		if length <= 0:
+			raise WorkerError(
+				"semantic_application_failed",
+				f"Field '{field['name']}' of composite '{composite['name']}' has no fixed storage length.",
+			)
+		if field["offset"] + length > composite["size"]:
+			raise WorkerError(
+				"semantic_application_failed",
+				f"Field '{field['name']}' of composite '{composite['name']}' runs past its declared size of {composite['size']} bytes.",
+			)
+		structure.replaceAtOffset(field["offset"], field_type, length, field["name"], None)
 
 
 class WorkerServer:
@@ -484,6 +635,128 @@ def required_rva(params: dict[str, Any], name: str) -> int:
 	if (len(digits) > 1 and digits[0] == "0") or any(character not in "0123456789abcdef" for character in digits):
 		raise WorkerError("invalid_params", f"{name} must be a canonical lowercase hexadecimal RVA.")
 	return int(digits, 16)
+
+
+def required_semantics(params: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+	value = params.get("semantics")
+	if not isinstance(value, dict):
+		raise WorkerError("invalid_params", "semantics must be a versioned semantic snapshot object.")
+	schema_version = value.get("schemaVersion")
+	# Version 1 is accepted alongside version 2 because it is exactly version 2
+	# with no composites: a snapshot saved before composites existed still
+	# describes its whole type model, so honoring it can only decompile against
+	# what the analyst actually accepted. A version 1 payload carrying composites
+	# is refused all the same — that sender is confused about its own shape.
+	keys = SEMANTICS_SCHEMA_KEYS.get(schema_version) if not isinstance(schema_version, bool) else None
+	if keys is None:
+		versions = ", ".join(str(version) for version in sorted(SEMANTICS_SCHEMA_KEYS))
+		raise WorkerError("invalid_params", f"semantics.schemaVersion must be one of {versions}.")
+	if set(value) != set(keys):
+		names = ", ".join(sorted(keys - {"schemaVersion"}))
+		raise WorkerError("invalid_params", f"semantics at schemaVersion {schema_version} must contain exactly schemaVersion and {names}.")
+	return {
+		"composites": required_semantic_composites(value.get("composites", []), "semantics.composites"),
+		"dataTypes": required_semantic_declarations(value.get("dataTypes"), "semantics.dataTypes"),
+		"functionPrototypes": required_semantic_declarations(value.get("functionPrototypes"), "semantics.functionPrototypes"),
+	}
+
+
+def required_semantic_declarations(value: Any, path: str) -> list[dict[str, Any]]:
+	if not isinstance(value, list) or len(value) > MAX_SEMANTIC_DECLARATIONS:
+		raise WorkerError("invalid_params", f"{path} must be an array with at most {MAX_SEMANTIC_DECLARATIONS} entries.")
+	result: list[dict[str, Any]] = []
+	previous_rva = -1
+	for index, entry in enumerate(value):
+		entry_path = f"{path}[{index}]"
+		if not isinstance(entry, dict) or set(entry) != {"rva", "declaration"}:
+			raise WorkerError("invalid_params", f"{entry_path} must contain exactly rva and declaration.")
+		rva = required_rva(entry, "rva")
+		declaration = entry.get("declaration")
+		if not isinstance(declaration, str) or not declaration or len(declaration) > MAX_DECLARATION_CHARACTERS:
+			raise WorkerError(
+				"invalid_params",
+				f"{entry_path}.declaration must be a non-empty string no longer than {MAX_DECLARATION_CHARACTERS} characters.",
+			)
+		if rva <= previous_rva:
+			raise WorkerError("invalid_params", f"{path} must contain unique declarations in ascending RVA order.")
+		result.append({"rva": rva, "declaration": declaration})
+		previous_rva = rva
+	return result
+
+
+def required_semantic_composites(value: Any, path: str) -> list[dict[str, Any]]:
+	if not isinstance(value, list) or len(value) > MAX_SEMANTIC_COMPOSITES:
+		raise WorkerError("invalid_params", f"{path} must be an array with at most {MAX_SEMANTIC_COMPOSITES} entries.")
+	result: list[dict[str, Any]] = []
+	previous_name = ""
+	for index, entry in enumerate(value):
+		entry_path = f"{path}[{index}]"
+		if not isinstance(entry, dict) or set(entry) != {"name", "kind", "size", "fields"}:
+			raise WorkerError("invalid_params", f"{entry_path} must contain exactly name, kind, size and fields.")
+		name = required_identifier(entry, "name", entry_path)
+		kind = entry.get("kind")
+		# Unions and the rest are not implemented yet. Treating an unrecognized
+		# kind as a struct would lay out storage the analyst never described, so
+		# refuse it and let the sender learn this worker is too old.
+		if kind not in COMPOSITE_KINDS:
+			kinds = ", ".join(COMPOSITE_KINDS)
+			raise WorkerError("invalid_params", f"{entry_path}.kind must be one of {kinds}.")
+		size = entry.get("size")
+		if not isinstance(size, int) or isinstance(size, bool) or size <= 0 or size > MAX_COMPOSITE_SIZE_BYTES:
+			raise WorkerError(
+				"invalid_params",
+				f"{entry_path}.size must be a positive integer no larger than {MAX_COMPOSITE_SIZE_BYTES} bytes.",
+			)
+		if name <= previous_name:
+			raise WorkerError("invalid_params", f"{path} must contain unique composites in ascending name order.")
+		result.append({
+			"name": name,
+			"kind": kind,
+			"size": size,
+			"fields": required_composite_fields(entry.get("fields"), f"{entry_path}.fields", size),
+		})
+		previous_name = name
+	return result
+
+
+def required_composite_fields(value: Any, path: str, size: int) -> list[dict[str, Any]]:
+	if not isinstance(value, list) or len(value) > MAX_COMPOSITE_FIELDS:
+		raise WorkerError("invalid_params", f"{path} must be an array with at most {MAX_COMPOSITE_FIELDS} entries.")
+	result: list[dict[str, Any]] = []
+	names: set[str] = set()
+	previous_offset = -1
+	for index, entry in enumerate(value):
+		entry_path = f"{path}[{index}]"
+		if not isinstance(entry, dict) or set(entry) != {"offset", "name", "type"}:
+			raise WorkerError("invalid_params", f"{entry_path} must contain exactly offset, name and type.")
+		offset = entry.get("offset")
+		if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0 or offset >= size:
+			raise WorkerError(
+				"invalid_params",
+				f"{entry_path}.offset must be a non-negative integer below the composite size of {size} bytes.",
+			)
+		if offset <= previous_offset:
+			raise WorkerError("invalid_params", f"{path} must contain unique fields in ascending offset order.")
+		name = required_identifier(entry, "name", entry_path)
+		if name in names:
+			raise WorkerError("invalid_params", f"{path} must contain unique field names.")
+		declaration = entry.get("type")
+		if not isinstance(declaration, str) or not declaration or len(declaration) > MAX_DECLARATION_CHARACTERS:
+			raise WorkerError(
+				"invalid_params",
+				f"{entry_path}.type must be a non-empty string no longer than {MAX_DECLARATION_CHARACTERS} characters.",
+			)
+		result.append({"offset": offset, "name": name, "type": declaration})
+		names.add(name)
+		previous_offset = offset
+	return result
+
+
+def required_identifier(entry: dict[str, Any], name: str, path: str) -> str:
+	value = entry.get(name)
+	if not isinstance(value, str) or len(value) > MAX_DECLARATION_CHARACTERS or not IDENTIFIER_PATTERN.match(value):
+		raise WorkerError("invalid_params", f"{path}.{name} must be a C identifier no longer than {MAX_DECLARATION_CHARACTERS} characters.")
+	return value
 
 
 def sha256_file(path: Path) -> str:

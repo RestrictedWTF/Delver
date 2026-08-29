@@ -159,7 +159,7 @@ pub fn snapshot_of(name: &str, covers: &str, bytes: &[u8]) -> Result<Snapshot> {
 
 /// Runs static analysis and flattens the result into diffable strings.
 fn analysis_facts(image: &delver_format::ParsedImage, bytes: &[u8]) -> AnalysisFact {
-	let analyzed = delver_analysis::analyze(image, bytes);
+	let analyzed = delver_analysis::analyze(image, bytes, &[0..bytes.len() as u64]);
 
 	AnalysisFact {
 		instruction_count: analyzed.instructions.len(),

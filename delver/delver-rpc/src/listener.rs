@@ -191,8 +191,18 @@ impl Listener {
 /// On Unix this opens a Unix domain socket; on Windows it opens a named pipe.
 /// Returns independent read and write halves for use with [`Client`](crate::Client).
 pub fn connect(endpoint: &str) -> Result<DuplexStream, ListenerError> {
+	let (reader, writer, _shutdown) = connect_shutdownable(endpoint)?;
+	Ok((reader, writer))
+}
+
+/// Connects to a listening local endpoint with a callback that unblocks both halves.
+///
+/// Clients with a dedicated reader thread must retain the callback until that
+/// thread has stopped. Dropping only the independent writer half does not close
+/// the reader's duplicated OS handle.
+pub fn connect_shutdownable(endpoint: &str) -> Result<ShutdownableDuplexStream, ListenerError> {
 	let endpoint = Endpoint::parse(endpoint)?;
-	ListenerImpl::connect(&endpoint)
+	ListenerImpl::connect_shutdownable(&endpoint)
 }
 
 #[cfg(unix)]
@@ -298,6 +308,54 @@ mod tests {
 		reader.read_exact(&mut buf).expect("client read");
 		assert_eq!(&buf, b"world");
 
+		server.join().expect("server thread");
+
+		#[cfg(unix)]
+		std::fs::remove_dir(socket_directory).expect("remove socket directory");
+	}
+
+	#[test]
+	fn client_shutdown_unblocks_its_reader() {
+		use std::sync::mpsc;
+		use std::time::Duration;
+
+		#[cfg(windows)]
+		let endpoint = format!("pipe://delver-client-shutdown-test-{}", std::process::id());
+		#[cfg(unix)]
+		let socket_directory = std::env::temp_dir().join(format!(
+			"delver-client-shutdown-test-{}",
+			std::process::id()
+		));
+		#[cfg(unix)]
+		let endpoint = format!("unix://{}", socket_directory.join("session.sock").display());
+
+		let listener = Listener::bind(&endpoint).expect("bind listener");
+		let (server_ready_sender, server_ready_receiver) = mpsc::sync_channel(1);
+		let server = thread::spawn(move || {
+			let (_reader, _writer) = listener.accept().expect("accept");
+			server_ready_sender
+				.send(())
+				.expect("publish accepted connection");
+			thread::sleep(Duration::from_secs(1));
+		});
+
+		let (mut reader, _writer, shutdown) =
+			connect_shutdownable(&endpoint).expect("connect shutdownable client");
+		server_ready_receiver
+			.recv_timeout(Duration::from_secs(2))
+			.expect("server accepted connection");
+		let (finished_sender, finished_receiver) = mpsc::sync_channel(1);
+		let reader_thread = thread::spawn(move || {
+			let mut byte = [0_u8; 1];
+			let _ = reader.read(&mut byte);
+			finished_sender.send(()).expect("publish reader completion");
+		});
+
+		shutdown();
+		finished_receiver
+			.recv_timeout(Duration::from_secs(2))
+			.expect("shutdown did not unblock client reader");
+		reader_thread.join().expect("reader thread");
 		server.join().expect("server thread");
 
 		#[cfg(unix)]

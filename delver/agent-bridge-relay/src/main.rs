@@ -1,6 +1,8 @@
 //! Process boundary between the Delver bridge extension and an owner-only
 //! local named pipe or Unix socket.
 
+#![forbid(unsafe_code)]
+
 use std::io::{self, Write};
 
 use anyhow::Result;
@@ -75,7 +77,9 @@ mod tests {
 	#[test]
 	fn relay_and_registry_modes_are_exactly_one() {
 		assert!(Args::try_parse_from(["relay", "--endpoint", "pipe://test"]).is_ok());
-		assert!(Args::try_parse_from(["relay", "--endpoint", "pipe://test", "--report-peer"]).is_ok());
+		assert!(
+			Args::try_parse_from(["relay", "--endpoint", "pipe://test", "--report-peer"]).is_ok()
+		);
 		assert!(Args::try_parse_from(["relay", "--prepare-registry-directory"]).is_ok());
 		assert!(Args::try_parse_from(["relay"]).is_err());
 		assert!(Args::try_parse_from([
@@ -85,8 +89,10 @@ mod tests {
 			"--prepare-registry-directory",
 		])
 		.is_err());
-		assert!(Args::try_parse_from(["relay", "--prepare-registry-directory", "--report-peer"])
-			.is_err());
+		assert!(
+			Args::try_parse_from(["relay", "--prepare-registry-directory", "--report-peer"])
+				.is_err()
+		);
 	}
 }
 

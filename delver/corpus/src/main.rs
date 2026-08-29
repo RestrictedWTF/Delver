@@ -5,6 +5,8 @@
 //! an intentional change — review that diff carefully; it is the whole point of
 //! the corpus.
 
+#![forbid(unsafe_code)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 

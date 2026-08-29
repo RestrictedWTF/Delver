@@ -19,7 +19,12 @@ use crate::root_fingerprint::{compute_root_fingerprint_v1, RootFingerprintError}
 const RENDEZVOUS_SCHEMA_VERSION: u64 = 1;
 const RENDEZVOUS_BOOTSTRAP_PROTOCOL_VERSION: u64 = 1;
 const RENDEZVOUS_MAX_ENTRY_BYTES: u64 = 8 * 1024;
+/// The most live entries one listing returns. Applied after parsing, so a
+/// directory full of expired or malformed files cannot hide a valid window.
 const RENDEZVOUS_MAX_ENTRIES: usize = 256;
+/// Hard bound on directory entries examined, so an oversized registry costs
+/// bounded work instead of hiding the entries past the cap.
+const RENDEZVOUS_MAX_SCANNED_FILES: usize = 16 * RENDEZVOUS_MAX_ENTRIES;
 const RENDEZVOUS_MAX_TTL_MS: u64 = 30_000;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
@@ -277,13 +282,15 @@ fn list_rendezvous_entries_with_audit(
 			.uid()
 	};
 
+	// Bound the scan, not the result: stale, corrupt, or foreign files must not
+	// crowd a live window out of the listing just because they sort first.
 	let mut names: Vec<OsString> = std::fs::read_dir(directory)
 		.map_err(|_| RendezvousError::RegistryUnavailable)?
+		.take(RENDEZVOUS_MAX_SCANNED_FILES)
 		.filter_map(|result| result.ok().map(|entry| entry.file_name()))
 		.filter(|name| entry_id_from_file_name(name).is_some())
 		.collect();
 	names.sort();
-	names.truncate(RENDEZVOUS_MAX_ENTRIES);
 
 	let mut entries = Vec::new();
 	for name in names {
@@ -301,6 +308,9 @@ fn list_rendezvous_entries_with_audit(
 		);
 		if let Some(entry) = entry {
 			entries.push(entry);
+			if entries.len() == RENDEZVOUS_MAX_ENTRIES {
+				break;
+			}
 		}
 	}
 	Ok(entries)
@@ -604,6 +614,46 @@ mod tests {
 			select_window_from_entries(list_fixture(&directory, 2_000), &"b".repeat(64)),
 			Err(RendezvousError::NoMatchingWindow)
 		);
+		remove_fixture(&directory);
+	}
+
+	#[test]
+	fn bounds_after_parsing_so_crowding_and_oversized_files_cannot_hide_a_live_window() {
+		let directory = fixture_directory();
+		let fingerprint = "a".repeat(64);
+		let live = entry("registry_entry_zzzz_live_0001", &fingerprint);
+
+		// Enough expired entries to fill the result bound, all sorting ahead of
+		// the live one.
+		for index in 0..RENDEZVOUS_MAX_ENTRIES {
+			write_entry(
+				&directory,
+				&RendezvousRegistryEntry {
+					registry_entry_id: format!("registry_entry_expired_{index:04}"),
+					published_at: 0,
+					expires_at: 1_000,
+					..live.clone()
+				},
+			);
+		}
+
+		// Valid JSON that only exceeds the byte bound. Truncating it to the
+		// bound would still parse and be accepted, so its absence proves the
+		// entry is rejected rather than mangled.
+		let oversized = entry("registry_entry_aaaa_big_0001", &fingerprint);
+		let mut padded = serde_json::to_vec(&oversized).unwrap();
+		padded.resize(RENDEZVOUS_MAX_ENTRY_BYTES as usize + 1, b' ');
+		let padded_path = directory.join("registry_entry_aaaa_big_0001.json");
+		std::fs::write(&padded_path, &padded).unwrap();
+		#[cfg(unix)]
+		{
+			use std::os::unix::fs::PermissionsExt;
+			std::fs::set_permissions(padded_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+		}
+
+		write_entry(&directory, &live);
+
+		assert_eq!(list_fixture(&directory, 2_000), vec![live]);
 		remove_fixture(&directory);
 	}
 

@@ -10,6 +10,7 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use windows_sys::Win32::Foundation::{
@@ -32,7 +33,8 @@ use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use crate::listener::{
-	last_error, DuplexStream, Endpoint, ListenerError, PeerAuthenticatedDuplexStream, PeerIdentity,
+	last_error, Endpoint, ListenerError, PeerAuthenticatedDuplexStream, PeerIdentity,
+	ShutdownableDuplexStream,
 };
 
 const PIPE_BUFFER_SIZE: u32 = 65536;
@@ -48,7 +50,9 @@ pub(crate) struct WindowsListenerImpl {
 }
 
 impl WindowsListenerImpl {
-	pub(crate) fn connect(endpoint: &Endpoint) -> Result<DuplexStream, ListenerError> {
+	pub(crate) fn connect_shutdownable(
+		endpoint: &Endpoint,
+	) -> Result<ShutdownableDuplexStream, ListenerError> {
 		use std::os::windows::io::FromRawHandle;
 		use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
 		use windows_sys::Win32::Storage::FileSystem::{
@@ -67,6 +71,8 @@ impl WindowsListenerImpl {
 		// before an instance is waiting, retry briefly.
 		let mut handle = INVALID_HANDLE_VALUE;
 		for _ in 0..50 {
+			// SAFETY: `name_wide` is NUL-terminated and lives for the call; all
+			// optional pointers are null, and the returned handle is checked.
 			handle = unsafe {
 				CreateFileW(
 					name_wide.as_ptr(),
@@ -94,13 +100,24 @@ impl WindowsListenerImpl {
 
 		let read_handle = duplicate_client_handle(handle)?;
 		let write_handle = duplicate_client_handle(handle)?;
+		// SAFETY: `handle` was returned by CreateFileW and ownership has been
+		// duplicated into `read_handle` and `write_handle`.
 		unsafe {
 			CloseHandle(handle);
 		}
 
+		// SAFETY: each value is a distinct owned handle returned by
+		// DuplicateHandle and is transferred exactly once into `File`.
 		let read_file = unsafe { File::from_raw_handle(read_handle) };
+		// SAFETY: see the preceding handle-ownership argument.
 		let write_file = unsafe { File::from_raw_handle(write_handle) };
-		Ok((Box::new(PollingPipeReader(read_file)), Box::new(write_file)))
+		let stopped = Arc::new(AtomicBool::new(false));
+		let reader_stopped = Arc::clone(&stopped);
+		Ok((
+			Box::new(PollingPipeReader::shutdownable(read_file, reader_stopped)),
+			Box::new(write_file),
+			Arc::new(move || stopped.store(true, Ordering::Release)),
+		))
 	}
 
 	pub(crate) fn bind(endpoint: &Endpoint) -> Result<Self, ListenerError> {
@@ -133,12 +150,15 @@ impl WindowsListenerImpl {
 			None => create_pipe_instance(&self.pipe_path, 0)?,
 		};
 
+		// SAFETY: `handle` is an owned server pipe instance and the null
+		// OVERLAPPED pointer requests the documented synchronous operation.
 		let connected = unsafe { ConnectNamedPipe(handle, ptr::null_mut()) };
 		if connected == FALSE {
 			let err = std::io::Error::last_os_error();
 			// ERROR_PIPE_CONNECTED (535) means the client connected before we
 			// called ConnectNamedPipe; that is still a success.
 			if err.raw_os_error() != Some(535) {
+				// SAFETY: this error path still owns the pipe handle.
 				unsafe {
 					DisconnectNamedPipe(handle);
 					CloseHandle(handle);
@@ -147,7 +167,9 @@ impl WindowsListenerImpl {
 			}
 		}
 		let mut process_id = 0;
+		// SAFETY: `handle` is connected and `process_id` is a valid writable u32.
 		if unsafe { GetNamedPipeClientProcessId(handle, &mut process_id) } == FALSE {
+			// SAFETY: this error path still owns the pipe handle.
 			unsafe {
 				DisconnectNamedPipe(handle);
 				CloseHandle(handle);
@@ -161,16 +183,19 @@ impl WindowsListenerImpl {
 		let write_handle = duplicate_handle(handle)?;
 		let shutdown_handle = duplicate_handle(handle)?;
 
+		// SAFETY: ownership has been duplicated into the three handles above.
 		unsafe {
 			CloseHandle(handle);
 		}
 
+		// SAFETY: each distinct duplicated handle is transferred exactly once.
 		let read_file = unsafe { File::from_raw_handle(read_handle) };
+		// SAFETY: see the preceding handle-ownership argument.
 		let write_file = unsafe { File::from_raw_handle(write_handle) };
 		let shutdown = Arc::new(WindowsPipeShutdown(shutdown_handle as usize));
 
 		Ok((
-			Box::new(PollingPipeReader(read_file)),
+			Box::new(PollingPipeReader::new(read_file)),
 			Box::new(FlushingPipeWriter(write_file)),
 			Arc::new(move || shutdown.disconnect()),
 			PeerIdentity::new(Some(process_id), None),
@@ -180,7 +205,20 @@ impl WindowsListenerImpl {
 
 /// Avoids holding a synchronous duplex pipe read while another thread needs to
 /// write through a duplicated handle for the same pipe object.
-struct PollingPipeReader(File);
+struct PollingPipeReader {
+	file: File,
+	stopped: Arc<AtomicBool>,
+}
+
+impl PollingPipeReader {
+	fn new(file: File) -> Self {
+		Self::shutdownable(file, Arc::new(AtomicBool::new(false)))
+	}
+
+	fn shutdownable(file: File, stopped: Arc<AtomicBool>) -> Self {
+		Self { file, stopped }
+	}
+}
 
 impl Read for PollingPipeReader {
 	fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
@@ -188,10 +226,15 @@ impl Read for PollingPipeReader {
 			return Ok(0);
 		}
 		loop {
+			if self.stopped.load(Ordering::Acquire) {
+				return Ok(0);
+			}
 			let mut available = 0;
+			// SAFETY: the file owns a live pipe handle, `available` is writable,
+			// and all buffers we do not request are represented by null pointers.
 			if unsafe {
 				PeekNamedPipe(
-					self.0.as_raw_handle(),
+					self.file.as_raw_handle(),
 					ptr::null_mut(),
 					0,
 					ptr::null_mut(),
@@ -204,7 +247,7 @@ impl Read for PollingPipeReader {
 			}
 			if available > 0 {
 				let read = buffer.len().min(available as usize);
-				return self.0.read(&mut buffer[..read]);
+				return self.file.read(&mut buffer[..read]);
 			}
 			std::thread::sleep(std::time::Duration::from_millis(1));
 		}
@@ -219,6 +262,7 @@ impl Write for FlushingPipeWriter {
 	}
 
 	fn flush(&mut self) -> io::Result<()> {
+		// SAFETY: the writer owns a live pipe handle for the duration of the call.
 		if unsafe { FlushFileBuffers(self.0.as_raw_handle()) } == FALSE {
 			return Err(io::Error::last_os_error());
 		}
@@ -230,6 +274,7 @@ impl Drop for WindowsListenerImpl {
 	fn drop(&mut self) {
 		if let Ok(first) = self.first_instance.get_mut() {
 			if let Some(handle) = first.take() {
+				// SAFETY: the listener still owns its reserved first-instance handle.
 				unsafe {
 					CloseHandle(handle as HANDLE);
 				}
@@ -242,6 +287,7 @@ struct WindowsPipeShutdown(usize);
 
 impl WindowsPipeShutdown {
 	fn disconnect(&self) {
+		// SAFETY: the shutdown object owns a live server pipe handle.
 		unsafe {
 			let _ = DisconnectNamedPipe(self.0 as HANDLE);
 		}
@@ -250,6 +296,7 @@ impl WindowsPipeShutdown {
 
 impl Drop for WindowsPipeShutdown {
 	fn drop(&mut self) {
+		// SAFETY: this object owns the duplicated handle and drops it once.
 		unsafe {
 			CloseHandle(self.0 as HANDLE);
 		}
@@ -261,6 +308,8 @@ fn create_pipe_instance(path: &str, extra_flags: u32) -> Result<HANDLE, Listener
 
 	let security = create_user_only_security_attributes()?;
 
+	// SAFETY: the path is NUL-terminated, the security attributes remain live
+	// for the call, and every size/flag value follows CreateNamedPipeW's contract.
 	let handle = unsafe {
 		CreateNamedPipeW(
 			name_wide.as_ptr(),
@@ -276,6 +325,8 @@ fn create_pipe_instance(path: &str, extra_flags: u32) -> Result<HANDLE, Listener
 
 	// The security descriptor and ACL were allocated on the heap; free them
 	// now that the kernel has copied them into the pipe object.
+	// SAFETY: both pointers came from LocalAlloc and are freed exactly once
+	// after CreateNamedPipeW has copied the security descriptor.
 	unsafe {
 		LocalFree(security.acl as HLOCAL);
 		LocalFree(security.descriptor as HLOCAL);
@@ -295,6 +346,10 @@ struct SecurityAttributes {
 }
 
 fn create_user_only_security_attributes() -> Result<SecurityAttributes, ListenerError> {
+	// SAFETY: every allocation and Win32 handle acquired in this block is
+	// checked before dereference and released on each error path. Buffer sizes
+	// come from the corresponding Win32 query or structure size, and the returned
+	// descriptor/ACL remain allocated for the caller to pass to CreateNamedPipeW.
 	unsafe {
 		// Allocate a security descriptor. SECURITY_DESCRIPTOR_MIN_LENGTH is
 		// 20 bytes; 256 bytes gives comfortable slack.
@@ -399,8 +454,11 @@ fn create_user_only_security_attributes() -> Result<SecurityAttributes, Listener
 }
 
 fn duplicate_client_handle(handle: HANDLE) -> Result<HANDLE, ListenerError> {
+	// SAFETY: GetCurrentProcess returns the documented pseudo-handle and has no
+	// memory preconditions.
 	let process = unsafe { GetCurrentProcess() };
 	let mut duplicate: HANDLE = ptr::null_mut();
+	// SAFETY: `duplicate` is a valid out pointer and `handle` is live for this call.
 	let ok = unsafe { DuplicateHandle(process, handle, process, &mut duplicate, 0, FALSE, 2) };
 	if ok == FALSE {
 		return Err(last_error("duplicating pipe handle"));
@@ -409,9 +467,12 @@ fn duplicate_client_handle(handle: HANDLE) -> Result<HANDLE, ListenerError> {
 }
 
 fn duplicate_handle(handle: HANDLE) -> Result<HANDLE, ListenerError> {
+	// SAFETY: GetCurrentProcess returns the documented pseudo-handle and has no
+	// memory preconditions.
 	let process = unsafe { GetCurrentProcess() };
 	let mut duplicate: HANDLE = ptr::null_mut();
 	// DUPLICATE_SAME_ACCESS = 2
+	// SAFETY: `duplicate` is a valid out pointer and `handle` is live for this call.
 	let ok = unsafe { DuplicateHandle(process, handle, process, &mut duplicate, 0, FALSE, 2) };
 	if ok == FALSE {
 		return Err(last_error("duplicating pipe handle"));

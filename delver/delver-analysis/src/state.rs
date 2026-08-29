@@ -3,19 +3,27 @@
 //! Recursive descent asks two questions about millions of addresses — *have I
 //! been here* and *how long is the instruction here* — and the linear sweep asks
 //! the first one about every executable byte in the image. A `BTreeSet`/
-//! `BTreeMap` keyed by RVA answers both in `O(log n)` with a pointer chase per
-//! level, and at eight million instructions that lookup cost, not the decoding,
-//! dominates the analysis.
+//! `BTreeMap` keyed by RVA would answer both in `O(log n)` with a pointer chase
+//! per level, and at eight million instructions that lookup cost, not the
+//! decoding, would dominate the analysis. So this is a flat byte array instead.
 //!
-//! Sections are few, contiguous, and already sorted, so an address can be turned
-//! into an array index with a short binary search over section bounds. Every
-//! query after that is a single byte read.
+//! Nothing the section table says is trusted to make that array work. Headers
+//! may arrive unsorted, may overlap, may alias the same file bytes at several
+//! RVAs, and may declare extents the file does not contain — so `new` sorts the
+//! bounds itself, trims each one against the region before it, and intersects
+//! every declared extent with the bytes that are really on disk. What survives
+//! is a short list of disjoint ascending ranges, which a binary search turns
+//! into an array index; every query after that is a single byte read.
 //!
-//! Memory is one byte per byte of section raw data, so it is bounded by the file
-//! size rather than by anything the image declares about itself — a header
-//! claiming a four-gigabyte section cannot make this allocate.
+//! Allocation is at most one byte per byte of the mapped file, aliased headers
+//! included. That is a hard cap rather than a claim about the image: when the
+//! declared sections do exceed it, the tail of the region that hits the cap and
+//! every region after it get no cells at all. Addresses there then behave
+//! exactly like addresses outside every section — `visit` reports nothing to
+//! walk — so a crafted header can cost analysis coverage, but never memory.
 
 use delver_format::ParsedImage;
+use std::ops::Range;
 
 /// Marks an address the descent has already considered.
 const VISITED: u8 = 0x80;
@@ -48,21 +56,25 @@ impl RvaState {
 	/// Only raw data is covered because that is exactly where `bytes_at` can
 	/// return anything: an address in a section's zero-filled tail has no bytes
 	/// to decode, so the descent can never mark it.
-	pub(crate) fn new(image: &ParsedImage) -> Self {
+	pub(crate) fn new(image: &ParsedImage, file_size: u64, coverage: &[Range<u64>]) -> Self {
 		let mut regions: Vec<Region> = Vec::with_capacity(image.sections.len());
 		let mut base = 0usize;
+		let max_cells = usize::try_from(file_size).unwrap_or(usize::MAX);
 
-		let mut bounds: Vec<(u64, u64)> = image
-			.sections
-			.iter()
-			.filter(|s| s.raw_size > 0)
-			.map(|s| {
-				(
-					s.virtual_address,
-					s.virtual_address.saturating_add(s.raw_size),
-				)
-			})
-			.collect();
+		let mut bounds: Vec<(u64, u64)> = Vec::new();
+		for section in &image.sections {
+			let raw_end = section.raw_end().min(file_size);
+			for range in coverage {
+				let start = section.raw_offset.max(range.start);
+				let end = raw_end.min(range.end);
+				if start < end {
+					let rva = section
+						.virtual_address
+						.saturating_add(start.saturating_sub(section.raw_offset));
+					bounds.push((rva, rva.saturating_add(end - start)));
+				}
+			}
+		}
 		bounds.sort_unstable_by_key(|(start, _)| *start);
 
 		for (start, end) in bounds {
@@ -76,7 +88,17 @@ impl RvaState {
 			if end <= start {
 				continue;
 			}
-			let len = (end - start) as usize;
+			// Multiple hostile section headers can alias the same file bytes at
+			// different RVAs. Do not let those aliases multiply the allocation
+			// beyond the size of the mapped file.
+			let remaining = max_cells.saturating_sub(base);
+			let len = usize::try_from(end - start)
+				.unwrap_or(usize::MAX)
+				.min(remaining);
+			if len == 0 {
+				break;
+			}
+			let end = start.saturating_add(len as u64);
 			regions.push(Region { start, end, base });
 			base += len;
 		}
@@ -174,6 +196,10 @@ mod tests {
 		}
 	}
 
+	fn state(image: &ParsedImage, file_size: u64) -> RvaState {
+		RvaState::new(image, file_size, &[0..file_size])
+	}
+
 	fn section(virtual_address: u64, raw_size: u64) -> Section {
 		Section {
 			name: ".text".to_string(),
@@ -187,7 +213,7 @@ mod tests {
 
 	#[test]
 	fn visits_are_recorded_once_per_address() {
-		let mut state = RvaState::new(&image_with_sections(vec![section(0x1000, 0x100)]));
+		let mut state = state(&image_with_sections(vec![section(0x1000, 0x100)]), 0x100);
 
 		assert!(state.visit(0x1000), "first visit is new");
 		assert!(!state.visit(0x1000), "second visit is not");
@@ -197,7 +223,7 @@ mod tests {
 
 	#[test]
 	fn an_address_outside_every_section_is_never_new() {
-		let mut state = RvaState::new(&image_with_sections(vec![section(0x1000, 0x100)]));
+		let mut state = state(&image_with_sections(vec![section(0x1000, 0x100)]), 0x100);
 
 		assert!(!state.visit(0x0fff), "below the first section");
 		assert!(!state.visit(0x1100), "at the exclusive end");
@@ -205,10 +231,8 @@ mod tests {
 
 	#[test]
 	fn instructions_come_back_sorted_across_sections() {
-		let mut state = RvaState::new(&image_with_sections(vec![
-			section(0x3000, 0x10),
-			section(0x1000, 0x10),
-		]));
+		let image = image_with_sections(vec![section(0x3000, 0x10), section(0x1000, 0x10)]);
+		let mut state = state(&image, 0x20);
 
 		state.set_instruction(0x3000, 4);
 		state.set_instruction(0x1000, 3);
@@ -225,10 +249,8 @@ mod tests {
 	#[test]
 	fn overlapping_sections_do_not_alias_onto_one_cell() {
 		// Nothing in the PE format prevents this; a crafted image can declare it.
-		let mut state = RvaState::new(&image_with_sections(vec![
-			section(0x1000, 0x100),
-			section(0x1080, 0x100),
-		]));
+		let image = image_with_sections(vec![section(0x1000, 0x100), section(0x1080, 0x100)]);
+		let mut state = state(&image, 0x200);
 
 		state.set_instruction(0x1080, 2);
 		assert_eq!(state.instruction_len(0x1080), Some(2));
@@ -236,6 +258,45 @@ mod tests {
 			state.instructions().len(),
 			1,
 			"an address must map to exactly one cell"
+		);
+	}
+
+	#[test]
+	fn declared_raw_size_is_clamped_before_allocation() {
+		let mut hostile = section(0x1000, u64::MAX);
+		hostile.raw_offset = 4;
+		let state = state(&image_with_sections(vec![hostile]), 16);
+
+		assert_eq!(state.cells.len(), 12);
+		assert!(state.index(0x100b).is_some());
+		assert!(state.index(0x100c).is_none());
+	}
+
+	#[test]
+	fn out_of_file_section_allocates_no_state() {
+		let mut hostile = section(0x1000, u64::MAX);
+		hostile.raw_offset = 0x4000_0000;
+		let state = state(&image_with_sections(vec![hostile]), 4096);
+
+		assert!(state.cells.is_empty());
+		assert!(state.regions.is_empty());
+	}
+
+	#[test]
+	fn aliased_sections_cannot_multiply_the_file_sized_budget() {
+		let image = image_with_sections(vec![section(0x1000, 16), section(0x2000, 16)]);
+		let mut state = state(&image, 16);
+
+		// The budget is spent on the first region, so the second gets no cells
+		// and its addresses are inert — the documented cost of the cap.
+		assert_eq!(
+			(
+				state.cells.len(),
+				state.regions.len(),
+				state.visit(0x1000),
+				state.visit(0x2000),
+			),
+			(16, 1, true, false),
 		);
 	}
 }

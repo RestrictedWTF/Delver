@@ -7,21 +7,39 @@
 //! hypervisor, so the provider abstraction is exercised from the start rather
 //! than validated late.
 
-use anyhow::{bail, Context, Result};
-use delver_analysis::AnalyzedImage;
-use delver_format::ParsedImage;
+use anyhow::{anyhow, bail, Context, Result};
+use delver_analysis::listing::ListingIndex;
+use delver_analysis::{AnalyzedImage, FunctionCorrection};
+use delver_format::{BaseRelocation, ParsedImage};
 use delver_protocol::{
-	AddressSpaceWire, InitializeResult, ListSpacesResult, ReadMemoryParams, ReadMemoryResult,
-	Request, Response,
+	AddressSpaceWire, InitializeResult, ListSpacesResult, RangeWire, ReadMemoryParams,
+	ReadMemoryResult, Request, Response,
 };
 use delver_rpc::Client;
 use std::io::{BufReader, Read, Write};
+use std::ops::Range;
 
 /// Bytes requested per `readMemory` call while pulling an image.
 ///
 /// Large enough that a multi-megabyte image is a handful of round trips, small
 /// enough that a single response never becomes an allocation surprise.
 const CHUNK: u64 = 1 << 20;
+
+/// What a provider actually served for one address space.
+///
+/// Kept separate from the bytes because the two answer different questions: a
+/// caller needs the bytes to analyse, and needs [`Self::unreadable`] to know
+/// what its analysis is silent about.
+pub struct SpaceRead {
+	/// Logical address-space bytes; unreadable holes contain placeholders and
+	/// are never trusted unless covered by [`Self::coverage`].
+	pub bytes: Vec<u8>,
+	/// Disjoint file-offset ranges actually supplied by the provider.
+	pub coverage: Vec<Range<u64>>,
+	/// Disjoint ranges of the space that were not read. Empty when the whole
+	/// space was served.
+	pub unreadable: Vec<RangeWire>,
+}
 
 /// An analysed image plus the bytes it came from.
 pub struct LoadedImage {
@@ -33,7 +51,40 @@ pub struct LoadedImage {
 	pub analysis: AnalyzedImage,
 	/// The bytes the image was read from, retained so listing rows can be
 	/// re-formatted on demand without another provider round trip.
+	///
+	/// This preserves logical offsets across holes. Placeholder bytes in those
+	/// holes are never parsed, decoded, or scanned because [`Self::coverage`] is
+	/// the authority for which bytes came from the provider.
 	pub bytes: Vec<u8>,
+	/// Disjoint file-offset ranges whose bytes are real provider data.
+	pub coverage: Vec<Range<u64>>,
+	/// Ranges of the analysed space that were never read, and which therefore
+	/// contributed no instruction, function, xref, or string to `analysis`.
+	pub unreadable: Vec<RangeWire>,
+	/// The image's base relocations, sorted by RVA.
+	///
+	/// Sorted once here so that formatting a listing row is a binary search
+	/// rather than a scan of the whole table. The parse order is whatever the
+	/// sample's relocation blocks were written in, which nothing validates.
+	pub relocations: Vec<BaseRelocation>,
+	/// Which derivation the facts above are.
+	///
+	/// Incremented by every re-analysis. An index into a table — the xref export
+	/// and the globals list both hand one out — is only meaningful against the
+	/// derivation it was taken from, and the image handle cannot say so because
+	/// it deliberately survives a re-derivation.
+	pub generation: u64,
+	/// Authored corrections the facts above were derived against.
+	///
+	/// Retained so a caller can be told what its answers already account for,
+	/// and so a re-analysis can report what changed.
+	pub corrections: Vec<FunctionCorrection>,
+	/// Instructions and strings merged into one address-ordered row space.
+	///
+	/// Built once here rather than per request: it is a few vectors sized by the
+	/// string count, and rebuilding it on every window fetch would binary-search
+	/// the instruction index once per string on each scroll.
+	pub listing: ListingIndex,
 }
 
 type ProviderClient = Client<BufReader<Box<dyn Read + Send>>, Box<dyn Write + Send>>;
@@ -100,9 +151,13 @@ impl ProviderConnection {
 
 	/// Reads an entire address space through the provider.
 	///
-	/// Stops early if the provider serves a short read, which is how it reports
-	/// that the remaining range is not backed by data — see invariant 7.
-	pub fn read_space(&mut self, space: &str) -> Result<Vec<u8>> {
+	/// Stops at the first byte the provider will not serve, which is how it
+	/// reports that a range is not backed by data — see invariant 7 — and
+	/// reports the range it stopped at rather than letting a short read pass for
+	/// a whole space. What is returned is exactly what the provider vouched for:
+	/// a `readMemory` answer is trusted only as far as its `valid` ranges reach,
+	/// never as far as its frame happens to be long.
+	pub fn read_space(&mut self, space: &str) -> Result<SpaceRead> {
 		let size = self
 			.spaces
 			.iter()
@@ -110,7 +165,13 @@ impl ProviderConnection {
 			.with_context(|| format!("provider exposes no space named {space}"))?
 			.size;
 
-		let mut out = Vec::with_capacity(size as usize);
+		let size = usize::try_from(size).context("address space is too large for this host")?;
+		let mut out = Vec::new();
+		out.try_reserve_exact(size)
+			.context("reserving address-space buffer")?;
+		out.resize(size, 0);
+		let size = size as u64;
+		let mut coverage = Vec::new();
 		let mut offset = 0u64;
 
 		while offset < size {
@@ -132,15 +193,18 @@ impl ProviderConnection {
 					result.data.frame_id
 				);
 			}
-			if bytes.is_empty() {
-				break; // nothing further is readable
-			}
-			let read = bytes.len() as u64;
-			out.extend_from_slice(&bytes);
-			offset += read;
+			apply_read_frame(&mut out, offset, want, &result.valid, &bytes, &mut coverage)?;
+			offset += want;
 		}
 
-		Ok(out)
+		let coverage = merge_ranges(coverage);
+		let unreadable = uncovered_ranges(size, &coverage);
+
+		Ok(SpaceRead {
+			bytes: out,
+			coverage,
+			unreadable,
+		})
 	}
 
 	/// Sends a graceful shutdown.
@@ -150,25 +214,218 @@ impl ProviderConnection {
 	}
 }
 
+/// Copies one provider frame into its logical positions and records coverage.
+///
+/// Providers may send a dense frame (one byte per requested position) or a
+/// packed frame (only bytes named by `valid`, concatenated in range order).
+fn apply_read_frame(
+	out: &mut [u8],
+	request_start: u64,
+	request_len: u64,
+	valid: &[RangeWire],
+	bytes: &[u8],
+	coverage: &mut Vec<Range<u64>>,
+) -> Result<()> {
+	let request_end = request_start.saturating_add(request_len);
+	let mut previous_end = request_start;
+	let mut valid_bytes = 0usize;
+	for range in valid {
+		if range.start < request_start
+			|| range.end > request_end
+			|| range.start < previous_end
+			|| range.start >= range.end
+		{
+			bail!("provider returned invalid or unordered coverage");
+		}
+		valid_bytes = valid_bytes
+			.checked_add((range.end - range.start) as usize)
+			.context("provider coverage length overflow")?;
+		previous_end = range.end;
+	}
+
+	let dense = bytes.len() == request_len as usize;
+	if !dense && bytes.len() != valid_bytes {
+		bail!(
+			"provider frame length {} disagrees with {} valid bytes",
+			bytes.len(),
+			valid_bytes
+		);
+	}
+
+	let mut packed_offset = 0usize;
+	for range in valid {
+		let len = (range.end - range.start) as usize;
+		let source_start = if dense {
+			(range.start - request_start) as usize
+		} else {
+			packed_offset
+		};
+		let destination_start = range.start as usize;
+		out[destination_start..destination_start + len]
+			.copy_from_slice(&bytes[source_start..source_start + len]);
+		packed_offset += len;
+		coverage.push(range.start..range.end);
+	}
+	Ok(())
+}
+
+fn merge_ranges(mut ranges: Vec<Range<u64>>) -> Vec<Range<u64>> {
+	ranges.sort_unstable_by_key(|range| range.start);
+	let mut merged: Vec<Range<u64>> = Vec::new();
+	for range in ranges {
+		if let Some(previous) = merged.last_mut() {
+			if range.start <= previous.end {
+				previous.end = previous.end.max(range.end);
+				continue;
+			}
+		}
+		merged.push(range);
+	}
+	merged
+}
+
+fn uncovered_ranges(size: u64, coverage: &[Range<u64>]) -> Vec<RangeWire> {
+	let mut unreadable = Vec::new();
+	let mut at = 0u64;
+	for range in coverage {
+		if at < range.start {
+			unreadable.push(RangeWire {
+				start: at,
+				end: range.start,
+			});
+		}
+		at = at.max(range.end);
+	}
+	if at < size {
+		unreadable.push(RangeWire {
+			start: at,
+			end: size,
+		});
+	}
+	unreadable
+}
+
 /// Pulls the file space through `connection` and analyses it.
-pub fn load(connection: &mut ProviderConnection, space: Option<&str>) -> Result<LoadedImage> {
+///
+/// A space the provider serves only in part is analysed in part. The counts on
+/// [`LoadedImage`] then describe the bytes that were read and nothing else,
+/// which is what [`LoadedImage::unreadable`] exists to say out loud.
+pub fn load(
+	connection: &mut ProviderConnection,
+	space: Option<&str>,
+	corrections: &[FunctionCorrection],
+) -> Result<LoadedImage> {
 	connection.spaces()?;
 	let space = space.unwrap_or("File");
 
-	let bytes = connection
+	let read = connection
 		.read_space(space)
 		.with_context(|| format!("reading space {space}"))?;
-	if bytes.is_empty() {
+	let SpaceRead {
+		bytes,
+		coverage,
+		unreadable,
+	} = read;
+	if coverage.is_empty() {
 		bail!("provider returned no bytes for space {space}");
 	}
 
 	let parsed = delver_format::parse_pe(&bytes).context("parsing image")?;
-	let analysis = delver_analysis::analyze(&parsed, &bytes);
+	let (analysis, listing) = derive(&parsed, &bytes, &coverage, corrections)?;
+	let mut relocations = parsed.relocations.clone();
+	relocations.sort_unstable_by_key(|relocation| relocation.rva);
 
 	Ok(LoadedImage {
 		id: "image-0".to_string(),
 		parsed,
 		analysis,
 		bytes,
+		coverage,
+		unreadable,
+		relocations,
+		listing,
+		generation: 0,
+		corrections: corrections.to_vec(),
 	})
+}
+
+/// Everything that has to be rebuilt when the correction set changes.
+///
+/// `load` and [`reanalyze`] both go through here rather than each assembling
+/// their own: the listing index is derived from the analysis it was built
+/// against, and a re-analysis that forgot to rebuild it would serve rows for
+/// instructions that no longer exist.
+fn derive(
+	parsed: &ParsedImage,
+	bytes: &[u8],
+	coverage: &[Range<u64>],
+	corrections: &[FunctionCorrection],
+) -> Result<(AnalyzedImage, ListingIndex)> {
+	let analysis = delver_analysis::analyze_corrected(parsed, bytes, coverage, corrections)
+		.map_err(|error| anyhow!("{error}"))?;
+	let listing = ListingIndex::new(
+		analysis.instructions.clone(),
+		analysis
+			.strings
+			.iter()
+			.enumerate()
+			.map(|(slot, found)| (found.rva, slot))
+			.collect(),
+	);
+	Ok((analysis, listing))
+}
+
+/// Re-derives every fact for an open image against a new correction set.
+///
+/// The provider is not consulted: the bytes and their coverage are already
+/// held, and re-reading them would cost a round trip to learn nothing. Nothing
+/// is replaced until the new analysis succeeds, so a correction set the analysis
+/// crate refuses leaves the image exactly as it was rather than emptied.
+pub fn reanalyze(image: &mut LoadedImage, corrections: Vec<FunctionCorrection>) -> Result<()> {
+	let (analysis, listing) = derive(&image.parsed, &image.bytes, &image.coverage, &corrections)?;
+	image.analysis = analysis;
+	image.listing = listing;
+	image.corrections = corrections;
+	// Every cursor handed out against the previous facts is now stale. The
+	// handle deliberately survives this, so the generation is what lets a walk
+	// be refused instead of quietly continuing into a different table.
+	image.generation = image.generation.saturating_add(1);
+	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::{apply_read_frame, uncovered_ranges};
+	use delver_protocol::RangeWire;
+
+	fn range(start: u64, end: u64) -> RangeWire {
+		RangeWire { start, end }
+	}
+
+	#[test]
+	fn packed_frames_preserve_holes_and_later_coverage() {
+		let mut out = vec![0_u8; 12];
+		let mut coverage = Vec::new();
+		apply_read_frame(
+			&mut out,
+			0,
+			12,
+			&[range(0, 4), range(8, 12)],
+			b"headtail",
+			&mut coverage,
+		)
+		.expect("apply packed frame");
+
+		let unreadable = uncovered_ranges(12, &coverage);
+		assert_eq!(
+			(
+				out,
+				unreadable
+					.iter()
+					.map(|range| (range.start, range.end))
+					.collect::<Vec<_>>()
+			),
+			(b"head\0\0\0\0tail".to_vec(), vec![(4, 8)])
+		);
+	}
 }

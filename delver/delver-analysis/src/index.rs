@@ -85,6 +85,14 @@ impl InstructionIndex {
 		}
 	}
 
+	/// How many instructions start strictly before `rva`. O(log n).
+	///
+	/// This is the insertion point for a non-instruction row at `rva`, which is
+	/// what the unified listing index needs to interleave data by address.
+	pub fn rows_before(&self, rva: u64) -> usize {
+		self.rvas.partition_point(|start| *start < rva)
+	}
+
 	/// Iterates `(row, rva, len)` over a half-open row range.
 	pub fn rows(&self, start: usize, count: usize) -> impl Iterator<Item = (usize, u64, u32)> + '_ {
 		let end = start.saturating_add(count).min(self.len());

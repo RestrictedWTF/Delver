@@ -4,7 +4,7 @@
 //! about analysis. It gives the extension host a byte stream backed by the
 //! security-sensitive named-pipe/Unix-socket implementation in `delver-rpc`.
 
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 use std::io::{self, Read, Write};

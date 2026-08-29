@@ -1,6 +1,10 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+//! Command-line entry point for the Delver MCP server.
+
+#![forbid(unsafe_code)]
+
 use std::io::{self, BufReader};
 use std::path::PathBuf;
 use std::process::ExitCode;

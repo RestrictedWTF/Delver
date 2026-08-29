@@ -16,15 +16,32 @@
 //! The two are recorded distinctly. A guessed boundary must render differently
 //! from a compiler-emitted one (`Docs/design/principles.md` §1), so the data
 //! has to carry the difference.
+//!
+//! The same rule applies one level up: an image whose architecture Delver
+//! cannot decode is not an image with no code in it. [`AnalyzedImage::decoding`]
+//! carries that distinction, and any caller reporting instruction, function or
+//! xref counts owes the reader that field alongside them.
+//!
+//! Detection can also be wrong, and an analyst who sees that can correct it
+//! without ever hand-editing a fact: [`analyze_corrected`] takes an authored
+//! change to the *seed set* and re-derives everything from bytes plus the
+//! corrected seeds. See [`corrections`].
 
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
+pub mod call_graph;
+pub mod control_flow;
+pub mod corrections;
+pub mod entry_role;
+pub mod globals;
 pub mod index;
+pub mod listing;
 pub mod strings;
 pub mod xrefs;
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 use delver_disasm::{Bitness, Disassembler, FlowKind};
 use delver_format::{ParsedImage, SeedSource};
@@ -32,6 +49,22 @@ use delver_format::{ParsedImage, SeedSource};
 mod state;
 use state::RvaState;
 
+pub use call_graph::{
+	CallGraph, CallGraphEdge, CallPath, CallPathSinkError, CallPathStep, CallPaths, ExtentError,
+	FunctionExtent, FunctionProfile, IndirectCallSite, IndirectResolutionMethod,
+	ResolutionConfidence, ResolvedImport,
+};
+pub use control_flow::{BasicBlock, BasicBlockEdge, BasicBlockEdgeKind};
+pub use corrections::{
+	CorrectionConflict, CorrectionSet, FunctionCorrection, FunctionCorrectionKind,
+};
+// `entry_role::Subsystem` is deliberately not re-exported here: it would shadow
+// `delver_format::Subsystem`, which it converts from, for every caller that
+// holds both.
+pub use entry_role::{
+	EntryRole, EntryRoleConfidence, EntryRoleImport, EntryRoleKind, EntryRoleMethod, EntryRoleStep,
+};
+pub use globals::{GlobalAccess, GlobalCandidate};
 pub use index::InstructionIndex;
 pub use strings::{FoundString, StringEncoding, StringScan};
 pub use xrefs::{Xref, XrefKind, XrefTable};
@@ -39,6 +72,12 @@ pub use xrefs::{Xref, XrefKind, XrefTable};
 /// Where a function start came from, most authoritative first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FunctionSource {
+	/// An analyst said a function starts here.
+	///
+	/// The most authoritative source there is. Everything below it is derived
+	/// from the image, and a person correcting a derivation outranks the
+	/// derivation — that is the whole point of being able to correct it.
+	Authored,
 	/// From the exception directory. Compiler-emitted.
 	ExceptionDirectory,
 	/// The image entry point.
@@ -54,12 +93,25 @@ pub enum FunctionSource {
 }
 
 impl FunctionSource {
-	/// Whether the image itself vouches for this boundary.
+	/// Whether something vouches for this boundary.
 	///
 	/// `CallTarget` counts: something in the image calls the address, which is
-	/// strong evidence. `LinearSweep` does not.
+	/// strong evidence. `Authored` counts because a person said so.
+	/// `LinearSweep` does not — nothing vouches for a guess.
+	///
+	/// Matched exhaustively on purpose. A new source has to be classified
+	/// deliberately, and a catch-all would silently make the next one
+	/// authoritative.
 	pub fn is_authoritative(self) -> bool {
-		!matches!(self, Self::LinearSweep)
+		match self {
+			Self::Authored
+			| Self::ExceptionDirectory
+			| Self::EntryPoint
+			| Self::Export
+			| Self::TlsCallback
+			| Self::CallTarget => true,
+			Self::LinearSweep => false,
+		}
 	}
 
 	fn from_seed(source: SeedSource) -> Self {
@@ -84,11 +136,38 @@ pub struct Function {
 	pub source: FunctionSource,
 }
 
+/// Whether the code passes ran at all, and why not when they did not.
+///
+/// Empty instruction, function and xref lists have two incompatible meanings.
+/// Only one of them is a fact about the sample, so the analysis has to say
+/// which it is: reporting "zero instructions" for an image Delver simply cannot
+/// decode is a confident false claim, the failure this codebase ranks worst
+/// (`Docs/design/principles.md` §1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodeDecoding {
+	/// Every code pass ran. Empty results here mean the image really has no
+	/// code the analysis could find.
+	Decoded,
+	/// Delver has no disassembler for this architecture, so recursive descent,
+	/// the linear sweep and xref building were all skipped. Carries the
+	/// architecture string the image declared, so a caller can name it.
+	///
+	/// Everything else on [`AnalyzedImage`] — strings, and whatever the format
+	/// layer parsed — is still valid; only the code facts are absent.
+	UnsupportedArchitecture(String),
+}
+
 /// Everything derived from one image.
-#[derive(Debug, Clone, Default)]
+///
+/// Deliberately not `Default`: an empty analysis is only meaningful alongside
+/// [`AnalyzedImage::decoding`], and a default would answer that question by
+/// accident.
+#[derive(Debug, Clone)]
 pub struct AnalyzedImage {
 	/// Every decoded instruction boundary.
 	pub instructions: InstructionIndex,
+	/// Control-flow facts retained for every decoded instruction, sorted by RVA.
+	pub instruction_flows: Vec<InstructionFlow>,
 	/// Detected functions, sorted by address.
 	pub functions: Vec<Function>,
 	/// Cross-references in both directions.
@@ -97,25 +176,117 @@ pub struct AnalyzedImage {
 	pub strings: Vec<FoundString>,
 	/// Whether the string scan hit its cap and dropped results.
 	pub strings_truncated: bool,
+	/// Whether the code passes ran, and why not when they did not.
+	pub decoding: CodeDecoding,
+}
+
+impl AnalyzedImage {
+	/// Whether the code passes ran.
+	///
+	/// When this is false the instruction, function and xref lists are empty
+	/// because nothing was decoded. Reporting their counts without reporting
+	/// this asserts something untrue about the sample.
+	pub fn decoded_code(&self) -> bool {
+		matches!(self.decoding, CodeDecoding::Decoded)
+	}
+
+	/// The architecture that could not be decoded, when that is why the code
+	/// facts are empty.
+	pub fn undecodable_architecture(&self) -> Option<&str> {
+		match &self.decoding {
+			CodeDecoding::Decoded => None,
+			CodeDecoding::UnsupportedArchitecture(arch) => Some(arch),
+		}
+	}
+}
+
+/// The structure-only facts needed to build basic blocks without decoding again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstructionFlow {
+	/// Instruction start RVA.
+	pub rva: u64,
+	/// Encoded instruction length.
+	pub len: u32,
+	/// Control-flow classification.
+	pub flow: FlowKind,
+	/// Direct branch target, when encoded by the instruction.
+	pub branch_target: Option<u64>,
 }
 
 /// Analyses `image`, reading code from `file`.
 ///
-/// Returns an empty analysis for architectures the disassembler does not
-/// support, rather than guessing.
-pub fn analyze(image: &ParsedImage, file: &[u8]) -> AnalyzedImage {
-	let scan = strings::find_strings(image, file);
+/// Architectures the disassembler cannot decode are not guessed at. The code
+/// facts come back empty and [`AnalyzedImage::decoding`] says why, so a caller
+/// can tell "this image has no code" from "Delver cannot read this image's
+/// code" — see [`CodeDecoding`]. Strings are scanned either way; they do not
+/// need a decoder.
+pub fn analyze(image: &ParsedImage, file: &[u8], coverage: &[Range<u64>]) -> AnalyzedImage {
+	analyze_with(image, file, coverage, &CorrectionSet::default())
+}
+
+/// Analyses `image` with authored corrections to function detection applied.
+///
+/// The corrections are inputs to the derivation, not edits to its output: the
+/// analysis runs from the image bytes plus a corrected seed set, so every fact
+/// that comes back is still recomputable from things a caller can point at.
+/// Nothing here touches `file` — corrections name addresses, never bytes. See
+/// [`corrections`] for the reasoning.
+///
+/// The set is validated as a whole and refused as a whole. A conflicting set
+/// yields [`CorrectionConflict`] and no analysis, because facts derived from
+/// half of an authored set correspond to nothing anyone recorded.
+///
+/// An architecture Delver cannot decode still produces no code facts at all —
+/// an authored function start does not conjure one, since a lone function
+/// beside an empty instruction list would contradict
+/// [`AnalyzedImage::decoding`].
+pub fn analyze_corrected(
+	image: &ParsedImage,
+	file: &[u8],
+	coverage: &[Range<u64>],
+	corrections: &[FunctionCorrection],
+) -> Result<AnalyzedImage, CorrectionConflict> {
+	let corrections = CorrectionSet::new(corrections)?;
+	Ok(analyze_with(image, file, coverage, &corrections))
+}
+
+/// The single implementation behind [`analyze`] and [`analyze_corrected`].
+///
+/// Corrections are a modifier on the one detection path rather than a path of
+/// their own: a parallel implementation would drift, and the corrected facts
+/// would stop being comparable to the uncorrected ones.
+fn analyze_with(
+	image: &ParsedImage,
+	file: &[u8],
+	coverage: &[Range<u64>],
+	corrections: &CorrectionSet,
+) -> AnalyzedImage {
+	let scan = strings::find_strings(image, file, coverage);
 
 	let Some(bitness) = Bitness::from_arch(&image.arch) else {
 		return AnalyzedImage {
+			instructions: InstructionIndex::default(),
+			instruction_flows: Vec::new(),
+			functions: Vec::new(),
+			xrefs: XrefTable::default(),
 			strings: scan.strings,
 			strings_truncated: scan.truncated,
-			..Default::default()
+			decoding: CodeDecoding::UnsupportedArchitecture(image.arch.clone()),
 		};
 	};
 
 	let disasm = Disassembler::new(bitness);
-	let mut state = Descent::new(&disasm, image, file);
+	let mut state = Descent::new(&disasm, image, file, coverage, corrections);
+
+	// Authored starts seed first, and not only because `Authored` outranks
+	// every detected source. `add_function` keeps the first extent it is given,
+	// so going first is what lets an explicit `end_rva` pin the extent over a
+	// detected one, while an absent `end_rva` still inherits whatever detection
+	// infers for the same address.
+	for (rva, end_rva) in corrections.defines() {
+		state.add_function(rva, end_rva, FunctionSource::Authored);
+		state.queue(rva);
+	}
 
 	// Seeds the image vouches for, best source first so the strongest wins the
 	// dedupe in `functions`.
@@ -130,13 +301,15 @@ pub fn analyze(image: &ParsedImage, file: &[u8]) -> AnalyzedImage {
 	state.run();
 	state.linear_sweep();
 
-	let (instructions, functions, xrefs) = state.finish();
+	let (instructions, instruction_flows, functions, xrefs) = state.finish();
 	AnalyzedImage {
 		instructions,
+		instruction_flows,
 		functions,
 		xrefs,
 		strings: scan.strings,
 		strings_truncated: scan.truncated,
+		decoding: CodeDecoding::Decoded,
 	}
 }
 
@@ -145,28 +318,53 @@ struct Descent<'a> {
 	disasm: &'a Disassembler,
 	image: &'a ParsedImage,
 	file: &'a [u8],
+	coverage: &'a [Range<u64>],
+	/// Authored corrections, consulted on every function start.
+	corrections: &'a CorrectionSet,
 	/// Which addresses have been walked, and where instructions start.
 	state: RvaState,
 	/// Best-known source per function address.
 	functions: BTreeMap<u64, (Option<u64>, FunctionSource)>,
 	xrefs: Vec<Xref>,
+	instruction_flows: Vec<InstructionFlow>,
 	queue: Vec<u64>,
 }
 
 impl<'a> Descent<'a> {
-	fn new(disasm: &'a Disassembler, image: &'a ParsedImage, file: &'a [u8]) -> Self {
+	fn new(
+		disasm: &'a Disassembler,
+		image: &'a ParsedImage,
+		file: &'a [u8],
+		coverage: &'a [Range<u64>],
+		corrections: &'a CorrectionSet,
+	) -> Self {
 		Self {
 			disasm,
 			image,
 			file,
-			state: RvaState::new(image),
+			coverage,
+			corrections,
+			state: RvaState::new(image, file.len() as u64, coverage),
 			functions: BTreeMap::new(),
 			xrefs: Vec::new(),
+			instruction_flows: Vec::new(),
 			queue: Vec::new(),
 		}
 	}
 
+	/// Records a function start, unless an author has said there is none there.
+	///
+	/// Every discovery path funnels through here — image seeds, call targets
+	/// found by descent, linear-sweep guesses — which is the only reason an
+	/// `Undefine` holds. Deleting the address afterwards would not: descent
+	/// re-derives it as a `CallTarget` the moment anything calls it, and the
+	/// sweep re-guesses it, both of them long after a seed was removed. The
+	/// refusal has to sit where addresses *become* functions, not where they
+	/// are listed.
 	fn add_function(&mut self, rva: u64, end_rva: Option<u64>, source: FunctionSource) {
+		if self.corrections.is_undefined(rva) {
+			return;
+		}
 		self.functions
 			.entry(rva)
 			.and_modify(|existing| {
@@ -203,7 +401,7 @@ impl<'a> Descent<'a> {
 			if !self.state.visit(rva) {
 				return; // already walked this path
 			}
-			let Some(bytes) = self.image.bytes_at(self.file, rva) else {
+			let Some(bytes) = covered_bytes_at(self.image, self.file, self.coverage, rva) else {
 				return;
 			};
 			// Structure only: this pass decodes every reachable instruction in
@@ -217,6 +415,12 @@ impl<'a> Descent<'a> {
 			}
 
 			self.state.set_instruction(instruction.rva, instruction.len);
+			self.instruction_flows.push(InstructionFlow {
+				rva: instruction.rva,
+				len: instruction.len,
+				flow: instruction.flow,
+				branch_target: instruction.branch_target,
+			});
 
 			if let Some(target) = instruction.branch_target {
 				let kind = match instruction.flow {
@@ -305,8 +509,10 @@ impl<'a> Descent<'a> {
 					continue;
 				}
 
-				let Some(bytes) = self.image.bytes_at(self.file, rva) else {
-					break;
+				let Some(bytes) = covered_bytes_at(self.image, self.file, self.coverage, rva)
+				else {
+					rva += 1;
+					continue;
 				};
 				// Alignment padding is not a function start.
 				if matches!(bytes.first(), Some(0xCC) | Some(0x90) | Some(0x00)) {
@@ -320,6 +526,14 @@ impl<'a> Descent<'a> {
 					.is_some_and(|instruction| instruction.flow != FlowKind::Invalid);
 
 				if decodes {
+					// An undefined address is refused inside `add_function` but
+					// still walked. Skipping the walk instead would leave the
+					// bytes unvisited and the sweep would simply guess a
+					// function one byte later — undefining a start would
+					// manufacture a neighbouring start, which is not what the
+					// author asked for. Walking consumes the run instead. The
+					// instructions stay: the correction withdraws a function
+					// start, it does not claim the bytes are data.
 					self.add_function(rva, None, FunctionSource::LinearSweep);
 					self.queue(rva);
 					self.run();
@@ -332,8 +546,17 @@ impl<'a> Descent<'a> {
 		}
 	}
 
-	fn finish(self) -> (InstructionIndex, Vec<Function>, XrefTable) {
+	fn finish(
+		mut self,
+	) -> (
+		InstructionIndex,
+		Vec<InstructionFlow>,
+		Vec<Function>,
+		XrefTable,
+	) {
 		let instructions = InstructionIndex::from_pairs(self.state.instructions());
+		self.instruction_flows.sort_unstable_by_key(|fact| fact.rva);
+		self.instruction_flows.dedup_by_key(|fact| fact.rva);
 
 		let functions = self
 			.functions
@@ -345,14 +568,76 @@ impl<'a> Descent<'a> {
 			})
 			.collect();
 
-		(instructions, functions, XrefTable::new(self.xrefs))
+		(
+			instructions,
+			self.instruction_flows,
+			functions,
+			XrefTable::new(self.xrefs),
+		)
 	}
+}
+
+/// Returns bytes beginning at `rva`, clipped to the contiguous file coverage
+/// that actually supplied them.
+fn covered_bytes_at<'a>(
+	image: &ParsedImage,
+	file: &'a [u8],
+	coverage: &[Range<u64>],
+	rva: u64,
+) -> Option<&'a [u8]> {
+	let section = image.section_containing(rva)?;
+	let offset_in_section = rva.checked_sub(section.virtual_address)?;
+	if offset_in_section >= section.raw_size {
+		return None;
+	}
+	let start = section.raw_offset.checked_add(offset_in_section)?;
+	let covered_end = coverage
+		.iter()
+		.filter(|range| range.start <= start && start < range.end)
+		.map(|range| range.end)
+		.max()?;
+	let end = covered_end.min(section.raw_end()).min(file.len() as u64);
+	(start < end).then(|| &file[start as usize..end as usize])
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
 	use delver_format::{FunctionSeed, Section};
+
+	fn analyze(image: &ParsedImage, file: &[u8]) -> AnalyzedImage {
+		super::analyze(image, file, &[0..file.len() as u64])
+	}
+
+	fn analyze_corrected(
+		image: &ParsedImage,
+		file: &[u8],
+		corrections: &[FunctionCorrection],
+	) -> Result<AnalyzedImage, CorrectionConflict> {
+		super::analyze_corrected(image, file, &[0..file.len() as u64], corrections)
+	}
+
+	fn define(rva: u64, end_rva: Option<u64>) -> FunctionCorrection {
+		FunctionCorrection {
+			rva,
+			kind: FunctionCorrectionKind::Define { end_rva },
+		}
+	}
+
+	fn undefine(rva: u64) -> FunctionCorrection {
+		FunctionCorrection {
+			rva,
+			kind: FunctionCorrectionKind::Undefine,
+		}
+	}
+
+	fn starts(analysis: &AnalyzedImage) -> Vec<(u64, FunctionSource)> {
+		analysis
+			.functions
+			.iter()
+			.map(|f| (f.rva, f.source))
+			.collect()
+	}
 
 	const CODE_RVA: u64 = 0x1000;
 	const CODE_OFFSET: u64 = 0x200;
@@ -425,6 +710,24 @@ mod tests {
 			.map(|x| (x.from, x.kind))
 			.collect();
 		assert_eq!(calls, vec![(0x1000, XrefKind::Call)]);
+	}
+
+	#[test]
+	fn syscall_does_not_create_a_function_or_call_at_rva_zero() {
+		let (image, file) = image_with_code(&[
+			0x0F, 0x05, // syscall
+			0xC3, // ret
+		]);
+		let analysis = analyze(&image, &file);
+
+		assert_eq!(
+			(
+				source_at(&analysis, 0),
+				analysis.xrefs.to(0).to_vec(),
+				source_at(&analysis, CODE_RVA),
+			),
+			(None, Vec::new(), Some(FunctionSource::EntryPoint)),
+		);
 	}
 
 	#[test]
@@ -545,14 +848,47 @@ mod tests {
 	}
 
 	#[test]
-	fn an_unsupported_architecture_yields_no_guesses() {
+	fn an_unsupported_architecture_yields_no_guesses_and_says_so() {
 		let (mut image, file) = image_with_code(&[0xC3]);
 		image.arch = "Aarch64".to_string();
 
 		let analysis = analyze(&image, &file);
-		assert!(analysis.instructions.is_empty());
-		assert!(analysis.functions.is_empty());
-		assert!(analysis.xrefs.is_empty());
+
+		// Empty *and* labelled. Without the label these three counts read as a
+		// fact about the sample rather than the absence of a decoder.
+		assert_eq!(
+			(
+				analysis.instructions.is_empty(),
+				analysis.functions.is_empty(),
+				analysis.xrefs.is_empty(),
+				analysis.decoded_code(),
+				analysis.undecodable_architecture(),
+				&analysis.decoding,
+			),
+			(
+				true,
+				true,
+				true,
+				false,
+				Some("Aarch64"),
+				&CodeDecoding::UnsupportedArchitecture("Aarch64".to_string()),
+			),
+		);
+	}
+
+	#[test]
+	fn a_decodable_image_reports_its_code_as_decoded() {
+		let (image, file) = image_with_code(&[0xC3]);
+		let analysis = analyze(&image, &file);
+
+		assert_eq!(
+			(
+				analysis.decoded_code(),
+				analysis.undecodable_architecture(),
+				&analysis.decoding,
+			),
+			(true, None, &CodeDecoding::Decoded),
+		);
 	}
 
 	#[test]
@@ -581,5 +917,289 @@ mod tests {
 
 		assert_eq!(function.source, FunctionSource::ExceptionDirectory);
 		assert_eq!(function.end_rva, Some(0x1001));
+	}
+
+	#[test]
+	fn coverage_holes_do_not_stop_later_sections_or_decode_placeholders() {
+		let mut file = vec![0_u8; 0x400];
+		file[0x100] = 0xC3;
+		file[0x300] = 0xC3;
+		let image = ParsedImage {
+			arch: "X86_64".to_string(),
+			sections: vec![
+				Section {
+					name: ".text".to_string(),
+					virtual_address: 0x1000,
+					virtual_size: 0x100,
+					raw_offset: 0x100,
+					raw_size: 0x100,
+					characteristics: 0x6000_0020,
+				},
+				Section {
+					name: ".late".to_string(),
+					virtual_address: 0x3000,
+					virtual_size: 1,
+					raw_offset: 0x300,
+					raw_size: 1,
+					characteristics: 0x6000_0020,
+				},
+			],
+			function_seeds: vec![
+				FunctionSeed {
+					rva: 0x1000,
+					end_rva: Some(0x1001),
+					source: SeedSource::EntryPoint,
+				},
+				FunctionSeed {
+					rva: 0x3000,
+					end_rva: Some(0x3001),
+					source: SeedSource::Export,
+				},
+			],
+			..Default::default()
+		};
+
+		let analysis = super::analyze(&image, &file, &[0..0x180, 0x300..0x301]);
+
+		assert_eq!(
+			analysis
+				.instructions
+				.rows(0, analysis.instructions.len())
+				.map(|(_, rva, _)| rva)
+				.collect::<Vec<_>>(),
+			vec![0x1000, 0x3000],
+		);
+	}
+
+	/// `ret` at the entry, padding, then an unreferenced function led by a
+	/// `nop`.
+	///
+	/// The sweep treats that `nop` as padding, so it guesses the body at 0x1005
+	/// and misses the real start at 0x1004 — the exact mistake an analyst can
+	/// see and detection cannot.
+	const NOP_LED_FUNCTION: &[u8] = &[
+		0xC3, // ret at 0x1000, the entry
+		0xCC, 0xCC, 0xCC, // padding
+		0x90, // nop at 0x1004 — the real start
+		0x48, 0x89, 0xD8, // mov rax,rbx at 0x1005 — what the sweep finds
+		0xC3, // ret at 0x1008
+	];
+
+	#[test]
+	fn a_define_at_an_undetected_address_yields_an_authored_function() {
+		let (image, file) = image_with_code(NOP_LED_FUNCTION);
+
+		let baseline = analyze(&image, &file);
+		assert_eq!(
+			starts(&baseline),
+			vec![
+				(0x1000, FunctionSource::EntryPoint),
+				(0x1005, FunctionSource::LinearSweep),
+			],
+			"detection on its own starts the function one byte late",
+		);
+
+		let corrected =
+			analyze_corrected(&image, &file, &[define(0x1004, None)]).expect("no conflict");
+
+		// Descent runs from the authored start before the sweep, so the bytes
+		// the sweep would have guessed at are already accounted for and the
+		// wrong guess never appears.
+		assert_eq!(
+			starts(&corrected),
+			vec![
+				(0x1000, FunctionSource::EntryPoint),
+				(0x1004, FunctionSource::Authored),
+			],
+		);
+		assert!(
+			FunctionSource::Authored.is_authoritative(),
+			"a person saying so is the strongest evidence there is"
+		);
+		assert!(FunctionSource::Authored < FunctionSource::ExceptionDirectory);
+	}
+
+	#[test]
+	fn a_define_with_an_explicit_end_pins_the_extent() {
+		let (image, file) = image_with_code(NOP_LED_FUNCTION);
+
+		let corrected =
+			analyze_corrected(&image, &file, &[define(0x1004, Some(0x1009))]).expect("no conflict");
+
+		assert_eq!(
+			corrected.functions,
+			vec![
+				Function {
+					rva: 0x1000,
+					end_rva: None,
+					source: FunctionSource::EntryPoint,
+				},
+				Function {
+					rva: 0x1004,
+					end_rva: Some(0x1009),
+					source: FunctionSource::Authored,
+				},
+			],
+		);
+	}
+
+	#[test]
+	fn a_define_on_a_detected_address_upgrades_it_without_duplicating_it() {
+		let (image, file) = image_with_code(NOP_LED_FUNCTION);
+
+		// 0x1005 is exactly what the sweep guesses; defining it agrees with the
+		// guess and promotes it.
+		let corrected =
+			analyze_corrected(&image, &file, &[define(0x1005, None)]).expect("no conflict");
+
+		assert_eq!(
+			starts(&corrected),
+			vec![
+				(0x1000, FunctionSource::EntryPoint),
+				(0x1005, FunctionSource::Authored),
+			],
+			"one entry, upgraded — not a second function at the same address",
+		);
+	}
+
+	#[test]
+	fn a_define_inherits_a_detected_extent_when_the_author_pins_none() {
+		let code = &[0xC3, 0x48, 0x89, 0xD8, 0xC3];
+		let (mut image, file) = image_with_code(code);
+		image.function_seeds = vec![FunctionSeed {
+			rva: 0x1000,
+			end_rva: Some(0x1005),
+			source: SeedSource::ExceptionDirectory,
+		}];
+
+		let corrected =
+			analyze_corrected(&image, &file, &[define(0x1000, None)]).expect("no conflict");
+
+		assert_eq!(
+			corrected.functions,
+			vec![Function {
+				rva: 0x1000,
+				end_rva: Some(0x1005),
+				source: FunctionSource::Authored,
+			}],
+			"an absent end means 'infer it the way a detected one is inferred'",
+		);
+	}
+
+	#[test]
+	fn an_undefine_removes_a_sweep_guess_and_it_stays_gone() {
+		let (image, file) = image_with_code(NOP_LED_FUNCTION);
+
+		let corrected = analyze_corrected(&image, &file, &[undefine(0x1005)]).expect("no conflict");
+
+		assert_eq!(
+			starts(&corrected),
+			vec![(0x1000, FunctionSource::EntryPoint)],
+			"the sweep re-guesses 0x1005 after descent; the refusal has to \
+			 survive that, not merely precede it",
+		);
+		assert!(
+			corrected.instructions.row_for_address(0x1005).is_some(),
+			"the correction withdraws a function start, not the claim that the \
+			 bytes decode",
+		);
+	}
+
+	#[test]
+	fn an_undefine_of_a_call_target_stays_gone_though_something_calls_it() {
+		// call 0x1008 / ret / padding / mov rax,rbx / ret
+		let code = &[
+			0xE8, 0x03, 0x00, 0x00, 0x00, // call rel32 -> 0x1008
+			0xC3, // ret
+			0xCC, 0xCC, // padding
+			0x48, 0x89, 0xD8, // mov rax,rbx at 0x1008
+			0xC3, // ret
+		];
+		let (image, file) = image_with_code(code);
+
+		let corrected = analyze_corrected(&image, &file, &[undefine(0x1008)]).expect("no conflict");
+
+		assert_eq!(
+			(
+				starts(&corrected),
+				corrected
+					.xrefs
+					.to(0x1008)
+					.iter()
+					.map(|x| (x.from, x.kind))
+					.collect::<Vec<_>>(),
+			),
+			(
+				vec![(0x1000, FunctionSource::EntryPoint)],
+				// The call is still a fact about the image. The author denied a
+				// function start, not the instruction that branches there.
+				vec![(0x1000, XrefKind::Call)],
+			),
+		);
+	}
+
+	#[test]
+	fn an_undefine_of_an_undetected_address_is_a_no_op() {
+		let (image, file) = image_with_code(NOP_LED_FUNCTION);
+
+		let baseline = analyze(&image, &file);
+		// 0x1002 is padding; nothing ever called it a function.
+		let corrected = analyze_corrected(&image, &file, &[undefine(0x1002)]).expect("no conflict");
+
+		assert_eq!(format!("{corrected:?}"), format!("{baseline:?}"));
+	}
+
+	#[test]
+	fn a_conflicting_set_is_refused_whole() {
+		let (image, file) = image_with_code(NOP_LED_FUNCTION);
+
+		// Each set has a correction that would apply cleanly on its own. None of
+		// them may apply: a half-written set describes facts nobody recorded.
+		assert_eq!(
+			(
+				analyze_corrected(&image, &file, &[define(0x1004, None), define(0x1004, None)])
+					.err(),
+				analyze_corrected(&image, &file, &[undefine(0x1005), undefine(0x1005)]).err(),
+				analyze_corrected(&image, &file, &[define(0x1004, None), undefine(0x1004)]).err(),
+				analyze_corrected(
+					&image,
+					&file,
+					&[undefine(0x1005), define(0x1004, Some(0x1000))]
+				)
+				.err(),
+			),
+			(
+				Some(CorrectionConflict::DuplicateAddress { rva: 0x1004 }),
+				Some(CorrectionConflict::DuplicateAddress { rva: 0x1005 }),
+				Some(CorrectionConflict::DuplicateAddress { rva: 0x1004 }),
+				Some(CorrectionConflict::EmptyExtent {
+					rva: 0x1004,
+					end_rva: 0x1000,
+				}),
+			),
+		);
+	}
+
+	#[test]
+	fn an_empty_correction_set_derives_exactly_what_analyze_does() {
+		// Every existing caller reaches the detection path through the corrected
+		// one, so an empty set has to be indistinguishable from no set at all.
+		let code = &[
+			0xE8, 0x03, 0x00, 0x00, 0x00, // call rel32 -> 0x1008
+			0xC3, // ret
+			0xCC, 0xCC, // padding
+			0x48, 0x89, 0xD8, // mov rax,rbx at 0x1008
+			0xC3, // ret
+			0x90, // nop
+			0x48, 0x89, 0xD8, // an unreferenced function for the sweep
+			0xC3, // ret
+			b'h', b'e', b'l', b'l', b'o', 0x00, // a string to scan
+		];
+		let (image, file) = image_with_code(code);
+
+		let baseline = analyze(&image, &file);
+		let corrected = analyze_corrected(&image, &file, &[]).expect("no conflict");
+
+		assert_eq!(format!("{corrected:?}"), format!("{baseline:?}"));
 	}
 }

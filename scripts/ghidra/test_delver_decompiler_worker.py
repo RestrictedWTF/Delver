@@ -14,7 +14,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from delver_decompiler_worker import PROTOCOL_VERSION, WorkerError, WorkerServer, normalize_generated_function_names, parse_request, print_decompiled, required_rva, resolve_function
+from delver_decompiler_worker import MAX_COMPOSITE_FIELDS, MAX_SEMANTIC_COMPOSITES, PROTOCOL_VERSION, WorkerError, WorkerServer, normalize_generated_function_names, parse_request, print_decompiled, required_rva, required_semantics, resolve_function
 
 
 class FakeDriver:
@@ -108,6 +108,86 @@ class ProtocolTests(unittest.TestCase):
 		for value in ("1af", "0x01", "0x1AF", "0x"):
 			with self.subTest(value=value), self.assertRaises(WorkerError):
 				required_rva({"functionRva": value}, "functionRva")
+
+	def test_semantics_are_canonical_bounded_and_sorted(self) -> None:
+		self.assertEqual(required_semantics({
+			"semantics": {
+				"schemaVersion": 1,
+				"dataTypes": [{"rva": "0x2000", "declaration": "uint32_t"}],
+				"functionPrototypes": [{"rva": "0x1000", "declaration": "int entry(uint32_t flags)"}],
+			},
+		}), {
+			"composites": [],
+			"dataTypes": [{"rva": 0x2000, "declaration": "uint32_t"}],
+			"functionPrototypes": [{"rva": 0x1000, "declaration": "int entry(uint32_t flags)"}],
+		})
+		invalid = (
+			{},
+			{"semantics": {"schemaVersion": 3, "dataTypes": [], "functionPrototypes": [], "composites": []}},
+			{"semantics": {"schemaVersion": 2, "dataTypes": [], "functionPrototypes": []}},
+			{"semantics": {"schemaVersion": 1, "dataTypes": [], "functionPrototypes": [], "composites": []}},
+			{"semantics": {"schemaVersion": 1, "dataTypes": [{"rva": "0x10", "declaration": "int"}, {"rva": "0x10", "declaration": "char"}], "functionPrototypes": []}},
+			{"semantics": {"schemaVersion": 1, "dataTypes": [], "functionPrototypes": [{"rva": "0x1000", "declaration": ""}]}},
+		)
+		for params in invalid:
+			with self.subTest(params=params), self.assertRaises(WorkerError):
+				required_semantics(params)
+
+	def test_composites_are_identified_bounded_and_offset_ordered(self) -> None:
+		self.assertEqual(required_semantics({
+			"semantics": {
+				"schemaVersion": 2,
+				"composites": [
+					{"name": "Config", "kind": "struct", "size": 24, "fields": [
+						{"offset": 0, "name": "flags", "type": "uint32_t"},
+						{"offset": 8, "name": "label", "type": "char[16]"},
+					]},
+					{"name": "Empty", "kind": "struct", "size": 4, "fields": []},
+				],
+				"dataTypes": [{"rva": "0x2000", "declaration": "Config"}],
+				"functionPrototypes": [],
+			},
+		}), {
+			"composites": [
+				{"name": "Config", "kind": "struct", "size": 24, "fields": [
+					{"offset": 0, "name": "flags", "type": "uint32_t"},
+					{"offset": 8, "name": "label", "type": "char[16]"},
+				]},
+				{"name": "Empty", "kind": "struct", "size": 4, "fields": []},
+			],
+			"dataTypes": [{"rva": 0x2000, "declaration": "Config"}],
+			"functionPrototypes": [],
+		})
+		one_field = [{"offset": 0, "name": "flags", "type": "uint32_t"}]
+		invalid = (
+			[{"name": "Zeta", "kind": "struct", "size": 4, "fields": []}, {"name": "Alpha", "kind": "struct", "size": 4, "fields": []}],
+			[{"name": "Config", "kind": "struct", "size": 4, "fields": []}, {"name": "Config", "kind": "struct", "size": 8, "fields": []}],
+			[{"name": "0Config", "kind": "struct", "size": 4, "fields": []}],
+			[{"name": "Config", "kind": "union", "size": 4, "fields": []}],
+			[{"name": "Config", "kind": "struct", "size": 0, "fields": []}],
+			[{"name": "Config", "kind": "struct", "size": 2 * 1024 * 1024, "fields": []}],
+			[{"name": "Config", "kind": "struct", "size": 24, "fields": one_field * 2}],
+			[{"name": "Config", "kind": "struct", "size": 24, "fields": [
+				{"offset": 8, "name": "label", "type": "char[16]"},
+				{"offset": 0, "name": "flags", "type": "uint32_t"},
+			]}],
+			[{"name": "Config", "kind": "struct", "size": 24, "fields": [
+				{"offset": 0, "name": "flags", "type": "uint32_t"},
+				{"offset": 8, "name": "flags", "type": "uint32_t"},
+			]}],
+			[{"name": "Config", "kind": "struct", "size": 24, "fields": [{"offset": 24, "name": "past", "type": "uint32_t"}]}],
+			[{"name": "Config", "kind": "struct", "size": 24, "fields": [{"offset": -1, "name": "before", "type": "uint32_t"}]}],
+			[{"name": "Config", "kind": "struct", "size": 24, "fields": [{"offset": 0, "name": "flags", "type": ""}]}],
+			[{"name": "Config", "kind": "struct", "size": 24, "fields": [{"offset": 0, "name": "flags"}]}],
+			[{"name": "Config", "kind": "struct", "size": 4}],
+			[{"name": "Config", "kind": "struct", "size": 4, "fields": [], "comment": "extra"}],
+			[{"name": "Config", "kind": "struct", "size": 4, "fields": one_field * (MAX_COMPOSITE_FIELDS + 1)}],
+			[{"name": f"Type{index:05}", "kind": "struct", "size": 4, "fields": []} for index in range(MAX_SEMANTIC_COMPOSITES + 1)],
+		)
+		for composites in invalid:
+			params = {"semantics": {"schemaVersion": 2, "composites": composites, "dataTypes": [], "functionPrototypes": []}}
+			with self.subTest(composites=composites[:2]), self.assertRaises(WorkerError):
+				required_semantics(params)
 
 	def test_server_writes_versioned_success_and_structured_error(self) -> None:
 		input_stream = io.StringIO(

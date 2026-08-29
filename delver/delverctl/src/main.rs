@@ -7,7 +7,8 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use delver_protocol::{
 	FunctionsResult, GetExportsResult, GetFunctionSeedsResult, GetImageInfoResult,
-	GetImportsResult, ListingWindowResult, OpenImageResult, ReadMemoryParams, Request, Response,
+	GetImportsResult, ListingWindowResult, ListingWindowRowWire, OpenImageResult, ReadMemoryParams,
+	Request,
 };
 use delver_rpc::Client;
 
@@ -181,7 +182,12 @@ impl Session {
 		Ok(())
 	}
 
-	fn call(&mut self, method: &str, params: serde_json::Value) -> Result<Response> {
+	/// Sends one request and returns its result payload.
+	///
+	/// A response carrying neither an error nor a result is a peer that broke
+	/// the protocol, which is a reason to report and exit — never a reason to
+	/// panic in a tool the acceptance path runs.
+	fn call(&mut self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
 		self.client.send_request(&Request {
 			id: 1,
 			method: method.to_string(),
@@ -191,7 +197,8 @@ impl Session {
 		if let Some(err) = resp.error {
 			bail!("{} failed: {}", method, err.message);
 		}
-		Ok(resp)
+		resp.result
+			.with_context(|| format!("{method} returned neither an error nor a result"))
 	}
 
 	fn read_frame(&mut self) -> Result<(u64, Vec<u8>)> {
@@ -201,19 +208,29 @@ impl Session {
 
 fn cmd_info(session: &mut Session) -> Result<()> {
 	let resp = session.call("getImageInfo", serde_json::Value::Null)?;
-	let info: GetImageInfoResult = serde_json::from_value(resp.result.unwrap())?;
+	let info: GetImageInfoResult = serde_json::from_value(resp)?;
 
 	println!("arch:       {}", info.arch);
 	println!("entry:      0x{:X}", info.entry);
 	println!("image_base: 0x{:X}", info.image_base);
+	let import_symbol_count = info
+		.import_symbol_count
+		.map(|count| count.to_string())
+		.unwrap_or_else(|| "unknown".to_owned());
 	println!(
 		"counts:     {} modules, {} imports, {} exports, {} seeds, {} relocs",
 		info.import_module_count,
-		info.import_symbol_count,
+		import_symbol_count,
 		info.export_count,
 		info.function_seed_count,
 		info.relocation_count
 	);
+
+	// Printed before the lists it qualifies: an empty import list from a failed
+	// parse looks exactly like a sample that imports nothing.
+	if !info.fully_parsed {
+		println!("parse:      PARTIAL — {}", parse_gaps(&info).join(", "));
+	}
 
 	println!("sections:");
 	for s in &info.sections {
@@ -237,7 +254,7 @@ fn cmd_info(session: &mut Session) -> Result<()> {
 	}
 
 	let resp = session.call("getImports", serde_json::Value::Null)?;
-	let imports: GetImportsResult = serde_json::from_value(resp.result.unwrap())?;
+	let imports: GetImportsResult = serde_json::from_value(resp)?;
 	if !imports.modules.is_empty() {
 		println!("imports:");
 		for m in &imports.modules {
@@ -257,7 +274,7 @@ fn cmd_info(session: &mut Session) -> Result<()> {
 	}
 
 	let resp = session.call("getExports", serde_json::Value::Null)?;
-	let exports: GetExportsResult = serde_json::from_value(resp.result.unwrap())?;
+	let exports: GetExportsResult = serde_json::from_value(resp)?;
 	if !exports.exports.is_empty() {
 		println!("exports: {}", exports.exports.len());
 		for e in exports.exports.iter().take(LIST_PREVIEW) {
@@ -274,7 +291,7 @@ fn cmd_info(session: &mut Session) -> Result<()> {
 	}
 
 	let resp = session.call("getFunctionSeeds", serde_json::Value::Null)?;
-	let seeds: GetFunctionSeedsResult = serde_json::from_value(resp.result.unwrap())?;
+	let seeds: GetFunctionSeedsResult = serde_json::from_value(resp)?;
 	if !seeds.seeds.is_empty() {
 		let mut by_source: BTreeMap<String, usize> = BTreeMap::new();
 		for s in &seeds.seeds {
@@ -300,9 +317,42 @@ fn cmd_info(session: &mut Session) -> Result<()> {
 	session.shutdown()
 }
 
+/// Names the directories a parse could not deliver in full.
+///
+/// One line rather than thirteen fields: the harness exists to make a partial
+/// parse visible, and the detail is on the wire for anyone who needs it.
+fn parse_gaps(info: &GetImageInfoResult) -> Vec<&'static str> {
+	let flags = [
+		(info.imports_failed, "imports failed"),
+		(info.imports_truncated, "imports truncated"),
+		(info.exports_failed, "exports failed"),
+		(info.exports_truncated, "exports truncated"),
+		(
+			info.exception_directory_failed,
+			"exception directory failed",
+		),
+		(info.function_seeds_truncated, "seeds truncated"),
+		(info.relocations_failed, "relocations failed"),
+		(info.relocations_truncated, "relocations truncated"),
+		(info.tls_failed, "TLS failed"),
+		(info.section_names_unreadable, "section names unreadable"),
+	];
+	let named: Vec<_> = flags
+		.into_iter()
+		.filter_map(|(set, label)| set.then_some(label))
+		.collect();
+	if named.is_empty() {
+		// `fully_parsed` also folds in the per-module and per-callback signals,
+		// which have no image-level flag to name.
+		vec!["a module, symbol, or TLS callback list is incomplete"]
+	} else {
+		named
+	}
+}
+
 fn cmd_spaces(session: &mut Session) -> Result<()> {
 	let resp = session.call("listSpaces", serde_json::Value::Null)?;
-	let spaces: delver_protocol::ListSpacesResult = serde_json::from_value(resp.result.unwrap())?;
+	let spaces: delver_protocol::ListSpacesResult = serde_json::from_value(resp)?;
 
 	for s in &spaces.spaces {
 		let translates = s
@@ -329,8 +379,7 @@ fn cmd_read(session: &mut Session, space: &str, address: &str, length: &str) -> 
 		moment: None,
 	};
 	let resp = session.call("readMemory", serde_json::to_value(params)?)?;
-	let read_result: delver_protocol::ReadMemoryResult =
-		serde_json::from_value(resp.result.unwrap())?;
+	let read_result: delver_protocol::ReadMemoryResult = serde_json::from_value(resp)?;
 
 	let (frame_id, bytes) = session.read_frame()?;
 	if frame_id != read_result.data.frame_id {
@@ -439,19 +488,29 @@ fn run_analysis(endpoint: &str, rows: u64) -> Result<()> {
 	let mut session = Session::connect(endpoint)?;
 
 	let response = session.call("analysis/openImage", serde_json::Value::Null)?;
-	let opened: OpenImageResult =
-		serde_json::from_value(response.result.context("openImage returned no result")?)?;
+	let opened: OpenImageResult = serde_json::from_value(response)?;
 
 	println!("arch:         {}", opened.arch);
 	println!("instructions: {}", opened.instruction_count);
 	println!("functions:    {}", opened.function_count);
 	println!("xrefs:        {}", opened.xref_count);
 	println!("strings:      {}", opened.string_count);
+	// Printed before anything derived from those counts: they are counts over
+	// the bytes that were read, and an unreadable range is a range none of them
+	// says anything about.
+	if !opened.coverage_complete {
+		println!(
+			"coverage:     PARTIAL — read 0x{:X} bytes",
+			opened.bytes_read
+		);
+		for range in &opened.unreadable_ranges {
+			println!("  unreadable  [0x{:X}, 0x{:X})", range.start, range.end);
+		}
+	}
 
 	let params = serde_json::json!({ "image_id": opened.image_id });
 	let response = session.call("analysis/functions", params.clone())?;
-	let functions: FunctionsResult =
-		serde_json::from_value(response.result.context("functions returned no result")?)?;
+	let functions: FunctionsResult = serde_json::from_value(response)?;
 
 	println!();
 	println!("functions (first {LIST_PREVIEW}):");
@@ -459,8 +518,18 @@ fn run_analysis(endpoint: &str, rows: u64) -> Result<()> {
 		let mark = if function.authoritative { ' ' } else { '?' };
 		println!("  {mark} 0x{:08X}  {:?}", function.rva, function.source);
 	}
-	if functions.functions.len() > LIST_PREVIEW {
-		println!("  ... {} more", functions.functions.len() - LIST_PREVIEW);
+	// Counted against the untruncated total, not against the page: the server
+	// bounds this list, and "N more" measured from a bounded page would under-
+	// report the image.
+	if functions.total > LIST_PREVIEW as u64 {
+		println!("  ... {} more", functions.total - LIST_PREVIEW as u64);
+	}
+	if functions.list_truncated {
+		println!(
+			"  (server returned {} of {} functions)",
+			functions.functions.len(),
+			functions.total
+		);
 	}
 
 	let window = serde_json::json!({
@@ -469,11 +538,7 @@ fn run_analysis(endpoint: &str, rows: u64) -> Result<()> {
 		"count": rows,
 	});
 	let response = session.call("analysis/listingWindow", window)?;
-	let listing: ListingWindowResult = serde_json::from_value(
-		response
-			.result
-			.context("listingWindow returned no result")?,
-	)?;
+	let listing: ListingWindowResult = serde_json::from_value(response)?;
 
 	println!();
 	println!(
@@ -482,19 +547,27 @@ fn run_analysis(endpoint: &str, rows: u64) -> Result<()> {
 		listing.total_rows
 	);
 	for row in &listing.rows {
-		let operands = if row.operands.is_empty() {
-			String::new()
-		} else {
-			format!(" {}", row.operands)
-		};
-		let target = match row.branch_target {
-			Some(target) => format!("   -> 0x{target:X}"),
-			None => String::new(),
-		};
-		println!(
-			"  {:>5}  0x{:08X}  {}{}{}",
-			row.row, row.rva, row.mnemonic, operands, target
-		);
+		match row {
+			ListingWindowRowWire::Instruction(row) => {
+				let operands = if row.operands.is_empty() {
+					String::new()
+				} else {
+					format!(" {}", row.operands)
+				};
+				let target = match row.branch_target {
+					Some(target) => format!("   -> 0x{target:X}"),
+					None => String::new(),
+				};
+				println!(
+					"  {:>5}  0x{:08X}  {}{}{}",
+					row.row, row.rva, row.mnemonic, operands, target
+				);
+			}
+			ListingWindowRowWire::String(row) => {
+				// Escaped: this text came from the image and is attacker-controlled.
+				println!("  {:>5}  0x{:08X}  {:?}", row.row, row.rva, row.text);
+			}
+		}
 	}
 
 	session.shutdown()
