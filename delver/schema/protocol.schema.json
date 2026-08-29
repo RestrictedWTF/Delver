@@ -713,6 +713,13 @@
             "TargetBusy"
           ],
           "type": "string"
+        },
+        {
+          "description": "An index or cursor was taken against a derivation that no longer exists.\n\nDistinct from `InvalidAddress`, which says the caller named something that was never valid. This says the opposite: it *was* valid, the facts were derived again underneath it, and continuing would answer from a different table. A caller that can restart its walk should; one that cannot must record what it has as incomplete rather than as whole.",
+          "enum": [
+            "StaleDerivation"
+          ],
+          "type": "string"
         }
       ]
     },

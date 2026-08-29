@@ -202,14 +202,32 @@ rather than papered over.
 reasoning: a patch changes the bytes, so facts derived from them are facts about
 something the sample no longer is. It needs its own decision.
 
-**Still open, and worth knowing:** the protocol defines an optional `generation`
-on the row-index requests precisely so a stale index is refused, and no
-TypeScript caller sends it — `listingWindow`, `rowForAddress` and `addressForRow`
-all omit the field. The agent-layer cursors above now cover the paths an agent
-actually walks, so this is a latent hole rather than a live one, but it is a hole
-and the tool descriptions describe the mechanism as though it were wired.
+**The xref export could splice two derivations into one retained table.**
+Recorded as latent last round; it was live. `retainXrefs` walks the whole
+cross-reference table over as many as 512 round trips and never bound the walk
+to a derivation, while the session service pushes accepted corrections *without
+awaiting them* — so the window is not narrow. The result is retained as the
+answer a `.delverdb` opened without its sample gives to "who references this",
+for the life of the project, and it would match no derivation at all.
 
-**Verified:** 408 Delver TypeScript tests, 248 Rust tests, and the 10 Python
+The walk now reads `generation` off every page and restarts, at most twice, if
+it moves; rows from an abandoned pass are discarded rather than merged, and if
+the restarts run out the table is saved empty and marked incomplete, which
+already reports `partial` rather than a confident zero. The check is on the
+*result* rather than on a refusal from the server, deliberately: this is `common`
+code reaching the analysis server across IPC, where a structured error kind does
+not survive and a refusal would surface as a generic failure that aborts the save
+instead of restarting it.
+
+The server-side guard is now reachable too. `analysis/xrefIndex` accepts the
+`generation` a caller took its index against, and refusing it was reported as
+`ErrorKind::InvalidAddress` — which claims the caller named something never
+valid, the opposite of what happened. There is now an `ErrorKind::StaleDerivation`
+saying what actually occurred, exercised by a node test against the real server
+that also checks the *unguarded* call is still answered, so the guard is
+load-bearing rather than decorative.
+
+**Verified:** 409 Delver TypeScript tests, 248 Rust tests, and the 10 Python
 decompiler-worker tests pass; the client typecheck is clean, the corpus matches
 6/6, `cargo fmt` and clippy are clean, and the layers check is clean. Run the
 TypeScript suite with the full selector — `--grep Delver` alone misses six

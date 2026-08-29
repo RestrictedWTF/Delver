@@ -1193,7 +1193,7 @@ fn xref_index(request: &Request, state: &Arc<Mutex<State>>) -> Result<serde_json
 	if let Some(generation) = params.generation {
 		if generation != image.generation {
 			return Err(RpcError::domain(
-				ErrorKind::InvalidAddress,
+				ErrorKind::StaleDerivation,
 				format!(
 					"cursor belongs to derivation {generation}; the facts were re-derived and are now at {}. Restart the walk.",
 					image.generation

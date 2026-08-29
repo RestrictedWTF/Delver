@@ -464,6 +464,53 @@ suite('DelverAnalysisSession', () => {
 		}
 	});
 
+	test('refuses to continue an xref walk into a re-derived table', async function () {
+		this.timeout(30_000);
+
+		// The retained table is what a `.delverdb` opened without its sample
+		// answers "who references this" from, for the life of the project. A walk
+		// that spanned a re-derivation would splice rows from two tables into one
+		// that matches neither, and nothing downstream could tell.
+		const session = await startCallSession();
+		try {
+			const first = await session.xrefIndex(0, 1);
+			assert.ok(first.xrefs.length > 0, 'the call fixture makes at least one reference');
+
+			// An empty correction set still re-derives, which is exactly the
+			// point: the generation is about the table being rebuilt, not about
+			// the corrections differing.
+			const applied = await session.setCorrections([], []);
+
+			let refusal: string | undefined;
+			try {
+				// Index 0 is valid in either table, so a refusal here can only be
+				// about the derivation and not about the index being out of range.
+				await session.xrefIndex(0, 1, first.generation);
+			} catch (error) {
+				refusal = error instanceof Error ? error.message : String(error);
+			}
+			// Without the generation the same call is answered, from the new
+			// table — which is what makes the guard load-bearing rather than
+			// decorative.
+			const unguarded = await session.xrefIndex(0, 1);
+
+			assert.deepStrictEqual({
+				movedOn: applied.generation > first.generation,
+				refused: refusal !== undefined,
+				namesBothDerivations: refusal?.includes(String(first.generation)) === true
+					&& refusal?.includes(String(applied.generation)) === true,
+				unguardedAnswered: unguarded.generation,
+			}, {
+				movedOn: true,
+				refused: true,
+				namesBothDerivations: true,
+				unguardedAnswered: applied.generation,
+			});
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test('exports the whole xref table across pages, ending only when it is exhausted', async function () {
 		this.timeout(30_000);
 

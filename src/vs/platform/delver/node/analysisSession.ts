@@ -317,11 +317,15 @@ export class DelverAnalysisSession extends Disposable {
 		return json.result as IScanStringsResult;
 	}
 
-	async xrefIndex(start: number, maxXrefs: number): Promise<IXrefIndexResult> {
+	async xrefIndex(start: number, maxXrefs: number, generation?: number): Promise<IXrefIndexResult> {
 		const { json } = await this.rpc.call('analysis/xrefIndex', {
 			image_id: this.image.image_id,
 			start,
 			max_xrefs: maxXrefs,
+			// Sent from the second page on. A `start` index only means anything
+			// against the derivation it was taken from, and this walk spans many
+			// round trips during which an accepted correction can land.
+			...(generation === undefined ? {} : { generation }),
 		});
 		return json.result as IXrefIndexResult;
 	}

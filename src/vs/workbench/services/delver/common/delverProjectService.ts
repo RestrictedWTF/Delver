@@ -49,6 +49,32 @@ const LOCAL_REVIEWER: IAuthor = { kind: 'human', id: 'local' };
  */
 const XREF_EXPORT_MAX_PAGES = 512;
 
+/**
+ * How many times the export restarts when the facts move under it.
+ *
+ * Two, not one: a correction landing during a save is plausible — the session
+ * service pushes accepted corrections without awaiting them — and losing the
+ * whole retained table to a `partial` flag every time one does would be a real
+ * loss. Not unbounded, because a target being corrected continuously would
+ * otherwise keep a save spinning.
+ */
+const XREF_EXPORT_MAX_RESTARTS = 2;
+
+/**
+ * Whether a page belongs to the derivation the walk started in.
+ *
+ * The check is on the *result*, not on a refusal from the server. The server
+ * will refuse a stale `start` when one is passed — that is what
+ * `ErrorKind.StaleDerivation` is for — but this service is `common` code
+ * reaching the analysis server across IPC, where a structured error kind does
+ * not survive, and a refusal would surface as a generic failure that aborts the
+ * save rather than restarting it. Every page carries its `generation`, and
+ * comparing that gives the same protection on the near side of the boundary.
+ */
+function sameDerivation(first: number | undefined, page: number): boolean {
+	return first === undefined || first === page;
+}
+
 /** The session information required to create or update a portable project. */
 export interface IDelverProjectSession {
 	readonly sessionId?: AnalysisSessionId;
@@ -905,24 +931,64 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 		if (!session.sessionId) {
 			return;
 		}
+		// The walk is many round trips, and an accepted correction re-derives the
+		// table underneath it — the session service pushes corrections without
+		// awaiting them, so this is not a narrow window. Splicing rows from two
+		// derivations produces a table that matches no derivation at all, and it
+		// is retained as the answer an offline project gives to "who references
+		// this" for the life of the project. So the walk is bound to its
+		// derivation and restarted if that changes.
+		let xrefs: IXrefWire[] = [];
+		let complete = false;
+		for (let attempt = 0; attempt < XREF_EXPORT_MAX_RESTARTS; attempt++) {
+			const walk = await this.walkXrefTable(session.sessionId);
+			if (walk !== undefined) {
+				xrefs = walk.xrefs;
+				complete = walk.complete;
+				break;
+			}
+			// Undefined means the derivation moved. Everything collected belongs
+			// to a table that no longer exists, so it is discarded rather than
+			// merged; `xrefs` stays empty if the restarts run out, and an empty
+			// table marked incomplete answers `partial` rather than a confident
+			// zero.
+		}
+		await this.storeService.saveXrefs(projectId, xrefs, complete, revisionId);
+	}
+
+	/**
+	 * One complete pass over the server's cross-reference table.
+	 *
+	 * Returns `undefined` when the facts were derived again mid-walk, which is
+	 * the one outcome that must not be salvaged: the rows already collected are
+	 * indexes into a table that no longer exists, and half of one derivation
+	 * spliced onto half of another is a table nobody can reproduce or reason
+	 * about.
+	 */
+	private async walkXrefTable(sessionId: AnalysisSessionId): Promise<{ readonly xrefs: IXrefWire[]; readonly complete: boolean } | undefined> {
 		const xrefs: IXrefWire[] = [];
 		let start = 0;
-		let complete = false;
+		let generation: number | undefined;
 		for (let page = 0; page < XREF_EXPORT_MAX_PAGES; page++) {
-			const result = await this.analysisService.xrefIndex(session.sessionId, start, 0);
+			const result = await this.analysisService.xrefIndex(sessionId, start, 0);
+			// The first page establishes which derivation this walk belongs to;
+			// every page after it is checked against that.
+			if (!sameDerivation(generation, result.generation)) {
+				return undefined;
+			}
+			generation = result.generation;
 			xrefs.push(...result.xrefs);
 			if (result.next_start === undefined) {
-				complete = true;
-				break;
+				return { xrefs, complete: true };
 			}
 			// A page that returns nothing while still claiming a continuation
 			// would spin forever; treat it as the end of what can be retained.
 			if (result.xrefs.length === 0) {
-				break;
+				return { xrefs, complete: false };
 			}
 			start = result.next_start;
 		}
-		await this.storeService.saveXrefs(projectId, xrefs, complete, revisionId);
+		return { xrefs, complete: false };
 	}
 
 	private async snapshotFor(session: IDelverProjectSession): Promise<IDelverProjectSnapshotUpdate> {

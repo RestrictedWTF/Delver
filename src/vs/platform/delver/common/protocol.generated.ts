@@ -514,6 +514,12 @@ export const enum ErrorKind {
 	 * The target is temporarily busy and the request should be retried.
 	 */
 	TargetBusy = 'TargetBusy',
+	/**
+	 * An index or cursor was taken against a derivation that no longer exists.
+	 *
+	 * Distinct from `InvalidAddress`, which says the caller named something that was never valid. This says the opposite: it *was* valid, the facts were derived again underneath it, and continuing would answer from a different table. A caller that can restart its walk should; one that cannot must record what it has as incomplete rather than as whole.
+	 */
+	StaleDerivation = 'StaleDerivation',
 }
 
 /**

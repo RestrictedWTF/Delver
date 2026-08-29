@@ -222,7 +222,7 @@ export interface IDelverAnalysisService {
 	 * is the completeness signal, and it is passed through unchanged. A caller
 	 * must not read a short page as the end, nor a missing `next_start` as zero.
 	 */
-	xrefIndex(sessionId: AnalysisSessionId, start: number, maxXrefs: number): Promise<IXrefIndexResult>;
+	xrefIndex(sessionId: AnalysisSessionId, start: number, maxXrefs: number, generation?: number): Promise<IXrefIndexResult>;
 
 	/**
 	 * Re-derives every fact for a session against a new correction set.

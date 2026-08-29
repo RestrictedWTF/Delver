@@ -127,8 +127,8 @@ export class DelverAnalysisService extends Disposable implements IDelverAnalysis
 		return this.session(sessionId).xrefsFrom(BigInt(rva));
 	}
 
-	async xrefIndex(sessionId: AnalysisSessionId, start: number, maxXrefs: number): Promise<IXrefIndexResult> {
-		return this.session(sessionId).xrefIndex(start, maxXrefs);
+	async xrefIndex(sessionId: AnalysisSessionId, start: number, maxXrefs: number, generation?: number): Promise<IXrefIndexResult> {
+		return this.session(sessionId).xrefIndex(start, maxXrefs, generation);
 	}
 
 	async setCorrections(
