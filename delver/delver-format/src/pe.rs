@@ -696,7 +696,9 @@ fn callback_list_rva(callbacks_va: u64, image_base: u64) -> Option<u32> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use object::pe::{IMAGE_SUBSYSTEM_NATIVE, IMAGE_SUBSYSTEM_WINDOWS_CUI, IMAGE_SUBSYSTEM_WINDOWS_GUI};
+	use object::pe::{
+		IMAGE_SUBSYSTEM_NATIVE, IMAGE_SUBSYSTEM_WINDOWS_CUI, IMAGE_SUBSYSTEM_WINDOWS_GUI,
+	};
 
 	/// The test binary is itself a PE, which makes it a convenient real image.
 	fn current_exe_image() -> ParsedImage {

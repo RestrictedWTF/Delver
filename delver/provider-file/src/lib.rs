@@ -26,8 +26,8 @@ use delver_protocol::{
 	AddressSpaceKindWire, AddressSpaceWire, ExportWire, FrameRef, FunctionSeedWire,
 	GetExportsResult, GetFunctionSeedsResult, GetImageInfoResult, GetImportsResult,
 	ImportedModuleWire, ImportedSymbolWire, InitializeResult, MomentKindWire, MomentWire,
-	RangeWire, ReadMemoryParams, ReadMemoryResult, SectionWire, SeedSourceWire,
-	SubsystemWire, TargetCapabilityWire, TargetDescriptorWire, TlsWire,
+	RangeWire, ReadMemoryParams, ReadMemoryResult, SectionWire, SeedSourceWire, SubsystemWire,
+	TargetCapabilityWire, TargetDescriptorWire, TlsWire,
 };
 use memmap2::Mmap;
 use sha2::{Digest, Sha256};
