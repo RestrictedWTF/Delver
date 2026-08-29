@@ -704,6 +704,13 @@ const PRESENTATIONS = new Map<string, IDelverToolPresentation>([
 			},
 		}, ['proposals']),
 	}],
+	[DelverAgentCapabilityId.ExportReport, {
+		icon: Codicon.report,
+		displayName: localize('delverTool.exportReport.displayName', "Delver Export Report"),
+		userDescription: localize('delverTool.exportReport.userDescription', "Render retained findings as a Markdown report"),
+		usage: `Renders every finding retained for the open bytes as Markdown, grouped by whether a human accepted it, rejected it, or has not looked at it yet, with each claim carrying its evidence ranges, its author, and the tool calls cited for it. Rejected findings are kept on purpose: "we looked and it was nothing" is a result, and dropping it costs the next reader the work it cost you. Nothing is read from the sample, so this works on a project opened without one. A report past the result limit is refused with its size rather than cut short, because a report truncated mid-claim has lost the evidence for whichever claim it was cut inside — ask the analyst to export it to a file instead. ${UNTRUSTED_NOTE}`,
+		inputSchema: objectSchema({}),
+	}],
 	[DelverAgentCapabilityId.Reanalyze, {
 		icon: Codicon.refresh,
 		displayName: localize('delverTool.reanalyze.displayName', "Delver Reanalyze"),

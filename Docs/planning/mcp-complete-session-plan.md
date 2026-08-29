@@ -393,7 +393,20 @@ What S5 still does not have, all verified absent rather than assumed:
   its subject is a range the author draws, not the decoded extent of something
   the analysis already found — there is still no operation that withdraws the
   code claim over an existing function's own instructions.
-- **Adjusting the bounds of an existing function, as an operation.** A `define`
+- **Adjusting the bounds of an existing function, as an operation.** *An open
+  design question, deliberately not decided without the human* (invariant 14).
+  The shape that fits is a third kind on the same anchor — a `relocate` at the
+  *existing* entry point carrying the new start, so the log records one decision
+  about one function rather than two unrelated corrections at two addresses, and
+  it lowers to `Undefine(old) + Define(new)` before it reaches the wire. Two
+  forks make it a decision rather than an implementation: whether the lowering
+  belongs in the workbench or in the analysis crate, and what happens when the
+  lowered `Define` collides with a correction already authored at that address —
+  the server refuses a conflicting set whole, and the current push swallows that
+  failure, so a collision would silently leave every correction unapplied.
+  Neither answer is recorded anywhere, so neither was invented.
+
+  What exists today: A `define`
   carrying an explicit exclusive end does pin an extent at an address detection
   already found — that much works, and suppresses sweep guesses inside the range.
   What does not exist is an operation whose subject is an existing function:
@@ -434,6 +447,22 @@ the caller can act on rather than something it has to page for. The cursor's
 state stamp is `['findings', count, decidedCount]`: both logs are append-only, so
 counting them is enough to tell one view of them from another. Results are marked
 `untrusted: true`, since finding text can quote sample-derived strings.
+
+**Reports export with evidence links.** `delver_export_report` renders every
+finding retained for the open bytes as Markdown, grouped by the human decision
+on it — accepted, awaiting review, rejected — with each claim carrying its
+evidence ranges, its author, the capability that reported it, and the tool calls
+cited for it. Rejected findings are kept rather than dropped: "we looked and it
+was nothing" is a result, and re-deriving it costs the next reader the work it
+cost the first. An unreviewed finding is rendered as unreviewed, because a
+report that presents proposed model output beside accepted conclusions is the
+false-claim failure this project ranks above a crash. `renderDelverFindingReport`
+is a pure function of what the project already holds and reads no bytes, so the
+report works on a `.delverdb` handed to someone who never had the sample —
+which is the case a report exists for. An empty report says the *investigation*
+retained nothing, never that the sample is clean. A report past the result limit
+is refused with its size rather than prefix-truncated: a report cut mid-claim has
+lost the evidence for whichever claim it was cut inside.
 
 **Exit:** a large investigation resumes from unresolved work without replaying
 chat history and exports a report whose claims link back to evidence. Not met.

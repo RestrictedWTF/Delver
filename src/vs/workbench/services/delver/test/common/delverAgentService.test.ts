@@ -646,6 +646,10 @@ class FakeProjectService implements Partial<IDelverProjectService> {
 		return this.findingsFor(contentHash).filter(finding => this.findingDecisionFor(contentHash, finding.id) === undefined);
 	}
 
+	findingDecisionsFor(contentHash: string): readonly IDelverFindingDecision[] {
+		return this.decisions.filter(decision => decision.contentHash === contentHash);
+	}
+
 	findingDecisionFor(contentHash: string, findingId: string): IDelverFindingDecision | undefined {
 		return this.decisions.find(decision => decision.contentHash === contentHash && decision.findingId === findingId);
 	}
@@ -3769,6 +3773,67 @@ suite('DelverAgentService', () => {
 				}],
 				pendingCount: 2,
 			},
+		});
+	});
+
+	test('renders a report from the project alone, so a handed-over .delverdb still explains itself', async () => {
+		// The case the report exists for: someone who never had the sample opens
+		// the project. Reading the target here would make the artifact useless
+		// exactly when it is needed, so this runs on an offline session and the
+		// assertion is that it produced the report anyway.
+		const { service, session, project } = createService(store);
+		session.activeSession = OFFLINE_SESSION;
+		project.namedPath = OFFLINE_SESSION.projectPath;
+
+		await service.invoke({
+			capability: 'delver_report_finding',
+			caller: { kind: 'model', id: 'mcp:analyst' },
+			args: { findings: [{
+				title: 'Embedded configuration decryptor',
+				description: 'The function decrypts a blob before parsing configuration entries.',
+				severity: 'suspicious',
+				confidence: 0.92,
+				evidence: [{ address: '0x1000', endAddress: '0x1040', description: 'XOR loop over the embedded blob.' }],
+			}] },
+		}, CancellationToken.None);
+
+		const result = await service.invoke({
+			capability: 'delver_export_report',
+			caller: { kind: 'model', id: 'mcp:analyst' },
+			args: {},
+		}, CancellationToken.None);
+		const data = result.data as {
+			readonly format: string;
+			readonly findingCount: number;
+			readonly undecidedCount: number;
+			readonly untrusted: boolean;
+			readonly markdown: string;
+		};
+
+		assert.deepStrictEqual({
+			format: data.format,
+			findingCount: data.findingCount,
+			undecidedCount: data.undecidedCount,
+			untrusted: data.untrusted,
+			// Nothing was decided, so the finding must land under review rather
+			// than among the conclusions.
+			section: data.markdown.includes('## Awaiting review'),
+			notAccepted: data.markdown.includes('## Accepted findings'),
+			// The evidence range is the claim's support; a report without it is
+			// an assertion.
+			citesEvidence: data.markdown.includes('- `0x1000–0x1040` — XOR loop over the embedded blob.'),
+			warnsUntrusted: data.markdown.includes('untrusted'),
+			completeness: result.completeness,
+		}, {
+			format: 'markdown',
+			findingCount: 1,
+			undecidedCount: 1,
+			untrusted: true,
+			section: true,
+			notAccepted: false,
+			citesEvidence: true,
+			warnsUntrusted: true,
+			completeness: 'complete',
 		});
 	});
 

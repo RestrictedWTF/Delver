@@ -81,6 +81,7 @@ import {
 	serializedByteLength,
 	toWireAddress,
 } from './delverAgentTypes.js';
+import { renderDelverFindingReport } from './delverFindingReport.js';
 import { IDelverInterpretationService } from './delverInterpretationService.js';
 import { IDelverHistoricalSignature, IDelverProjectService } from './delverProjectService.js';
 import { IDelverSession, IDelverSessionService } from './delverSessionService.js';
@@ -152,6 +153,7 @@ export const enum DelverAgentCapabilityId {
 	ReportFinding = 'delver_report_finding',
 	ListFindings = 'delver_list_findings',
 	Reanalyze = 'delver_reanalyze',
+	ExportReport = 'delver_export_report',
 }
 
 /**
@@ -331,6 +333,11 @@ export const DELVER_AGENT_CAPABILITIES: readonly IDelverAgentCapability[] = [
 		id: DelverAgentCapabilityId.ProposeFunction, group: 'proposals', kind: 'write', requiresAttachedTarget: false,
 		title: 'Delver Propose Function',
 		description: 'Proposes corrections to detected function bounds — defining a function detection missed, or removing one it invented — for review. Appends attributed provisional edits but does not change accepted interpretation and does not re-run analysis.',
+	},
+	{
+		id: DelverAgentCapabilityId.ExportReport, group: 'proposals', kind: 'read', requiresAttachedTarget: false,
+		title: 'Delver Export Report',
+		description: 'Renders the retained findings for these bytes as a Markdown report in which every claim carries its evidence ranges, its author, and the human decision on it. Reads only what the project already holds.',
 	},
 	{
 		id: DelverAgentCapabilityId.Reanalyze, group: 'proposals', kind: 'write', requiresAttachedTarget: true,
@@ -757,6 +764,7 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 		this.handlers.set(DelverAgentCapabilityId.ReportFinding, context => this.handleReportFindings(context));
 		this.handlers.set(DelverAgentCapabilityId.ListFindings, context => this.handleListFindings(context));
 		this.handlers.set(DelverAgentCapabilityId.Reanalyze, context => this.handleReanalyze(context));
+		this.handlers.set(DelverAgentCapabilityId.ExportReport, context => this.handleExportReport(context));
 	}
 
 	private requireSession(): IDelverSession {
@@ -3131,6 +3139,61 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 				detail: 'Attributed function-bounds corrections appended to the review queue; accepted interpretation and detected functions are unchanged.',
 				contentHash: session.contentHash,
 				addresses: [...new Set(proposals.map(proposal => toWireAddress(proposal.rva)))],
+			}],
+		};
+	}
+
+	/**
+	 * Renders the retained findings as a report.
+	 *
+	 * Offline by construction: it reads findings, decisions and tool-call
+	 * records the project already holds, and touches no bytes. That is what
+	 * makes it usable on a `.delverdb` handed to someone who never had the
+	 * sample, which is the case a report exists for.
+	 *
+	 * The report can be larger than one result. It is returned whole or refused
+	 * with a length rather than prefix-truncated, because a report cut mid-claim
+	 * is a report whose last finding has lost its evidence — and a truncated
+	 * report that does not say so is exactly the false claim this project ranks
+	 * above a crash.
+	 */
+	private async handleExportReport(context: IHandlerContext): Promise<IHandlerOutput> {
+		const session = this.requireSession();
+		const markdown = renderDelverFindingReport({
+			contentHash: session.contentHash,
+			...(session.targetPath === undefined ? {} : { targetPath: session.targetPath }),
+			...(session.projectPath === undefined ? {} : { projectPath: session.projectPath }),
+			findings: this.projectService.findingsFor(session.contentHash),
+			decisions: this.projectService.findingDecisionsFor(session.contentHash),
+			toolCalls: this.projectService.toolCallsFor(session.contentHash),
+			renderedAt: Date.now(),
+		});
+		this.throwIfCancelled(context.token);
+
+		const bytes = serializedByteLength(markdown);
+		if (bytes > DELVER_AGENT_LIMITS.serializedBytes) {
+			throw new DelverAgentError(
+				DelverAgentErrorCode.ResultLimitExceeded,
+				`The rendered report is ${bytes} bytes, past the ${DELVER_AGENT_LIMITS.serializedBytes}-byte result limit. Ask the analyst to export it to a file; a report cut short loses the evidence of whichever claim it was cut inside.`,
+			);
+		}
+
+		const findings = this.projectService.findingsFor(session.contentHash);
+		return {
+			data: {
+				format: 'markdown',
+				contentHash: session.contentHash,
+				findingCount: findings.length,
+				undecidedCount: findings.filter(finding => this.projectService.findingDecisionFor(session.contentHash, finding.id) === undefined).length,
+				untrusted: true,
+				markdown,
+			},
+			completeness: 'complete',
+			provenance: [{
+				source: 'finding',
+				detail: 'Report rendered from the findings, decisions, and tool-call records retained in the project. Nothing was read from the sample.',
+				contentHash: session.contentHash,
+				untrusted: true,
 			}],
 		};
 	}

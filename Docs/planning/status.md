@@ -15,9 +15,10 @@ codebase on 2026-08-26, ranked, with the fixed rows deleted as they land.
 
 ## Just landed
 
-**Three things landed: an agent can read its own findings back, an analyst can
-say that a run of bytes is data, not code, and a caller can ask for a
-re-derivation without authoring anything to force one.**
+**Four things landed: an agent can read its own findings back, an analyst can
+say that a run of bytes is data, not code, a caller can ask for a re-derivation
+without authoring anything to force one, and an investigation exports as a
+report whose every claim links to its evidence.**
 
 **Findings were write-only.** `delver_report_finding` wrote and nothing read, so
 S6's exit criterion — *resumes from unresolved work without replaying chat
@@ -109,11 +110,39 @@ otherwise. `functionCountObservedBefore` comes from a listing taken before the
 call rather than from the server's own `function_count_before`, so the two
 agreeing is evidence rather than a tautology.
 
+**An investigation exports as a report.** `delver_export_report` is the
+thirty-eighth capability and closes the second half of S6's exit criterion.
+`delverFindingReport.ts` renders the retained findings as Markdown and is a
+pure function of what the project already holds — findings, decisions,
+tool-call records — reading no bytes at all, so it works on a `.delverdb`
+handed to someone who never had the sample. That is the case a report exists
+for; a renderer that touched the target would be useless exactly when it is
+needed. Findings are grouped by the human decision on them, and an unreviewed
+one is rendered as unreviewed rather than beside the accepted conclusions:
+presenting proposed model output as established is the false-claim failure this
+project ranks above a crash. Rejected findings are kept, because ruling
+something out is a result and re-deriving it costs the next reader the work it
+cost the first. An empty report says the *investigation* retained nothing, never
+that the sample is clean. Past the serialized limit it is refused with its size
+rather than prefix-truncated, since a report cut mid-claim has lost the evidence
+for whichever claim it was cut inside.
+
+**One design question was raised rather than answered**, per invariant 14:
+adjusting the bounds of an existing function as a single operation. The shape
+that fits is a `relocate` correction on the existing entry point, lowering to
+`Undefine(old) + Define(new)`, but two forks make it a decision rather than an
+implementation — whether the lowering belongs in the workbench or the analysis
+crate, and what should happen when the lowered `Define` collides with a
+correction already authored at that address, since the server refuses a
+conflicting set whole and the current push swallows that failure. Both are
+written up in the S5 section of
+[mcp-complete-session-plan.md](mcp-complete-session-plan.md).
+
 **Byte and assembly patching remains explicitly excluded**, on ADR 0015's
 reasoning: a patch changes the bytes, so facts derived from them are facts about
 something the sample no longer is. It needs its own decision.
 
-**Verified:** 401 Delver TypeScript tests, 234 Rust tests, and the 10 Python
+**Verified:** 405 Delver TypeScript tests, 234 Rust tests, and the 10 Python
 decompiler-worker tests pass; the client typecheck is clean, the corpus matches
 6/6, `cargo fmt` and clippy are clean, and the layers check is clean. Run the
 TypeScript suite with the full selector — `--grep Delver` alone misses six

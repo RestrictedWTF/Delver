@@ -137,6 +137,9 @@ export interface IDelverProjectService {
 	/** Human decision for one finding, when it has been reviewed. */
 	findingDecisionFor(contentHash: string, findingId: string): IDelverFindingDecision | undefined;
 
+	/** Every human decision recorded for one image, oldest first. */
+	findingDecisionsFor(contentHash: string): readonly IDelverFindingDecision[];
+
 	/** Retains one successful model-visible dispatcher exchange. */
 	recordToolCall(record: IDelverToolCallRecord): Promise<void>;
 
@@ -614,6 +617,10 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 
 	findingDecisionFor(contentHash: string, findingId: string): IDelverFindingDecision | undefined {
 		return (this.findingDecisions.get(contentHash) ?? []).find(decision => decision.findingId === findingId);
+	}
+
+	findingDecisionsFor(contentHash: string): readonly IDelverFindingDecision[] {
+		return this.findingDecisions.get(contentHash) ?? [];
 	}
 
 	recordToolCall(record: IDelverToolCallRecord): Promise<void> {

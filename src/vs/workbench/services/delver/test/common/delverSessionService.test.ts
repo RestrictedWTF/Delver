@@ -205,6 +205,7 @@ class FakeProjectLifecycleDelegate implements IDelverProjectService {
 	pendingFindings(): readonly IDelverFinding[] { return []; }
 	async resolveFindings(_contentHash: string, _findingIds: readonly string[], _outcome: DelverFindingOutcome): Promise<readonly IDelverFindingDecision[]> { return []; }
 	findingDecisionFor(): IDelverFindingDecision | undefined { return undefined; }
+	findingDecisionsFor(): readonly IDelverFindingDecision[] { return []; }
 
 	projectPath(contentHash: string): string | undefined { return this.projectPaths.get(contentHash); }
 

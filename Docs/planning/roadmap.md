@@ -260,6 +260,7 @@ the [P3 AI integration plan](ai-integration-plan.md).
 | Findings readable back (`delver_list_findings`, status filter, undecided count) | S |
 | Data/code classification corrections (`kind: "data"` ranges excluded from the derivation) | M |
 | Forced reanalysis (`delver_reanalyze`, generation-stamped so stale cursors refuse) | S |
+| Report export with evidence links (`delver_export_report`, offline-capable Markdown) | S |
 | Untrusted-content handling + injection detection | M |
 | Eval harness on the golden corpus, in CI | M |
 
