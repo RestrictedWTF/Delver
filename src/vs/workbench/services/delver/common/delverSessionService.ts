@@ -15,7 +15,7 @@ import {
 	AnalysisSessionId,
 	IDelverAnalysisService,
 } from '../../../../platform/delver/common/delverAnalysisService.js';
-import { FunctionCorrectionKindWire, IFunctionsResult, IGetExportsResult, IGetImageInfoResult, IGetImportsResult, IOpenImageResult, IScanStringsResult, IStringsResult } from '../../../../platform/delver/common/protocol.generated.js';
+import { FunctionCorrectionKindWire, IFunctionsResult, IGetExportsResult, IGetImageInfoResult, IGetImportsResult, IOpenImageResult, IScanStringsResult, ISetCorrectionsResult, IStringsResult } from '../../../../platform/delver/common/protocol.generated.js';
 import { isContentHash } from '../../../../platform/delver/common/delverInterpretationStoreService.js';
 import { IContextKey, IContextKeyService, RawContextKey } from '../../../../platform/contextkey/common/contextkey.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
@@ -23,7 +23,7 @@ import { createDecorator } from '../../../../platform/instantiation/common/insta
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IDelverInterpretationService } from './delverInterpretationService.js';
 import { EditOp, EditStatus, IEdit } from '../../../../platform/delver/common/interpretation.js';
-import { functionCorrectionsFor } from './delverFunctionCorrections.js';
+import { authoredCorrectionsFor } from './delverFunctionCorrections.js';
 import { IDelverProjectService } from './delverProjectService.js';
 import { ILifecycleService } from '../../lifecycle/common/lifecycle.js';
 
@@ -119,6 +119,21 @@ export interface IDelverSessionService {
 	 * without its sample keeps whatever the cap left it, and says so.
 	 */
 	scanStrings(fromRva: string, maxStrings: number): Promise<IScanStringsResult>;
+
+	/**
+	 * Re-derives every fact for the open image from its bytes and current
+	 * corrections.
+	 *
+	 * Nothing about the correction set has to have changed. Analysis is a
+	 * function of bytes plus seeds, so a re-derivation with the same seeds is
+	 * the same answer — which is exactly what makes this useful: it is the only
+	 * way to say "compute that again" without authoring a correction to force
+	 * it, and it is how a caller confirms that what it is reading is current.
+	 *
+	 * Live only. An offline project has facts and no bytes to re-derive them
+	 * from.
+	 */
+	reanalyze(): Promise<ISetCorrectionsResult>;
 
 	/** Marks newly produced or edited analysis as requiring persistence. */
 	markProjectDirty(): void;
@@ -502,20 +517,25 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 	}
 
 	private async applyFunctionCorrections(sessionId: AnalysisSessionId, contentHash: string): Promise<void> {
-		const corrections = functionCorrectionsFor(this.interpretationService, contentHash);
-		if (corrections.length === 0 && !this.correctedSessions.has(sessionId)) {
+		const { functions, dataRanges } = authoredCorrectionsFor(this.interpretationService, contentHash);
+		const authored = functions.length + dataRanges.length;
+		if (authored === 0 && !this.correctedSessions.has(sessionId)) {
 			return;
 		}
-		if (corrections.length === 0) {
+		if (authored === 0) {
 			this.correctedSessions.delete(sessionId);
 		} else {
 			this.correctedSessions.add(sessionId);
 		}
-		await this.analysisService.setCorrections(sessionId, corrections.map(correction => ({
-			rva: correction.rva,
-			kind: correction.kind === 'define' ? FunctionCorrectionKindWire.Define : FunctionCorrectionKindWire.Undefine,
-			...(correction.endRva === undefined ? {} : { end_rva: correction.endRva }),
-		})));
+		await this.analysisService.setCorrections(
+			sessionId,
+			functions.map(correction => ({
+				rva: correction.rva,
+				kind: correction.kind === 'define' ? FunctionCorrectionKindWire.Define : FunctionCorrectionKindWire.Undefine,
+				...(correction.endRva === undefined ? {} : { end_rva: correction.endRva }),
+			})),
+			dataRanges.map(range => ({ rva: range.rva, end_rva: range.endRva })),
+		);
 		// Announced only after the server has actually re-derived. A view that
 		// refreshed on the request rather than the result would read the
 		// previous facts back and cache them as the new ones.
@@ -631,6 +651,37 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 			throw new Error('This project is open without its original sample, so strings past the retained list cannot be scanned. Ask the analyst to locate the matching target.');
 		}
 		return this.analysisService.scanStrings(session.sessionId, fromRva, maxStrings);
+	}
+
+	async reanalyze(): Promise<ISetCorrectionsResult> {
+		const session = this.activeSession;
+		if (!session) {
+			throw new Error('No Delver project is open.');
+		}
+		if (session.sessionId === undefined) {
+			throw new Error('This project is open without its original sample, so its facts cannot be re-derived. Ask the analyst to locate the matching target.');
+		}
+		const { functions, dataRanges } = authoredCorrectionsFor(this.interpretationService, session.contentHash);
+		// Deliberately unconditional, where `applyFunctionCorrections` returns
+		// early on an empty set. That early return is a cost optimisation for a
+		// push nobody asked for; this is a caller asking, and answering "there
+		// was nothing to do" would be answering a different question.
+		const result = await this.analysisService.setCorrections(
+			session.sessionId,
+			functions.map(correction => ({
+				rva: correction.rva,
+				kind: correction.kind === 'define' ? FunctionCorrectionKindWire.Define : FunctionCorrectionKindWire.Undefine,
+				...(correction.endRva === undefined ? {} : { end_rva: correction.endRva }),
+			})),
+			dataRanges.map(range => ({ rva: range.rva, end_rva: range.endRva })),
+		);
+		if (functions.length + dataRanges.length > 0) {
+			this.correctedSessions.add(session.sessionId);
+		} else {
+			this.correctedSessions.delete(session.sessionId);
+		}
+		this._onDidRederiveFacts.fire(session);
+		return result;
 	}
 
 	strings(): Promise<IStringsResult> {

@@ -311,6 +311,29 @@ pub struct FunctionCorrectionWire {
 	pub end_rva: Option<u64>,
 }
 
+/// One authored assertion that a range of the image is data, not code.
+///
+/// The counterpart to a function correction, and the same kind of thing: a
+/// change to what analysis derives from, never an edit to the bytes. Excluded
+/// bytes are not decoded, get no function start from any source, and originate
+/// no cross-reference — but a reference *into* the range survives, because a
+/// pointer to a table is exactly the evidence that made the range data.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DataRangeCorrectionWire {
+	/// Image-relative start of the excluded range.
+	#[serde(with = "crate::hex")]
+	#[schemars(with = "String")]
+	pub rva: u64,
+	/// Exclusive end of the excluded range.
+	///
+	/// Required, unlike a function's: an unbounded "data starts here" has no
+	/// reading that is safe to guess at, and the analysis crate refuses an
+	/// empty or overlapping range rather than picking one.
+	#[serde(with = "crate::hex")]
+	#[schemars(with = "String")]
+	pub end_rva: u64,
+}
+
 /// What an authored correction asserts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -337,6 +360,9 @@ pub struct OpenImageParams {
 	/// correction set is a fact store nobody can reason about.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub corrections: Vec<FunctionCorrectionWire>,
+	/// Authored data ranges to exclude from decoding before deriving any fact.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub data_ranges: Vec<DataRangeCorrectionWire>,
 }
 
 /// Response payload for `analysis/setCorrections`.
@@ -363,8 +389,14 @@ pub struct SetCorrectionsResult {
 	/// functions", which is a confident false claim about a binary that plainly
 	/// has code.
 	pub decoding: CodeDecodingWire,
-	/// Corrections now in effect.
+	/// Function corrections now in effect.
 	pub corrections_applied: u64,
+	/// Data ranges now excluded from decoding.
+	///
+	/// Counted apart from `corrections_applied` rather than summed into it: one
+	/// data range can silence a great many detected functions, and a caller
+	/// reading a single total could not tell which kind of assertion did it.
+	pub data_ranges_applied: u64,
 	/// The derivation these facts belong to.
 	///
 	/// Every re-derivation gets a new one, so a caller holding an index into the
@@ -385,6 +417,13 @@ pub struct SetCorrectionsParams {
 	/// The complete correction set, replacing whatever was in effect.
 	#[serde(default)]
 	pub corrections: Vec<FunctionCorrectionWire>,
+	/// The complete data-range set, replacing whatever was in effect.
+	///
+	/// Absent means none, exactly as for `corrections`: this call states what is
+	/// in effect, and a partial update would leave nobody able to say what the
+	/// facts were derived against.
+	#[serde(default)]
+	pub data_ranges: Vec<DataRangeCorrectionWire>,
 }
 
 /// Response payload for `analysis/openImage`.
@@ -1445,7 +1484,11 @@ pub struct ScanStringsResult {
 	/// Absent when the scan reached the end of the image rather than its bound,
 	/// which is the only thing that makes an empty result a claim about the
 	/// image rather than about the window.
-	#[serde(default, skip_serializing_if = "Option::is_none", with = "crate::hex::option")]
+	#[serde(
+		default,
+		skip_serializing_if = "Option::is_none",
+		with = "crate::hex::option"
+	)]
 	#[schemars(with = "Option<String>")]
 	pub next_rva: Option<u64>,
 }

@@ -455,6 +455,24 @@ export type ICodeDecodingWire =
 	};
 
 /**
+ * One authored assertion that a range of the image is data, not code.
+ *
+ * The counterpart to a function correction, and the same kind of thing: a change to what analysis derives from, never an edit to the bytes. Excluded bytes are not decoded, get no function start from any source, and originate no cross-reference — but a reference *into* the range survives, because a pointer to a table is exactly the evidence that made the range data.
+ */
+export interface IDataRangeCorrectionWire {
+	/**
+	 * Exclusive end of the excluded range.
+	 *
+	 * Required, unlike a function's: an unbounded "data starts here" has no reading that is safe to guess at, and the analysis crate refuses an empty or overlapping range rather than picking one.
+	 */
+	end_rva: string;
+	/**
+	 * Image-relative start of the excluded range.
+	 */
+	rva: string;
+}
+
+/**
  * Structured detail carried by a domain error.
  */
 export interface IErrorData {
@@ -867,7 +885,7 @@ export interface IGetImageInfoResult {
 	/**
 	 * Image entry point virtual address.
 	 *
-	 * For a linked executable this is the C runtime's startup stub, not the `main` an analyst is looking for. See `FunctionWire::role`.
+	 * For a linked executable this is the C runtime's startup stub, not the `main` an analyst is looking for; naming which is which is the analysis server's job and is not yet on the wire.
 	 */
 	entry: string;
 	/**
@@ -1444,6 +1462,10 @@ export interface IOpenImageParams {
 	 */
 	corrections?: IFunctionCorrectionWire[];
 	/**
+	 * Authored data ranges to exclude from decoding before deriving any fact.
+	 */
+	data_ranges?: IDataRangeCorrectionWire[];
+	/**
 	 * Address space to analyse. Defaults to the provider's file space.
 	 */
 	space?: string;
@@ -1453,6 +1475,8 @@ export interface IOpenImageParams {
  * Response payload for `analysis/openImage`.
  *
  * Every count below is a count over the bytes the provider actually served, which is not always the whole space. `coverage_complete` is what separates the two readings: when it is false the analysis never saw `unreadable_ranges`, so a zero count over them is an absence of evidence and not evidence of absence. A client that renders these numbers without checking it is presenting a partial image as a complete one.
+ *
+ * `strings_truncated` qualifies `string_count` the same way, and for the same reason: the scan has a cap, and a count that silently equals it is a false claim about the sample rather than a small one.
  *
  * `decoding` is the second such qualifier, and it governs the three code counts absolutely: unless it is `decoded`, `instruction_count`, `function_count` and `xref_count` are zero because no pass ran, not because the sample has no code.
  *
@@ -1493,8 +1517,16 @@ export interface IOpenImageResult {
 	instruction_count: number;
 	/**
 	 * Number of strings located.
+	 *
+	 * Qualified by `strings_truncated`, and meaningless without it: the scanner stops at a cap real binaries reach, so an unqualified count of exactly the cap reads as a fact about the sample and is one of the few numbers here that can be wrong by tens of thousands.
 	 */
 	string_count: number;
+	/**
+	 * Whether the string scan stopped at its cap rather than at the image.
+	 *
+	 * When true, `string_count` is the cap and not the sample's string count. `analysis/scanStrings` reaches the rest.
+	 */
+	strings_truncated: boolean;
 	/**
 	 * Ranges of the analysed space that were never read, and which no count above therefore covers.
 	 *
@@ -1802,6 +1834,12 @@ export interface ISetCorrectionsParams {
 	 */
 	corrections?: IFunctionCorrectionWire[];
 	/**
+	 * The complete data-range set, replacing whatever was in effect.
+	 *
+	 * Absent means none, exactly as for `corrections`: this call states what is in effect, and a partial update would leave nobody able to say what the facts were derived against.
+	 */
+	data_ranges?: IDataRangeCorrectionWire[];
+	/**
 	 * Image handle.
 	 */
 	image_id: string;
@@ -1814,9 +1852,21 @@ export interface ISetCorrectionsParams {
  */
 export interface ISetCorrectionsResult {
 	/**
-	 * Corrections now in effect.
+	 * Function corrections now in effect.
 	 */
 	corrections_applied: number;
+	/**
+	 * Data ranges now excluded from decoding.
+	 *
+	 * Counted apart from `corrections_applied` rather than summed into it: one data range can silence a great many detected functions, and a caller reading a single total could not tell which kind of assertion did it.
+	 */
+	data_ranges_applied: number;
+	/**
+	 * Whether the code passes ran at all.
+	 *
+	 * Every count above is a count of decoded code, so all of them are zero when this is not `decoded` — for an architecture the decoder does not support, that reads as "your correction applied and the image has no functions", which is a confident false claim about a binary that plainly has code.
+	 */
+	decoding: ICodeDecodingWire;
 	/**
 	 * Detected functions now.
 	 */
@@ -1825,6 +1875,12 @@ export interface ISetCorrectionsResult {
 	 * Detected functions before the new set was applied.
 	 */
 	function_count_before: number;
+	/**
+	 * The derivation these facts belong to.
+	 *
+	 * Every re-derivation gets a new one, so a caller holding an index into the previous table can be told rather than silently answered from this one.
+	 */
+	generation: number;
 	/**
 	 * Image handle the corrections were applied to.
 	 */
@@ -2057,6 +2113,12 @@ export interface ITlsWire {
  */
 export interface IXrefIndexParams {
 	/**
+	 * Derivation the `start` index was taken against.
+	 *
+	 * Omitted by a caller that does not page. Supplied, a mismatch is refused: a walk that spanned a re-derivation would skip or duplicate rows and end early, and a table retained from it would answer a later "who references this" with a confident and wrong zero — which is the failure this export exists to prevent.
+	 */
+	generation?: number;
+	/**
 	 * Image handle.
 	 */
 	image_id: string;
@@ -2067,7 +2129,7 @@ export interface IXrefIndexParams {
 	/**
 	 * Index of the first reference to return, in the table's source ordering.
 	 *
-	 * A plain offset rather than an opaque cursor: the table is built once when the image is analysed and never mutated, so an index into it is stable for the life of the handle. A caller that closes the image and reopens it starts the walk again.
+	 * A plain offset rather than an opaque cursor, valid for one derivation of the table. `analysis/setCorrections` re-derives every fact, so an index taken before a correction indexes a different table afterwards — pass `generation` to have that refused rather than silently answered from the new one.
 	 */
 	start?: number;
 }
@@ -2078,6 +2140,10 @@ export interface IXrefIndexParams {
  * `next_start` is the completeness signal. A caller retaining the table must be able to tell "this is the end" from "this page was bounded", because a partial table stored as if it were whole is a source of exactly the false negative — a confident `total: 0` — that the per-address query already has to avoid.
  */
 export interface IXrefIndexResult {
+	/**
+	 * Derivation these rows came from. Pass it back to continue safely.
+	 */
+	generation: number;
 	/**
 	 * Index to pass as the next `start`, absent once the walk is complete.
 	 */

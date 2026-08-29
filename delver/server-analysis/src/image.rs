@@ -9,7 +9,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use delver_analysis::listing::ListingIndex;
-use delver_analysis::{AnalyzedImage, FunctionCorrection};
+use delver_analysis::{AnalyzedImage, Corrections, DataRangeCorrection, FunctionCorrection};
 use delver_format::{BaseRelocation, ParsedImage};
 use delver_protocol::{
 	AddressSpaceWire, InitializeResult, ListSpacesResult, RangeWire, ReadMemoryParams,
@@ -78,7 +78,7 @@ pub struct LoadedImage {
 	///
 	/// Retained so a caller can be told what its answers already account for,
 	/// and so a re-analysis can report what changed.
-	pub corrections: Vec<FunctionCorrection>,
+	pub corrections: AuthoredCorrections,
 	/// Instructions and strings merged into one address-ordered row space.
 	///
 	/// Built once here rather than per request: it is a few vectors sized by the
@@ -305,6 +305,29 @@ fn uncovered_ranges(size: u64, coverage: &[Range<u64>]) -> Vec<RangeWire> {
 	unreadable
 }
 
+/// The complete authored correction set an image was derived against.
+///
+/// Owned rather than borrowed, because it outlives every call that supplies it:
+/// a re-analysis reports what changed against it, and a caller asks what its
+/// answers already account for. [`Corrections`] is the borrowed view the
+/// analysis crate takes, and `as_ref` is the only place the two are joined.
+#[derive(Debug, Clone, Default)]
+pub struct AuthoredCorrections {
+	/// Corrections to function detection.
+	pub functions: Vec<FunctionCorrection>,
+	/// Runs of bytes the author says are data.
+	pub data_ranges: Vec<DataRangeCorrection>,
+}
+
+impl AuthoredCorrections {
+	fn as_ref(&self) -> Corrections<'_> {
+		Corrections {
+			functions: &self.functions,
+			data_ranges: &self.data_ranges,
+		}
+	}
+}
+
 /// Pulls the file space through `connection` and analyses it.
 ///
 /// A space the provider serves only in part is analysed in part. The counts on
@@ -313,7 +336,7 @@ fn uncovered_ranges(size: u64, coverage: &[Range<u64>]) -> Vec<RangeWire> {
 pub fn load(
 	connection: &mut ProviderConnection,
 	space: Option<&str>,
-	corrections: &[FunctionCorrection],
+	corrections: &AuthoredCorrections,
 ) -> Result<LoadedImage> {
 	connection.spaces()?;
 	let space = space.unwrap_or("File");
@@ -345,7 +368,7 @@ pub fn load(
 		relocations,
 		listing,
 		generation: 0,
-		corrections: corrections.to_vec(),
+		corrections: corrections.clone(),
 	})
 }
 
@@ -359,10 +382,11 @@ fn derive(
 	parsed: &ParsedImage,
 	bytes: &[u8],
 	coverage: &[Range<u64>],
-	corrections: &[FunctionCorrection],
+	corrections: &AuthoredCorrections,
 ) -> Result<(AnalyzedImage, ListingIndex)> {
-	let analysis = delver_analysis::analyze_corrected(parsed, bytes, coverage, corrections)
-		.map_err(|error| anyhow!("{error}"))?;
+	let analysis =
+		delver_analysis::analyze_corrected(parsed, bytes, coverage, corrections.as_ref())
+			.map_err(|error| anyhow!("{error}"))?;
 	let listing = ListingIndex::new(
 		analysis.instructions.clone(),
 		analysis
@@ -381,7 +405,7 @@ fn derive(
 /// held, and re-reading them would cost a round trip to learn nothing. Nothing
 /// is replaced until the new analysis succeeds, so a correction set the analysis
 /// crate refuses leaves the image exactly as it was rather than emptied.
-pub fn reanalyze(image: &mut LoadedImage, corrections: Vec<FunctionCorrection>) -> Result<()> {
+pub fn reanalyze(image: &mut LoadedImage, corrections: AuthoredCorrections) -> Result<()> {
 	let (analysis, listing) = derive(&image.parsed, &image.bytes, &image.coverage, &corrections)?;
 	image.analysis = analysis;
 	image.listing = listing;

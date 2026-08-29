@@ -18,6 +18,7 @@ suite('Delver overview navigation', () => {
 			image_id: 'image-1',
 			instruction_count: 34_567,
 			string_count: 89,
+			strings_truncated: false,
 			xref_count: 123,
 			bytes_read: '0x1000',
 			coverage_complete: true,

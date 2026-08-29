@@ -4,7 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { createDecorator } from '../../instantiation/common/instantiation.js';
-import { IBasicBlocksResult, ICallGraphResult, ICallPathsResult, IFunctionCorrectionWire, IFunctionProfileResult, IFunctionsResult, IGetExportsResult, IGetImageInfoResult, IGetImportsResult, IGlobalAccessesResult, IGlobalsResult, IListingWindowResult, IMomentWire, IOpenImageResult, IRangeWire, IScanStringsResult, ISetCorrectionsResult, IStringsResult, IXrefIndexResult, IXrefsResult } from './protocol.generated.js';
+import { IBasicBlocksResult, ICallGraphResult, ICallPathsResult, IDataRangeCorrectionWire,
+	IFunctionCorrectionWire, IFunctionProfileResult, IFunctionsResult, IGetExportsResult, IGetImageInfoResult, IGetImportsResult, IGlobalAccessesResult, IGlobalsResult, IListingWindowResult, IMomentWire, IOpenImageResult, IRangeWire, IScanStringsResult, ISetCorrectionsResult, IStringsResult, IXrefIndexResult, IXrefsResult } from './protocol.generated.js';
 import { TargetConfig } from './target.js';
 
 export const IDelverAnalysisService = createDecorator<IDelverAnalysisService>('delverAnalysisService');
@@ -232,7 +233,7 @@ export interface IDelverAnalysisService {
 	 * reports the function counts either side of the change, because an analyst
 	 * approving a correction has to be able to see its exact effect.
 	 */
-	setCorrections(sessionId: AnalysisSessionId, corrections: readonly IFunctionCorrectionWire[]): Promise<ISetCorrectionsResult>;
+	setCorrections(sessionId: AnalysisSessionId, corrections: readonly IFunctionCorrectionWire[], dataRanges?: readonly IDataRangeCorrectionWire[]): Promise<ISetCorrectionsResult>;
 
 	/**
 	 * Re-scans a bounded window of the image for strings.

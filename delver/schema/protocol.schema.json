@@ -633,6 +633,24 @@
         }
       ]
     },
+    "DataRangeCorrectionWire": {
+      "description": "One authored assertion that a range of the image is data, not code.\n\nThe counterpart to a function correction, and the same kind of thing: a change to what analysis derives from, never an edit to the bytes. Excluded bytes are not decoded, get no function start from any source, and originate no cross-reference — but a reference *into* the range survives, because a pointer to a table is exactly the evidence that made the range data.",
+      "properties": {
+        "end_rva": {
+          "description": "Exclusive end of the excluded range.\n\nRequired, unlike a function's: an unbounded \"data starts here\" has no reading that is safe to guess at, and the analysis crate refuses an empty or overlapping range rather than picking one.",
+          "type": "string"
+        },
+        "rva": {
+          "description": "Image-relative start of the excluded range.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "end_rva",
+        "rva"
+      ],
+      "type": "object"
+    },
     "ErrorData": {
       "description": "Structured detail carried by a domain error.",
       "properties": {
@@ -1230,7 +1248,7 @@
           "type": "string"
         },
         "entry": {
-          "description": "Image entry point virtual address.\n\nFor a linked executable this is the C runtime's startup stub, not the `main` an analyst is looking for. See `FunctionWire::role`.",
+          "description": "Image entry point virtual address.\n\nFor a linked executable this is the C runtime's startup stub, not the `main` an analyst is looking for; naming which is which is the analysis server's job and is not yet on the wire.",
           "type": "string"
         },
         "exception_directory_failed": {
@@ -2065,6 +2083,13 @@
           },
           "type": "array"
         },
+        "data_ranges": {
+          "description": "Authored data ranges to exclude from decoding before deriving any fact.",
+          "items": {
+            "$ref": "#/definitions/DataRangeCorrectionWire"
+          },
+          "type": "array"
+        },
         "space": {
           "description": "Address space to analyse. Defaults to the provider's file space.",
           "type": [
@@ -2076,7 +2101,7 @@
       "type": "object"
     },
     "OpenImageResult": {
-      "description": "Response payload for `analysis/openImage`.\n\nEvery count below is a count over the bytes the provider actually served, which is not always the whole space. `coverage_complete` is what separates the two readings: when it is false the analysis never saw `unreadable_ranges`, so a zero count over them is an absence of evidence and not evidence of absence. A client that renders these numbers without checking it is presenting a partial image as a complete one.\n\n`decoding` is the second such qualifier, and it governs the three code counts absolutely: unless it is `decoded`, `instruction_count`, `function_count` and `xref_count` are zero because no pass ran, not because the sample has no code.\n\n`fully_parsed` is the third. It describes the analysis server's **own** parse of the bytes it read, which can be less complete than the provider's parse of the same file: a partial read truncates directories that were intact on disk. The detail behind it belongs to `getImageInfo`, which owns the parse; this is the one bit the analysis server has to pass on so that no count here reads as a whole-image answer over a partial parse.",
+      "description": "Response payload for `analysis/openImage`.\n\nEvery count below is a count over the bytes the provider actually served, which is not always the whole space. `coverage_complete` is what separates the two readings: when it is false the analysis never saw `unreadable_ranges`, so a zero count over them is an absence of evidence and not evidence of absence. A client that renders these numbers without checking it is presenting a partial image as a complete one.\n\n`strings_truncated` qualifies `string_count` the same way, and for the same reason: the scan has a cap, and a count that silently equals it is a false claim about the sample rather than a small one.\n\n`decoding` is the second such qualifier, and it governs the three code counts absolutely: unless it is `decoded`, `instruction_count`, `function_count` and `xref_count` are zero because no pass ran, not because the sample has no code.\n\n`fully_parsed` is the third. It describes the analysis server's **own** parse of the bytes it read, which can be less complete than the provider's parse of the same file: a partial read truncates directories that were intact on disk. The detail behind it belongs to `getImageInfo`, which owns the parse; this is the one bit the analysis server has to pass on so that no count here reads as a whole-image answer over a partial parse.",
       "properties": {
         "arch": {
           "description": "Architecture the image was decoded as.",
@@ -2115,10 +2140,14 @@
           "type": "integer"
         },
         "string_count": {
-          "description": "Number of strings located.",
+          "description": "Number of strings located.\n\nQualified by `strings_truncated`, and meaningless without it: the scanner stops at a cap real binaries reach, so an unqualified count of exactly the cap reads as a fact about the sample and is one of the few numbers here that can be wrong by tens of thousands.",
           "format": "uint64",
           "minimum": 0.0,
           "type": "integer"
+        },
+        "strings_truncated": {
+          "description": "Whether the string scan stopped at its cap rather than at the image.\n\nWhen true, `string_count` is the cap and not the sample's string count. `analysis/scanStrings` reaches the rest.",
+          "type": "boolean"
         },
         "unreadable_ranges": {
           "description": "Ranges of the analysed space that were never read, and which no count above therefore covers.\n\nThe read stops at the first byte the provider will not serve, so this is one range running from that byte to the end of the space. Bytes past a hole go unanalysed even where a later read would have succeeded: nothing is fabricated to fill the hole, because decoding a zero-fill would manufacture instructions the sample does not contain.",
@@ -2144,6 +2173,7 @@
         "image_id",
         "instruction_count",
         "string_count",
+        "strings_truncated",
         "unreadable_ranges",
         "xref_count"
       ],
@@ -2563,6 +2593,14 @@
           },
           "type": "array"
         },
+        "data_ranges": {
+          "default": [],
+          "description": "The complete data-range set, replacing whatever was in effect.\n\nAbsent means none, exactly as for `corrections`: this call states what is in effect, and a partial update would leave nobody able to say what the facts were derived against.",
+          "items": {
+            "$ref": "#/definitions/DataRangeCorrectionWire"
+          },
+          "type": "array"
+        },
         "image_id": {
           "description": "Image handle.",
           "type": "string"
@@ -2577,10 +2615,20 @@
       "description": "Response payload for `analysis/setCorrections`.\n\nThe before and after counts are the disclosure S5 requires: an analyst approving a correction has to be able to see its exact effect, and \"one more function than a moment ago\" is that effect stated in the only terms the server can state it.",
       "properties": {
         "corrections_applied": {
-          "description": "Corrections now in effect.",
+          "description": "Function corrections now in effect.",
           "format": "uint64",
           "minimum": 0.0,
           "type": "integer"
+        },
+        "data_ranges_applied": {
+          "description": "Data ranges now excluded from decoding.\n\nCounted apart from `corrections_applied` rather than summed into it: one data range can silence a great many detected functions, and a caller reading a single total could not tell which kind of assertion did it.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "decoding": {
+          "$ref": "#/definitions/CodeDecodingWire",
+          "description": "Whether the code passes ran at all.\n\nEvery count above is a count of decoded code, so all of them are zero when this is not `decoded` — for an architecture the decoder does not support, that reads as \"your correction applied and the image has no functions\", which is a confident false claim about a binary that plainly has code."
         },
         "function_count": {
           "description": "Detected functions now.",
@@ -2590,6 +2638,12 @@
         },
         "function_count_before": {
           "description": "Detected functions before the new set was applied.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "generation": {
+          "description": "The derivation these facts belong to.\n\nEvery re-derivation gets a new one, so a caller holding an index into the previous table can be told rather than silently answered from this one.",
           "format": "uint64",
           "minimum": 0.0,
           "type": "integer"
@@ -2607,8 +2661,11 @@
       },
       "required": [
         "corrections_applied",
+        "data_ranges_applied",
+        "decoding",
         "function_count",
         "function_count_before",
+        "generation",
         "image_id",
         "instruction_count"
       ],
@@ -2937,6 +2994,15 @@
     "XrefIndexParams": {
       "description": "Parameters for `analysis/xrefIndex`.\n\nThe whole-table export, as distinct from [`XrefsParams`], which answers one address. It exists so a project can *retain* the xref table: a `.delverdb` opened without its sample still has to answer \"who references this\", and walking every address to rebuild the table from per-address queries would be millions of round trips for a table the server already holds in one piece.",
       "properties": {
+        "generation": {
+          "description": "Derivation the `start` index was taken against.\n\nOmitted by a caller that does not page. Supplied, a mismatch is refused: a walk that spanned a re-derivation would skip or duplicate rows and end early, and a table retained from it would answer a later \"who references this\" with a confident and wrong zero — which is the failure this export exists to prevent.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "image_id": {
           "description": "Image handle.",
           "type": "string"
@@ -2950,7 +3016,7 @@
         },
         "start": {
           "default": 0,
-          "description": "Index of the first reference to return, in the table's source ordering.\n\nA plain offset rather than an opaque cursor: the table is built once when the image is analysed and never mutated, so an index into it is stable for the life of the handle. A caller that closes the image and reopens it starts the walk again.",
+          "description": "Index of the first reference to return, in the table's source ordering.\n\nA plain offset rather than an opaque cursor, valid for one derivation of the table. `analysis/setCorrections` re-derives every fact, so an index taken before a correction indexes a different table afterwards — pass `generation` to have that refused rather than silently answered from the new one.",
           "format": "uint64",
           "minimum": 0.0,
           "type": "integer"
@@ -2964,6 +3030,12 @@
     "XrefIndexResult": {
       "description": "Response payload for `analysis/xrefIndex`.\n\n`next_start` is the completeness signal. A caller retaining the table must be able to tell \"this is the end\" from \"this page was bounded\", because a partial table stored as if it were whole is a source of exactly the false negative — a confident `total: 0` — that the per-address query already has to avoid.",
       "properties": {
+        "generation": {
+          "description": "Derivation these rows came from. Pass it back to continue safely.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "next_start": {
           "description": "Index to pass as the next `start`, absent once the walk is complete.",
           "format": "uint64",
@@ -2988,6 +3060,7 @@
         }
       },
       "required": [
+        "generation",
         "total",
         "xrefs"
       ],

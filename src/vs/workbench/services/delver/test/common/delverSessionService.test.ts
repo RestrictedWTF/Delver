@@ -15,7 +15,7 @@ import { getSingletonServiceDescriptors } from '../../../../../platform/instanti
 import { IDelverAnalysisService } from '../../../../../platform/delver/common/delverAnalysisService.js';
 import { DelverFindingOutcome, IDelverFinding, IDelverFindingDecision, IDelverFindingDraft } from '../../../../../platform/delver/common/findings.js';
 import { Emitter } from '../../../../../base/common/event.js';
-import { IFunctionCorrectionWire } from '../../../../../platform/delver/common/protocol.generated.js';
+import { IDataRangeCorrectionWire, IFunctionCorrectionWire } from '../../../../../platform/delver/common/protocol.generated.js';
 import { Anchor, anchorKey, EditOp, EditStatus, IEdit, IInterpretationAt } from '../../../../../platform/delver/common/interpretation.js';
 import { IDelverProjectSnapshot, IDelverRetainedXrefs } from '../../../../../platform/delver/common/delverProjectStoreService.js';
 import { IDelverToolCallRecord } from '../../../../../platform/delver/common/delverToolCall.js';
@@ -39,20 +39,31 @@ class FakeAnalysisService implements Partial<IDelverAnalysisService> {
 	contentHash: string | undefined = 'a'.repeat(64);
 	readonly openErrors = new Set<string>();
 	/** Correction sets pushed to the server, in the order they were applied. */
-	readonly correctionSets: { readonly sessionId: string; readonly corrections: readonly IFunctionCorrectionWire[] }[] = [];
+	readonly correctionSets: {
+		readonly sessionId: string;
+		readonly corrections: readonly IFunctionCorrectionWire[];
+		readonly dataRanges: readonly IDataRangeCorrectionWire[];
+	}[] = [];
 	/** Held to stop an open mid-flight, when a pair exists but is not adopted. */
 	openGate: DeferredPromise<void> | undefined;
 	readonly openReachedGate = new DeferredPromise<void>();
 	private next = 1;
 
-	async setCorrections(sessionId: string, corrections: readonly IFunctionCorrectionWire[]) {
-		this.correctionSets.push({ sessionId, corrections });
+	async setCorrections(
+		sessionId: string,
+		corrections: readonly IFunctionCorrectionWire[],
+		dataRanges: readonly IDataRangeCorrectionWire[] = [],
+	) {
+		this.correctionSets.push({ sessionId, corrections, dataRanges });
 		return {
 			image_id: sessionId,
 			function_count_before: 0,
 			function_count: corrections.length,
 			instruction_count: 0,
 			corrections_applied: corrections.length,
+			data_ranges_applied: dataRanges.length,
+			decoding: { kind: 'decoded' as const },
+			generation: this.correctionSets.length,
 		};
 	}
 
@@ -74,6 +85,7 @@ class FakeAnalysisService implements Partial<IDelverAnalysisService> {
 				function_count: 2,
 				xref_count: 3,
 				string_count: 4,
+				strings_truncated: false,
 				bytes_read: '0x1000',
 				coverage_complete: true,
 				decoding: { kind: 'decoded' as const },
@@ -288,13 +300,25 @@ suite('DelverSessionService', () => {
 			op: EditOp.FunctionBounds,
 			value: JSON.stringify({ kind: 'define', endRva: '0x1480' }),
 			status: EditStatus.Accepted,
+		}, {
+			// Same op and same anchor kind, different claim: these bytes are not
+			// code. It has to reach the server on its own list, because a data
+			// range and a function correction are not interchangeable there.
+			seq: 2,
+			at: 0,
+			author: { kind: 'human', id: 'analyst' },
+			anchor: { kind: 'image', contentHash, rva: 0x1c00n },
+			op: EditOp.FunctionBounds,
+			value: JSON.stringify({ kind: 'data', endRva: '0x1d00' }),
+			status: EditStatus.Accepted,
 		}]);
 
 		await service.openTarget('C:\\samples\\corrected.exe');
 
-		assert.deepStrictEqual(analysis.correctionSets.map(entry => entry.corrections), [[
-			{ rva: '0x1400', kind: 'define', end_rva: '0x1480' },
-		]]);
+		assert.deepStrictEqual(analysis.correctionSets.map(entry => ({ corrections: entry.corrections, dataRanges: entry.dataRanges })), [{
+			corrections: [{ rva: '0x1400', kind: 'define', end_rva: '0x1480' }],
+			dataRanges: [{ rva: '0x1c00', end_rva: '0x1d00' }],
+		}]);
 	});
 
 	test('says nothing to the server about an image that has no corrections', async () => {

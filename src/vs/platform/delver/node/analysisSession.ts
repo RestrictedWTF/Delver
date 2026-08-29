@@ -11,7 +11,8 @@ import { DelverRpcClient } from './rpc.js';
 import {
 	IDelverReadMemoryWire,
 } from '../common/delverAnalysisService.js';
-import { IAddressForRowResult, IBasicBlocksResult, ICallGraphResult, ICallPathsResult, IFunctionCorrectionWire, IFunctionProfileResult, IFunctionsResult, IGetExportsResult, IGetImageInfoResult, IGetImportsResult, IGlobalAccessesResult, IGlobalsResult, IListingWindowResult, IOpenImageResult, IReadMemoryResult, IRowForAddressResult, IScanStringsResult, ISetCorrectionsResult, IStringsResult, IXrefIndexResult, IXrefsResult } from '../common/protocol.generated.js';
+import { IAddressForRowResult, IBasicBlocksResult, ICallGraphResult, ICallPathsResult, IDataRangeCorrectionWire,
+	IFunctionCorrectionWire, IFunctionProfileResult, IFunctionsResult, IGetExportsResult, IGetImageInfoResult, IGetImportsResult, IGlobalAccessesResult, IGlobalsResult, IListingWindowResult, IOpenImageResult, IReadMemoryResult, IRowForAddressResult, IScanStringsResult, ISetCorrectionsResult, IStringsResult, IXrefIndexResult, IXrefsResult } from '../common/protocol.generated.js';
 import { TargetConfig } from '../common/target.js';
 
 /**
@@ -288,10 +289,14 @@ export class DelverAnalysisSession extends Disposable {
 	 * effect, and a caller that could send partial updates would have no way to
 	 * say what the facts it is reading were derived against.
 	 */
-	async setCorrections(corrections: readonly IFunctionCorrectionWire[]): Promise<ISetCorrectionsResult> {
+	async setCorrections(
+		corrections: readonly IFunctionCorrectionWire[],
+		dataRanges: readonly IDataRangeCorrectionWire[] = [],
+	): Promise<ISetCorrectionsResult> {
 		const { json } = await this.rpc.call('analysis/setCorrections', {
 			image_id: this.image.image_id,
 			corrections,
+			data_ranges: dataRanges,
 		});
 		return json.result as ISetCorrectionsResult;
 	}

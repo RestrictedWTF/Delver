@@ -185,6 +185,9 @@ function functionBoundsLabel(value: IEdit['value'], subject: string): string {
 	}
 	try {
 		const correction = JSON.parse(value) as { kind?: string; endRva?: string };
+		if (correction.kind === 'data' && correction.endRva !== undefined) {
+			return localize('delverReviewFunctionData', "Treat {0} through {1} as data, not code", subject, wireAddress(BigInt(correction.endRva)));
+		}
 		if (correction.kind === 'undefine') {
 			return localize('delverReviewFunctionUndefine', "Remove function at {0}", subject);
 		}

@@ -56,7 +56,8 @@ pub use call_graph::{
 };
 pub use control_flow::{BasicBlock, BasicBlockEdge, BasicBlockEdgeKind};
 pub use corrections::{
-	CorrectionConflict, CorrectionSet, FunctionCorrection, FunctionCorrectionKind,
+	CorrectionConflict, CorrectionSet, Corrections, DataRangeCorrection, FunctionCorrection,
+	FunctionCorrectionKind,
 };
 // `entry_role::Subsystem` is deliberately not re-exported here: it would shadow
 // `delver_format::Subsystem`, which it converts from, for every caller that
@@ -229,8 +230,13 @@ pub fn analyze(image: &ParsedImage, file: &[u8], coverage: &[Range<u64>]) -> Ana
 /// The corrections are inputs to the derivation, not edits to its output: the
 /// analysis runs from the image bytes plus a corrected seed set, so every fact
 /// that comes back is still recomputable from things a caller can point at.
-/// Nothing here touches `file` — corrections name addresses, never bytes. See
+/// Nothing here touches `file` — corrections name addresses, never bytes, and
+/// nothing in this crate reads or modifies target bytes to apply one. See
 /// [`corrections`] for the reasoning.
+///
+/// `corrections` is anything that converts into [`Corrections`]: a bare
+/// `&[FunctionCorrection]` for function starts alone, or the struct itself to
+/// carry [`DataRangeCorrection`]s as well.
 ///
 /// The set is validated as a whole and refused as a whole. A conflicting set
 /// yields [`CorrectionConflict`] and no analysis, because facts derived from
@@ -240,11 +246,11 @@ pub fn analyze(image: &ParsedImage, file: &[u8], coverage: &[Range<u64>]) -> Ana
 /// an authored function start does not conjure one, since a lone function
 /// beside an empty instruction list would contradict
 /// [`AnalyzedImage::decoding`].
-pub fn analyze_corrected(
+pub fn analyze_corrected<'a>(
 	image: &ParsedImage,
 	file: &[u8],
 	coverage: &[Range<u64>],
-	corrections: &[FunctionCorrection],
+	corrections: impl Into<Corrections<'a>>,
 ) -> Result<AnalyzedImage, CorrectionConflict> {
 	let corrections = CorrectionSet::new(corrections)?;
 	Ok(analyze_with(image, file, coverage, &corrections))
@@ -365,6 +371,12 @@ impl<'a> Descent<'a> {
 		if self.corrections.is_undefined(rva) {
 			return;
 		}
+		// A data range denies its bytes were ever code, so nothing may start a
+		// function inside one — not a seed, not a call target, not a guess.
+		// Same choke point, same reason as an `Undefine`.
+		if self.corrections.data_range_end_at(rva).is_some() {
+			return;
+		}
 		self.functions
 			.entry(rva)
 			.and_modify(|existing| {
@@ -398,6 +410,15 @@ impl<'a> Descent<'a> {
 		let mut rva = start;
 
 		loop {
+			// Decoding stops at the edge of a data range. Checked before
+			// `visit` and before any instruction is recorded, which is what
+			// keeps the range's bytes out of the index and keeps every xref
+			// this loop pushes from originating inside one. An xref *to* the
+			// range, pushed from an instruction outside it, is untouched: the
+			// reference is a fact about the image whatever the bytes are.
+			if self.corrections.data_range_end_at(rva).is_some() {
+				return;
+			}
 			if !self.state.visit(rva) {
 				return; // already walked this path
 			}
@@ -494,6 +515,16 @@ impl<'a> Descent<'a> {
 		for (start, end) in executable {
 			let mut rva = start;
 			while rva < end {
+				// Step **over** a data range, never into or past it a byte at a
+				// time: advancing by one would land the sweep mid-range and
+				// then guess a function at every byte the author excluded, and
+				// arriving at `end_rva` by increments would do it once per byte
+				// on the way. Jumping to the exclusive end visits the first
+				// byte after the range exactly once, as an ordinary candidate.
+				if let Some(range_end) = self.corrections.data_range_end_at(rva) {
+					rva = range_end;
+					continue;
+				}
 				if let Some((_, function_end)) =
 					authoritative_ranges
 						.iter()
@@ -622,6 +653,29 @@ mod tests {
 			rva,
 			kind: FunctionCorrectionKind::Define { end_rva },
 		}
+	}
+
+	/// Analysis with both correction axes, since `analyze_corrected`'s slice
+	/// shorthand only reaches function corrections.
+	fn analyze_data_corrected(
+		image: &ParsedImage,
+		file: &[u8],
+		functions: &[FunctionCorrection],
+		data_ranges: &[DataRangeCorrection],
+	) -> Result<AnalyzedImage, CorrectionConflict> {
+		super::analyze_corrected(
+			image,
+			file,
+			&[0..file.len() as u64],
+			Corrections {
+				functions,
+				data_ranges,
+			},
+		)
+	}
+
+	fn data(rva: u64, end_rva: u64) -> DataRangeCorrection {
+		DataRangeCorrection { rva, end_rva }
 	}
 
 	fn undefine(rva: u64) -> FunctionCorrection {
@@ -1178,6 +1232,276 @@ mod tests {
 				}),
 			),
 		);
+	}
+
+	/// call 0x100B / ret / padding / mov rax,rbx / ret, entered at a nop so the
+	/// call itself can be covered by a data range without hiding the entry.
+	const CALL_OVER_PADDING: &[u8] = &[
+		0x90, // nop at 0x1000, the entry
+		0xE8, 0x05, 0x00, 0x00, 0x00, // call rel32 at 0x1001 -> 0x100B
+		0xC3, // ret at 0x1006
+		0xCC, 0xCC, 0xCC, 0xCC, // padding
+		0x48, 0x89, 0xD8, // mov rax,rbx at 0x100B
+		0xC3, // ret at 0x100E
+	];
+
+	#[test]
+	fn a_data_range_takes_its_instructions_out_of_the_index() {
+		let (image, file) = image_with_code(CALL_OVER_PADDING);
+
+		let baseline = analyze(&image, &file);
+		let corrected = analyze_data_corrected(&image, &file, &[], &[data(0x100B, 0x100F)])
+			.expect("no conflict");
+
+		assert_eq!(
+			(
+				baseline.instructions.row_for_address(0x100B).is_some(),
+				baseline.instructions.row_for_address(0x100E).is_some(),
+				corrected.instructions.row_for_address(0x100B).is_some(),
+				corrected.instructions.row_for_address(0x100E).is_some(),
+				corrected.instructions.row_for_address(0x1001).is_some(),
+			),
+			(true, true, false, false, true),
+			"the range denies its own bytes were code and nothing else",
+		);
+	}
+
+	#[test]
+	fn an_xref_into_a_data_range_survives_while_one_out_of_it_does_not() {
+		let (image, file) = image_with_code(CALL_OVER_PADDING);
+
+		// 0x100B is called from outside the range; the call at 0x1001 is inside
+		// a second range and so never decodes at all.
+		let targeted = analyze_data_corrected(&image, &file, &[], &[data(0x100B, 0x100F)])
+			.expect("no conflict");
+		let originating = analyze_data_corrected(&image, &file, &[], &[data(0x1001, 0x1006)])
+			.expect("no conflict");
+
+		assert_eq!(
+			(
+				targeted
+					.xrefs
+					.to(0x100B)
+					.iter()
+					.map(|x| (x.from, x.kind))
+					.collect::<Vec<_>>(),
+				originating.xrefs.from(0x1001).len(),
+			),
+			(
+				// A call is a fact about the image whatever lives at the address
+				// it names — the same reason an `Undefine` keeps it.
+				vec![(0x1001, XrefKind::Call)],
+				0,
+			),
+		);
+	}
+
+	#[test]
+	fn no_function_starts_inside_a_data_range_from_any_source() {
+		// nop / call 0x100B / ret / padding / mov rax,rbx / ret / padding /
+		// mov rax,rbx / ret — the last pair is unreferenced, so only the sweep
+		// can find it.
+		let code = &[
+			0x90, // 0x1000 entry
+			0xE8, 0x05, 0x00, 0x00, 0x00, // call -> 0x100B
+			0xC3, // 0x1006, also an exception-directory seed
+			0xCC, 0xCC, 0xCC, 0xCC, //
+			0x48, 0x89, 0xD8, // 0x100B, the call target
+			0xC3, //
+			0xCC, // 0x100F padding
+			0x48, 0x89, 0xD8, // 0x1010, reachable only by the sweep
+			0xC3, //
+		];
+		let (mut image, file) = image_with_code(code);
+		image.function_seeds.push(FunctionSeed {
+			rva: 0x1006,
+			end_rva: None,
+			source: SeedSource::ExceptionDirectory,
+		});
+
+		let baseline = analyze(&image, &file);
+		let corrected = analyze_data_corrected(
+			&image,
+			&file,
+			&[],
+			&[
+				data(0x1006, 0x1007),
+				data(0x100B, 0x100F),
+				data(0x1010, 0x1014),
+			],
+		)
+		.expect("no conflict");
+
+		assert_eq!(
+			(starts(&baseline), starts(&corrected)),
+			(
+				vec![
+					(0x1000, FunctionSource::EntryPoint),
+					(0x1006, FunctionSource::ExceptionDirectory),
+					(0x100B, FunctionSource::CallTarget),
+					(0x1010, FunctionSource::LinearSweep),
+				],
+				// Seed, call target and sweep guess alike: `add_function` is the
+				// one place an address becomes a function, and a data range is
+				// refused there.
+				vec![(0x1000, FunctionSource::EntryPoint)],
+			),
+		);
+	}
+
+	#[test]
+	fn a_range_is_stepped_over_rather_than_a_byte_at_a_time() {
+		let (image, file) = image_with_code(NOP_LED_FUNCTION);
+
+		let baseline = analyze(&image, &file);
+		// 0x1004..0x1009 is the whole tail: the nop, the sweep's guess at
+		// 0x1005, and the ret at 0x1008.
+		let corrected = analyze_data_corrected(&image, &file, &[], &[data(0x1004, 0x1009)])
+			.expect("no conflict");
+
+		assert_eq!(
+			(starts(&baseline), starts(&corrected)),
+			(
+				vec![
+					(0x1000, FunctionSource::EntryPoint),
+					(0x1005, FunctionSource::LinearSweep),
+				],
+				// No start at 0x1005 — and, the trap this pins, not one there
+				// because the sweep resumed one byte into the range either.
+				vec![(0x1000, FunctionSource::EntryPoint)],
+			),
+		);
+	}
+
+	#[test]
+	fn a_range_abutting_code_leaves_the_neighbouring_instruction_intact() {
+		let (image, file) = image_with_code(NOP_LED_FUNCTION);
+
+		// The padding at 0x1001..0x1004 only; the ret before it and the
+		// function after it are untouched.
+		let corrected = analyze_data_corrected(&image, &file, &[], &[data(0x1001, 0x1004)])
+			.expect("no conflict");
+
+		assert_eq!(
+			(
+				starts(&corrected),
+				corrected.instructions.row_for_address(0x1000).is_some(),
+				corrected.instructions.row_for_address(0x1005).is_some(),
+			),
+			(
+				vec![
+					(0x1000, FunctionSource::EntryPoint),
+					(0x1005, FunctionSource::LinearSweep),
+				],
+				true,
+				true,
+			),
+		);
+	}
+
+	#[test]
+	fn strings_are_unaffected_by_a_data_range() {
+		let code = &[
+			0xC3, // ret at 0x1000
+			104, 101, 108, 108, 111, 0x00, // "hello" at 0x1001
+		];
+		let (image, file) = image_with_code(code);
+
+		let baseline = analyze(&image, &file);
+		let corrected = analyze_data_corrected(&image, &file, &[], &[data(0x1001, 0x1007)])
+			.expect("no conflict");
+
+		assert_eq!(
+			format!("{:?}", corrected.strings),
+			format!("{:?}", baseline.strings),
+			"the scanner reads bytes, not decoded code",
+		);
+	}
+
+	#[test]
+	fn a_conflicting_data_range_set_is_refused_whole() {
+		let (image, file) = image_with_code(NOP_LED_FUNCTION);
+
+		assert_eq!(
+			(
+				analyze_data_corrected(&image, &file, &[], &[data(0x1004, 0x1004)]).err(),
+				analyze_data_corrected(&image, &file, &[], &[data(0x1004, 0x1000)]).err(),
+				analyze_data_corrected(
+					&image,
+					&file,
+					&[],
+					&[data(0x1000, 0x1008), data(0x1004, 0x100C)]
+				)
+				.err(),
+				analyze_data_corrected(
+					&image,
+					&file,
+					&[],
+					&[data(0x1004, 0x100C), data(0x1000, 0x1008)]
+				)
+				.err(),
+				analyze_data_corrected(
+					&image,
+					&file,
+					&[define(0x1005, None)],
+					&[data(0x1004, 0x1009)]
+				)
+				.err(),
+			),
+			(
+				Some(CorrectionConflict::EmptyDataRange {
+					rva: 0x1004,
+					end_rva: 0x1004,
+				}),
+				Some(CorrectionConflict::EmptyDataRange {
+					rva: 0x1004,
+					end_rva: 0x1000,
+				}),
+				Some(CorrectionConflict::OverlappingDataRanges {
+					rva: 0x1004,
+					overlaps: 0x1000,
+				}),
+				Some(CorrectionConflict::OverlappingDataRanges {
+					rva: 0x1000,
+					overlaps: 0x1004,
+				}),
+				Some(CorrectionConflict::DefineInsideDataRange {
+					rva: 0x1005,
+					range_rva: 0x1004,
+				}),
+			),
+		);
+	}
+
+	#[test]
+	fn a_refused_set_applies_nothing() {
+		let (image, file) = image_with_code(NOP_LED_FUNCTION);
+
+		let baseline = analyze(&image, &file);
+		// The first range would apply cleanly on its own; it must not, because
+		// the set as a whole is not one an author could reproduce.
+		let refused = analyze_data_corrected(
+			&image,
+			&file,
+			&[],
+			&[data(0x1004, 0x1009), data(0x1008, 0x1009)],
+		);
+		let after = analyze(&image, &file);
+
+		assert_eq!(
+			(refused.is_err(), format!("{after:?}")),
+			(true, format!("{baseline:?}")),
+		);
+	}
+
+	#[test]
+	fn an_empty_data_range_set_derives_exactly_what_analyze_does() {
+		let (image, file) = image_with_code(CALL_OVER_PADDING);
+
+		let baseline = analyze(&image, &file);
+		let corrected = analyze_data_corrected(&image, &file, &[], &[]).expect("no conflict");
+
+		assert_eq!(format!("{corrected:?}"), format!("{baseline:?}"));
 	}
 
 	#[test]

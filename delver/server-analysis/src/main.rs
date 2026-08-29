@@ -14,8 +14,8 @@ use anyhow::Result;
 use clap::Parser;
 use delver_analysis::listing::ListingRow;
 use delver_analysis::{
-	CallPathSinkError, ExtentError, FoundString, FunctionCorrection, FunctionCorrectionKind,
-	FunctionExtent, FunctionSource,
+	CallPathSinkError, DataRangeCorrection, ExtentError, FoundString, FunctionCorrection,
+	FunctionCorrectionKind, FunctionExtent, FunctionSource,
 };
 use delver_disasm::{FlowKind, SignatureFieldKind};
 use delver_format::BaseRelocation;
@@ -23,24 +23,24 @@ use delver_protocol::{
 	AddressForRowParams, AddressForRowResult, BasicBlockEdgeKindWire, BasicBlockEdgeWire,
 	BasicBlockWire, BasicBlocksParams, BasicBlocksResult, CallGraphEdgeWire, CallGraphParams,
 	CallGraphResult, CallPathStepWire, CallPathWire, CallPathsParams, CallPathsResult,
-	CodeDecodingWire, ErrorKind, FlowKindWire, FunctionCorrectionKindWire, FunctionCorrectionWire,
-	FunctionFingerprintWire, FunctionProfileParams,
-	FunctionProfileResult, FunctionSourceWire, FunctionWire, FunctionsResult, GlobalAccessWire,
-	GlobalAccessesParams, GlobalAccessesResult, GlobalWire, GlobalsParams, GlobalsResult,
-	ImageQueryParams, IndirectCallSiteWire, IndirectResolutionMethodWire, InitializeResult,
-	ListingRowWire, ListingStringRowWire, ListingWindowParams, ListingWindowResult,
-	ListingWindowRowWire, OpenImageParams, OpenImageResult, Request, ResolutionConfidenceWire,
-	ResolvedImportWire, Response, RowForAddressParams, RowForAddressResult, RpcError,
-	ScanStringsParams, ScanStringsResult, SetCorrectionsParams, SetCorrectionsResult,
-	SignatureFieldReasonWire, SignatureFieldWire, StringEncodingWire, StringWire, StringsResult,
-	TargetCapabilityWire, TargetDescriptorWire, XrefIndexParams, XrefIndexResult, XrefKindWire,
-	XrefWire, XrefsParams, XrefsResult,
+	CodeDecodingWire, DataRangeCorrectionWire, ErrorKind, FlowKindWire, FunctionCorrectionKindWire,
+	FunctionCorrectionWire, FunctionFingerprintWire, FunctionProfileParams, FunctionProfileResult,
+	FunctionSourceWire, FunctionWire, FunctionsResult, GlobalAccessWire, GlobalAccessesParams,
+	GlobalAccessesResult, GlobalWire, GlobalsParams, GlobalsResult, ImageQueryParams,
+	IndirectCallSiteWire, IndirectResolutionMethodWire, InitializeResult, ListingRowWire,
+	ListingStringRowWire, ListingWindowParams, ListingWindowResult, ListingWindowRowWire,
+	OpenImageParams, OpenImageResult, Request, ResolutionConfidenceWire, ResolvedImportWire,
+	Response, RowForAddressParams, RowForAddressResult, RpcError, ScanStringsParams,
+	ScanStringsResult, SetCorrectionsParams, SetCorrectionsResult, SignatureFieldReasonWire,
+	SignatureFieldWire, StringEncodingWire, StringWire, StringsResult, TargetCapabilityWire,
+	TargetDescriptorWire, XrefIndexParams, XrefIndexResult, XrefKindWire, XrefWire, XrefsParams,
+	XrefsResult,
 };
 use delver_rpc::framed::MAX_JSON_FRAME_BYTES;
 use delver_rpc::{Listener, Server};
 use sha2::{Digest, Sha256};
 
-use crate::image::{load, reanalyze, LoadedImage, ProviderConnection};
+use crate::image::{load, reanalyze, AuthoredCorrections, LoadedImage, ProviderConnection};
 
 /// Hard cap on rows per `listingWindow` response.
 ///
@@ -688,11 +688,12 @@ fn open_image(request: &Request, state: &Arc<Mutex<State>>) -> Result<serde_json
 		OpenImageParams {
 			space: None,
 			corrections: Vec::new(),
+			data_ranges: Vec::new(),
 		}
 	} else {
 		parse_params(request)?
 	};
-	let corrections = corrections_from_wire(&params.corrections)?;
+	let corrections = corrections_from_wire(&params.corrections, &params.data_ranges)?;
 
 	let mut state = state
 		.lock()
@@ -1225,8 +1226,10 @@ fn xref_page_bounds(total: usize, start: u64, limit: usize) -> (usize, usize, Op
 /// give two places to keep in step and one of them would drift.
 fn corrections_from_wire(
 	wire: &[FunctionCorrectionWire],
-) -> Result<Vec<FunctionCorrection>, RpcError> {
-	wire.iter()
+	data_ranges: &[DataRangeCorrectionWire],
+) -> Result<AuthoredCorrections, RpcError> {
+	let functions = wire
+		.iter()
 		.map(|correction| {
 			let kind = match correction.kind {
 				FunctionCorrectionKindWire::Define => FunctionCorrectionKind::Define {
@@ -1250,7 +1253,35 @@ fn corrections_from_wire(
 				kind,
 			})
 		})
-		.collect()
+		.collect::<Result<Vec<_>, RpcError>>()?;
+
+	// Emptiness is the one shape error here; overlap and containment are
+	// conflicts *between* ranges and belong to the analysis crate for the same
+	// reason the function conflicts do — two implementations of one rule is one
+	// implementation too many.
+	let data_ranges = data_ranges
+		.iter()
+		.map(|range| {
+			if range.end_rva <= range.rva {
+				return Err(RpcError::domain(
+					ErrorKind::InvalidAddress,
+					format!(
+						"data range at {:#x} ends at {:#x}, which is not after it",
+						range.rva, range.end_rva
+					),
+				));
+			}
+			Ok(DataRangeCorrection {
+				rva: range.rva,
+				end_rva: range.end_rva,
+			})
+		})
+		.collect::<Result<Vec<_>, RpcError>>()?;
+
+	Ok(AuthoredCorrections {
+		functions,
+		data_ranges,
+	})
 }
 
 /// Re-derives an open image against a new correction set.
@@ -1264,7 +1295,7 @@ fn set_corrections(
 	state: &Arc<Mutex<State>>,
 ) -> Result<serde_json::Value, RpcError> {
 	let params: SetCorrectionsParams = parse_params(request)?;
-	let corrections = corrections_from_wire(&params.corrections)?;
+	let corrections = corrections_from_wire(&params.corrections, &params.data_ranges)?;
 	let mut state = state
 		.lock()
 		.map_err(|_| RpcError::domain(ErrorKind::TargetBusy, "analysis state lock is poisoned"))?;
@@ -1294,7 +1325,8 @@ fn set_corrections(
 		function_count_before: before,
 		function_count: image.analysis.functions.len() as u64,
 		instruction_count: image.analysis.instructions.len() as u64,
-		corrections_applied: image.corrections.len() as u64,
+		corrections_applied: image.corrections.functions.len() as u64,
+		data_ranges_applied: image.corrections.data_ranges.len() as u64,
 		// Without this every count above is an unqualified zero on an
 		// architecture the decoder does not support, which reads as "applied,
 		// and the image has no code".
@@ -1318,7 +1350,10 @@ const MAX_SCANNED_STRINGS: usize = 4096;
 /// binaries in a stock `System32` reach. Everything past it was unreachable by
 /// any call. This produces the strings on demand instead, so the cap bounds one
 /// answer rather than the image.
-fn scan_strings(request: &Request, state: &Arc<Mutex<State>>) -> Result<serde_json::Value, RpcError> {
+fn scan_strings(
+	request: &Request,
+	state: &Arc<Mutex<State>>,
+) -> Result<serde_json::Value, RpcError> {
 	let params: ScanStringsParams = parse_params(request)?;
 	let state = state
 		.lock()
@@ -1357,7 +1392,7 @@ fn scan_strings(request: &Request, state: &Arc<Mutex<State>>) -> Result<serde_js
 	};
 
 	serde_json::to_value(ScanStringsResult { strings, next_rva })
-	.map_err(|e| RpcError::protocol(-32603, format!("serialising result: {e}")))
+		.map_err(|e| RpcError::protocol(-32603, format!("serialising result: {e}")))
 }
 
 fn strings(request: &Request, state: &Arc<Mutex<State>>) -> Result<serde_json::Value, RpcError> {

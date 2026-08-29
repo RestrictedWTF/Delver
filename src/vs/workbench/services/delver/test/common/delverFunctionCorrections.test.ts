@@ -7,7 +7,7 @@ import * as assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { Anchor, EditOp, EditStatus, IAuthor, InterpretationLog } from '../../../../../platform/delver/common/interpretation.js';
 import { IDelverInterpretationService } from '../../common/delverInterpretationService.js';
-import { functionCorrectionsFor } from '../../common/delverFunctionCorrections.js';
+import { authoredCorrectionsFor } from '../../common/delverFunctionCorrections.js';
 
 const HASH = 'a'.repeat(64);
 const OTHER_HASH = 'b'.repeat(64);
@@ -50,12 +50,20 @@ suite('Delver function corrections', () => {
 		log.append({ author: ANALYST, anchor: at(0x3200n), op: EditOp.FunctionBounds, value: '' });
 		// Another image's log is another image's business.
 		log.append({ author: ANALYST, anchor: at(0x1100n, OTHER_HASH), op: EditOp.FunctionBounds, value: '{"kind":"undefine"}' });
+		// A data range, which sorts into the same address order and comes back
+		// on its own list. Its end is not optional the way a define's is: an
+		// unbounded exclusion would silently swallow everything after it.
+		log.append({ author: ANALYST, anchor: at(0x1c00n), op: EditOp.FunctionBounds, value: '{"kind":"data","endRva":"0x1d00"}' });
+		log.append({ author: ANALYST, anchor: at(0x1e00n), op: EditOp.FunctionBounds, value: '{"kind":"data"}' });
 
-		assert.deepStrictEqual(functionCorrectionsFor(interpretationOf(log), HASH), [
-			{ rva: '0x1000', kind: 'define' },
-			{ rva: '0x1400', kind: 'define', endRva: '0x1480' },
-			{ rva: '0x2000', kind: 'undefine' },
-		]);
+		assert.deepStrictEqual(authoredCorrectionsFor(interpretationOf(log), HASH), {
+			functions: [
+				{ rva: '0x1000', kind: 'define' },
+				{ rva: '0x1400', kind: 'define', endRva: '0x1480' },
+				{ rva: '0x2000', kind: 'undefine' },
+			],
+			dataRanges: [{ rva: '0x1c00', endRva: '0x1d00' }],
+		});
 	});
 
 	test('canonicalizes an address however the stored value spelled it', () => {
@@ -64,15 +72,16 @@ suite('Delver function corrections', () => {
 		const log = new InterpretationLog();
 		log.append({ author: ANALYST, anchor: at(0x1ab0n), op: EditOp.FunctionBounds, value: '{"kind":"define","endRva":"0x1AC0"}' });
 
-		assert.deepStrictEqual(functionCorrectionsFor(interpretationOf(log), HASH), [
-			{ rva: '0x1ab0', kind: 'define', endRva: '0x1ac0' },
-		]);
+		assert.deepStrictEqual(authoredCorrectionsFor(interpretationOf(log), HASH), {
+			functions: [{ rva: '0x1ab0', kind: 'define', endRva: '0x1ac0' }],
+			dataRanges: [],
+		});
 	});
 
 	test('has nothing to say about an image nobody has corrected', () => {
 		const log = new InterpretationLog();
 		log.append({ author: ANALYST, anchor: at(0x1000n), op: EditOp.Rename, value: 'decode_stage2' });
 
-		assert.deepStrictEqual(functionCorrectionsFor(interpretationOf(log), HASH), []);
+		assert.deepStrictEqual(authoredCorrectionsFor(interpretationOf(log), HASH), { functions: [], dataRanges: [] });
 	});
 });
