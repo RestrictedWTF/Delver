@@ -554,6 +554,24 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 	 */
 	private functionIndex: { readonly contentHash: string; readonly functions: readonly IFunctionWire[]; readonly total: number; readonly listTruncated: boolean } | undefined;
 
+	/**
+	 * How many times each image's facts have been derived again.
+	 *
+	 * Every fact-ordered sequence a caller pages through — functions, listing
+	 * rows, cross-references, blocks, call-graph edges — is an index into a
+	 * table the analysis server rebuilt. Before corrections existed, those
+	 * tables genuinely could not move under a walk, and the cursors were
+	 * written on that assumption. `delver_reanalyze` and an accepted correction
+	 * both falsify it: resuming at index 100 of a table that lost thirty rows
+	 * skips thirty real functions and reports nothing wrong.
+	 *
+	 * Folded into the cursor's state stamp so the walk is *refused* instead.
+	 * Zero renders as an empty stamp, which keeps a cursor issued before any
+	 * re-derivation exactly as valid as it was — the sequence really has not
+	 * moved yet.
+	 */
+	private readonly factsGeneration = new Map<string, number>();
+
 	constructor(
 		@IDelverSessionService private readonly sessionService: IDelverSessionService,
 		@IDelverFocusService private readonly focusService: IDelverFocusService,
@@ -566,6 +584,14 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 	) {
 		super();
 		this._register(this.sessionService.onDidChangeActiveSession(() => { this.functionIndex = undefined; }));
+		this._register(this.sessionService.onDidRederiveFacts(session => {
+			// The parsed index is an image's facts too, and it is now one
+			// derivation behind.
+			if (this.functionIndex?.contentHash === session.contentHash) {
+				this.functionIndex = undefined;
+			}
+			this.factsGeneration.set(session.contentHash, (this.factsGeneration.get(session.contentHash) ?? 0) + 1);
+		}));
 		this.registerHandlers();
 	}
 
@@ -868,6 +894,27 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 	}
 
 	/**
+	 * Stamp of the derivation a fact-ordered walk is bound to.
+	 *
+	 * Empty until the image has been re-derived at least once, so this changes
+	 * nothing for the overwhelmingly common case of a walk over an image nobody
+	 * has corrected — and refuses every walk that would otherwise resume into a
+	 * rebuilt table.
+	 *
+	 * `extra` composes with a stamp the capability already had, because a
+	 * sequence can be bound to both the facts and the authored log at once: a
+	 * name-filtered function walk is bound to which functions exist *and* to
+	 * what they are called.
+	 */
+	private factsStamp(contentHash: string, extra = ''): string {
+		const generation = this.factsGeneration.get(contentHash) ?? 0;
+		if (generation === 0) {
+			return extra;
+		}
+		return collectionStamp(['facts', generation, extra]);
+	}
+
+	/**
 	 * Stamp of the authored interpretation log for one image.
 	 *
 	 * The log is append-only — an undo appends a compensation rather than
@@ -1049,12 +1096,16 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 		const session = this.requireSession();
 		const nameContains = typeof context.args.nameContains === 'string' ? context.args.nameContains.toLowerCase() : undefined;
 		const onlyNamed = context.args.onlyNamed === true;
-		// Detected boundaries are facts in a fixed order, but *which* of them
-		// match a name filter is authored, and an accepted rename mid-walk moves
-		// a function into or out of the sequence. Only a name-filtered walk is
-		// bound to the log, so an unfiltered inventory of a large image is not
-		// forced to restart every time the analyst renames something.
-		const state = nameContains === undefined && !onlyNamed ? '' : this.interpretationStamp(session.contentHash);
+		// Two things can move this sequence. *Which* functions match a name
+		// filter is authored, so an accepted rename mid-walk moves one into or
+		// out of it — and only a filtered walk is bound to the log, so an
+		// unfiltered inventory of a large image is not restarted every time the
+		// analyst renames something. *Which functions exist at all* is derived,
+		// and a correction or a re-derivation changes it; that binds every walk,
+		// filtered or not, because resuming at an index into a table that lost
+		// rows skips real functions and says nothing.
+		const authored = nameContains === undefined && !onlyNamed ? '' : this.interpretationStamp(session.contentHash);
+		const state = this.factsStamp(session.contentHash, authored);
 		const { startIndex, count, project, filter } = this.pageArgs(context, DelverAgentCapabilityId.ListFunctions, DELVER_AGENT_LIMITS.functions, ['nameContains', 'onlyNamed'], state);
 		const all = await this.resolvedFunctions(session);
 		const bound = await this.rawFunctions(session);
@@ -1688,7 +1739,17 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 
 	private async handleDisassemble(context: IHandlerContext): Promise<IHandlerOutput> {
 		const session = this.requireAttached();
-		const { startIndex, count, project } = this.pageArgs(context, DelverAgentCapabilityId.Disassemble, DELVER_AGENT_LIMITS.listingRows);
+		// A listing row index is an offset into the merged instruction/string
+		// row space, which a re-derivation rebuilds from scratch: an excluded
+		// range removes rows, so a resumed window would land somewhere else in
+		// the image entirely and present it as the next screen of the same walk.
+		const { startIndex, count, project } = this.pageArgs(
+			context,
+			DelverAgentCapabilityId.Disassemble,
+			DELVER_AGENT_LIMITS.listingRows,
+			[],
+			this.factsStamp(session.contentHash),
+		);
 		const address = parseOptionalWireAddress(context.args.address);
 
 		// A cursor already names the exact row to resume at; an address only
@@ -2551,7 +2612,10 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 	private async handleXrefs(context: IHandlerContext, direction: 'to' | 'from'): Promise<IHandlerOutput> {
 		const session = this.requireSession();
 		const capability = direction === 'to' ? DelverAgentCapabilityId.XrefsTo : DelverAgentCapabilityId.XrefsFrom;
-		const { startIndex, count, project, filter } = this.pageArgs(context, capability, DELVER_AGENT_LIMITS.xrefs, ['address']);
+		// Cross-references are derived, and a correction is precisely what adds
+		// or removes them: excluding a range drops every reference originating
+		// inside it.
+		const { startIndex, count, project, filter } = this.pageArgs(context, capability, DELVER_AGENT_LIMITS.xrefs, ['address'], this.factsStamp(session.contentHash));
 		const address = parseWireAddress(context.args.address);
 
 		// An offline project answers from its retained table when it has one.

@@ -217,7 +217,12 @@ impl CorrectionSet {
 	/// nor reproduced, and the author is not told which half survived. Failing
 	/// closed leaves the previous analysis intact and the conflict visible.
 	///
-	/// The first conflict in `corrections` order is the one reported.
+	/// Data ranges are validated before function corrections, because a
+	/// `Define` can only be judged once the ranges are known. Within each list
+	/// the first *entry* that conflicts is the one reported — but an entry that
+	/// conflicts two ways at once reports whichever check runs first, which is
+	/// not the caller's ordering. Nothing depends on that: the set is refused
+	/// whole either way, and only the message differs.
 	/// Data-range conflicts are reported before function ones, because a
 	/// `Define` inside a range can only be judged once the ranges are known.
 	pub fn new<'a>(corrections: impl Into<Corrections<'a>>) -> Result<Self, CorrectionConflict> {

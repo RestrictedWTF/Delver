@@ -173,6 +173,20 @@ is fixed and pinned by a test that was verified to fail without the fix.
   that had just been undefined. It now evicts on `onDidRederiveFacts`.
 - **P1 (Rust) — exclusion checked only an instruction's start address.** See
   above; this is the one that most directly broke the feature's headline claim.
+- **P1 — a fact-ordered walk could resume across a re-derivation.** The paging
+  cursors were written when detected boundaries could not move, and a comment in
+  `handleListFunctions` said as much. `delver_reanalyze` and accepted
+  corrections falsify it: resuming at index 100 of a table that lost thirty rows
+  skipped thirty real functions and reported nothing wrong. The agent service
+  now counts re-derivations per image and folds that into the cursor's state
+  stamp for functions, listing rows, and cross-references, so the walk is
+  refused instead. The stamp is empty at generation zero, so a cursor issued
+  before any re-derivation is exactly as valid as it was.
+- **P1 — `analysis/openImage` reused the handle `"image-0"` for every open**
+  while resetting `generation` to zero, so a cursor from a previous image passed
+  the `(image_id, generation)` guard. Latent before; re-open became a real
+  operation the moment `data_ranges` could differ between two of them. Handles
+  are now stamped per open.
 - **P2** — confidence no longer rounds to `1.00`/`0.00`; the findings `status`
   filter is validated before the cursor and refuses a non-string instead of
   coercing it to `all`; the oversize-report message no longer points at a
@@ -188,7 +202,14 @@ rather than papered over.
 reasoning: a patch changes the bytes, so facts derived from them are facts about
 something the sample no longer is. It needs its own decision.
 
-**Verified:** 407 Delver TypeScript tests, 248 Rust tests, and the 10 Python
+**Still open, and worth knowing:** the protocol defines an optional `generation`
+on the row-index requests precisely so a stale index is refused, and no
+TypeScript caller sends it — `listingWindow`, `rowForAddress` and `addressForRow`
+all omit the field. The agent-layer cursors above now cover the paths an agent
+actually walks, so this is a latent hole rather than a live one, but it is a hole
+and the tool descriptions describe the mechanism as though it were wired.
+
+**Verified:** 408 Delver TypeScript tests, 248 Rust tests, and the 10 Python
 decompiler-worker tests pass; the client typecheck is clean, the corpus matches
 6/6, `cargo fmt` and clippy are clean, and the layers check is clean. Run the
 TypeScript suite with the full selector — `--grep Delver` alone misses six

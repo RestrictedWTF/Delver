@@ -246,6 +246,13 @@ function namedSignature(name: string): IDelverNamedSignature {
 class FakeSessionService implements Partial<IDelverSessionService> {
 	private readonly emitter = new Emitter<IDelverSession | undefined>();
 	readonly onDidChangeActiveSession = this.emitter.event;
+	private readonly rederiveEmitter = new Emitter<IDelverSession>();
+	readonly onDidRederiveFacts = this.rederiveEmitter.event;
+
+	/** Announces a re-derivation the way the real service does, after the fact. */
+	rederive(session: IDelverSession): void {
+		this.rederiveEmitter.fire(session);
+	}
 
 	readonly calls: string[] = [];
 	activeSession: IDelverSession | undefined;
@@ -3773,6 +3780,48 @@ suite('DelverAgentService', () => {
 				}],
 				pendingCount: 2,
 			},
+		});
+	});
+
+	test('refuses to resume a fact-ordered walk across a re-derivation', async () => {
+		// The cursors were written when detected boundaries could not move under
+		// a walk. A correction and `delver_reanalyze` both falsify that: resume
+		// at index 2 of a table that lost a row and the walk skips a real
+		// function while reporting nothing wrong — a wrong answer wearing the
+		// shape of a correct one. Being refused is the whole point; the caller
+		// can start again and get a coherent list.
+		const { service, session } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		session.functionsResult = { functions: [...FUNCTIONS] };
+
+		const first = await service.invoke({
+			capability: 'delver_list_functions',
+			args: { count: 1 },
+		}, CancellationToken.None);
+		const cursor = first.nextCursor;
+		assert.ok(cursor, 'the fixture must have more than one function to page');
+
+		// Same cursor, twice: once with the table as it was, once after the
+		// facts were derived again. Only the second must be refused, so this
+		// cannot pass by refusing everything.
+		const beforeRederive = await service.invoke({
+			capability: 'delver_list_functions',
+			args: { cursor },
+		}, CancellationToken.None);
+		session.rederive(LIVE_SESSION);
+
+		assert.deepStrictEqual({
+			resumedBefore: (beforeRederive.data as { readonly functions: readonly unknown[] }).functions.length,
+			resumedAfter: await errorCode(service, { capability: 'delver_list_functions', args: { cursor } }),
+			// A fresh walk after the re-derivation is fine — it is only the
+			// cursor minted against the old table that is meaningless.
+			freshWalk: (await service.invoke({
+				capability: 'delver_list_functions', args: {},
+			}, CancellationToken.None)).completeness,
+		}, {
+			resumedBefore: FUNCTIONS.length - 1,
+			resumedAfter: 'STALE_REVISION',
+			freshWalk: 'complete',
 		});
 	});
 

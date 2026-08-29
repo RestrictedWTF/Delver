@@ -359,7 +359,10 @@ pub fn load(
 	relocations.sort_unstable_by_key(|relocation| relocation.rva);
 
 	Ok(LoadedImage {
-		id: "image-0".to_string(),
+		// A placeholder. `open_image` stamps the real handle: only it knows how
+		// many images this process has served, and a handle that repeated across
+		// opens let a cursor from the previous image pass the generation guard.
+		id: String::new(),
 		parsed,
 		analysis,
 		bytes,

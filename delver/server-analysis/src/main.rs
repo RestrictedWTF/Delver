@@ -71,6 +71,16 @@ struct Args {
 struct State {
 	provider: ProviderConnection,
 	image: Option<LoadedImage>,
+	/// How many images this process has opened.
+	///
+	/// The handle has to differ between opens, not just between processes.
+	/// `analysis/openImage` replaces the image and starts its generation at
+	/// zero, so a constant handle let a cursor minted against the *previous*
+	/// image — different corrections, a different table — pass the
+	/// `(image_id, generation)` guard and be answered from the new one. Re-open
+	/// became a real operation the moment `data_ranges` could differ between
+	/// two of them.
+	opens: u64,
 }
 
 fn main() -> Result<()> {
@@ -79,6 +89,7 @@ fn main() -> Result<()> {
 	let state = Arc::new(Mutex::new(State {
 		provider,
 		image: None,
+		opens: 0,
 	}));
 
 	if let Some(endpoint) = args.listen {
@@ -698,11 +709,19 @@ fn open_image(request: &Request, state: &Arc<Mutex<State>>) -> Result<serde_json
 	let mut state = state
 		.lock()
 		.map_err(|_| RpcError::domain(ErrorKind::TargetBusy, "analysis state lock is poisoned"))?;
-	let State { provider, image } = &mut *state;
+	let State {
+		provider,
+		image,
+		opens,
+	} = &mut *state;
 
-	let loaded = load(provider, params.space.as_deref(), &corrections).map_err(|e| {
+	let mut loaded = load(provider, params.space.as_deref(), &corrections).map_err(|e| {
 		RpcError::domain(ErrorKind::UnreadableMemory, format!("opening image: {e}"))
 	})?;
+	// Stamped after a successful load, so a failed open does not burn a handle
+	// and, more importantly, does not invalidate the image still open.
+	*opens = opens.saturating_add(1);
+	loaded.id = format!("image-{opens}");
 
 	// Every count here is qualified three times over. It counts `loaded.bytes`,
 	// which is a prefix of the space when the provider would not serve all of
