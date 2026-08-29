@@ -19,7 +19,9 @@ import { editFromWire, IInterpretationEditWire } from '../../../../../platform/d
 import { IDelverToolCallRecordWire } from '../../../../../platform/delver/common/delverToolCall.js';
 import { IDelverNamedSignatureDraft, IDelverNamedSignatureWire } from '../../../../../platform/delver/common/delverSignature.js';
 import { Anchor, EditOp, EditStatus, EditValue, IAuthor, IEdit, IInterpretationAt, InterpretationLog } from '../../../../../platform/delver/common/interpretation.js';
+import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
 import { IDialogService, IFileDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
+import { DELVER_AUTO_REVIEWER, DELVER_REVIEW_MODE_SETTING } from '../../common/delverReviewPolicy.js';
 import { IDelverInterpretationService } from '../../common/delverInterpretationService.js';
 import { DelverProjectService, IDelverProjectSession } from '../../common/delverProjectService.js';
 
@@ -118,6 +120,34 @@ class FakeInterpretationService implements Partial<IDelverInterpretationService>
 
 suite('DelverProjectService findings', () => {
 	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('automatic review decides a finding on arrival, attributed to the policy', async () => {
+		// The riskiest half of the mode. A finding is a conclusion that ends up
+		// in a report handed to someone who cannot check it, so an automatic
+		// acceptance must be a real decision with the policy as its author —
+		// never the finding written straight to accepted, which would erase the
+		// only evidence that nobody read it.
+		const { service } = createService('auto');
+		disposables.add(service);
+
+		const [finding] = await service.reportFindings(HASH, [draft()]);
+		const decision = service.findingDecisionFor(HASH, finding.id);
+
+		assert.deepStrictEqual({
+			decided: decision?.outcome,
+			author: decision?.author,
+			// Nothing is left pending, which is what the analyst asked for.
+			pending: service.pendingFindings(HASH).length,
+			// The finding's own status is untouched: it records what the model
+			// claimed, and the decision records what happened to it.
+			findingStatus: finding.status,
+		}, {
+			decided: 'accepted',
+			author: DELVER_AUTO_REVIEWER,
+			pending: 0,
+			findingStatus: 'proposed',
+		});
+	});
 
 	test('retains and decides untitled findings with append-only events', async () => {
 		const { service, store } = createService();
@@ -402,7 +432,7 @@ suite('DelverProjectService findings', () => {
 	});
 });
 
-function createService(): { service: DelverProjectService; store: FakeProjectStore; interpretation: FakeInterpretationService } {
+function createService(reviewMode: 'manual' | 'auto' = 'manual'): { service: DelverProjectService; store: FakeProjectStore; interpretation: FakeInterpretationService } {
 	const store = new FakeProjectStore();
 	const interpretation = new FakeInterpretationService();
 	return {
@@ -414,6 +444,10 @@ function createService(): { service: DelverProjectService; store: FakeProjectSto
 			interpretation as unknown as IDelverInterpretationService,
 			{} as IFileDialogService,
 			{ error: async () => undefined } as unknown as IDialogService,
+			// Manual by default, matching the product default, so every test
+			// written before automatic review existed still asserts what it was
+			// written to assert.
+			{ getValue: (key?: string) => (key === DELVER_REVIEW_MODE_SETTING ? reviewMode : undefined) } as unknown as IConfigurationService,
 		),
 	};
 }

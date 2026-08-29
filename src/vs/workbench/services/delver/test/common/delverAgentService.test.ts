@@ -44,7 +44,9 @@ import {
 	XrefKindWire,
 } from '../../../../../platform/delver/common/protocol.generated.js';
 import { getSingletonServiceDescriptors } from '../../../../../platform/instantiation/common/extensions.js';
+import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
 import { NullLogService } from '../../../../../platform/log/common/log.js';
+import { DELVER_REVIEW_MODE_SETTING } from '../../common/delverReviewPolicy.js';
 import { NullTelemetryServiceShape } from '../../../../../platform/telemetry/common/telemetryUtils.js';
 import {
 	DELVER_AGENT_CAPABILITIES,
@@ -698,7 +700,7 @@ class TestTelemetryService extends NullTelemetryServiceShape {
 	}
 }
 
-function createService(store: Pick<ReturnType<typeof ensureNoDisposablesAreLeakedInTestSuite>, 'add'>) {
+function createService(store: Pick<ReturnType<typeof ensureNoDisposablesAreLeakedInTestSuite>, 'add'>, reviewMode: 'manual' | 'auto' = 'manual') {
 	const session = store.add(new FakeSessionService());
 	const focus = new FakeFocusService();
 	const analysis = new FakeAnalysisService();
@@ -715,6 +717,7 @@ function createService(store: Pick<ReturnType<typeof ensureNoDisposablesAreLeake
 		project as unknown as IDelverProjectService,
 		new NullLogService(),
 		telemetry,
+		{ getValue: (key?: string) => (key === DELVER_REVIEW_MODE_SETTING ? reviewMode : undefined) } as unknown as IConfigurationService,
 	));
 	return { service, session, focus, analysis, decompiler, interpretation, project, telemetry };
 }

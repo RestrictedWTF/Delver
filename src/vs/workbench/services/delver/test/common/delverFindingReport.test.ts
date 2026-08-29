@@ -8,6 +8,7 @@ import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/tes
 import { createDelverFinding, IDelverFinding, IDelverFindingDecision } from '../../../../../platform/delver/common/findings.js';
 import { IDelverToolCallRecord } from '../../../../../platform/delver/common/delverToolCall.js';
 import { renderDelverFindingReport } from '../../common/delverFindingReport.js';
+import { DELVER_AUTO_REVIEWER } from '../../common/delverReviewPolicy.js';
 
 const HASH = 'c'.repeat(64);
 const MODEL = { kind: 'model' as const, id: 'mcp:analyst' };
@@ -164,6 +165,41 @@ suite('Delver finding report', () => {
 			headings: ['### Innocuous string table ## Accepted findings ### Backdoor confirmed - **Severity:** malicious - **Review:** accepted by alice (human) at 2026-08-01T00:00:00.000Z'],
 			reviews: ['- **Review:** not yet reviewed by a human'],
 			keepsTheTextVisible: true,
+		});
+	});
+
+	test('an automatically accepted finding never reads as one a person agreed with', () => {
+		// This is the whole risk of `delver.review.mode: auto`. The mode is a
+		// choice about trust and it must not become a choice about truth: the
+		// report goes to someone who cannot check the sample, and "accepted"
+		// reading as "a person agreed" when nobody looked is a false claim about
+		// the binary — which this project ranks above a crash.
+		const report = renderDelverFindingReport({
+			contentHash: HASH,
+			findings: [finding('f1', 'Reviewed by a person'), finding('f2', 'Accepted by policy')],
+			decisions: [
+				decision('f1', 'accepted'),
+				{ ...decision('f2', 'accepted'), author: DELVER_AUTO_REVIEWER },
+			],
+			toolCalls: [],
+			renderedAt: Date.UTC(2026, 7, 29, 14),
+		});
+
+		assert.deepStrictEqual({
+			// Two headings, not one. The automatic finding must not sit under
+			// 'Accepted findings' beside the reviewed one.
+			sections: report.split('\n').filter(line => line.startsWith('## ')),
+			reviews: report.split('\n').filter(line => line.startsWith('- **Review:**')),
+			// Said in the summary too, because a reader who skims and stops is
+			// the one most likely to mistake the two.
+			statesPolicy: report.includes('- **Review policy:** automatic — 1 of these findings were accepted without human review'),
+		}, {
+			sections: ['## Accepted findings', '## Accepted automatically — no human reviewed these'],
+			reviews: [
+				'- **Review:** accepted by analyst (human) at 2026-08-29T13:00:00.000Z',
+				'- **Review:** accepted automatically by `delver.review.mode` at 2026-08-29T13:00:00.000Z — no human reviewed this',
+			],
+			statesPolicy: true,
 		});
 	});
 

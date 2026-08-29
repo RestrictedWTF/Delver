@@ -24,6 +24,8 @@ import {
 	IInterpretationEditWire,
 	IDelverInterpretationStoreService,
 } from '../../../../platform/delver/common/delverInterpretationStoreService.js';
+import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
+import { DELVER_AUTO_REVIEWER, delverReviewMode } from './delverReviewPolicy.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 
@@ -82,6 +84,14 @@ export interface IDelverInterpretationService {
 	/**
 	 * Records a provisional edit. Visible in the log, absent from the picture
 	 * until a human decides it — the whole point of the proposed state.
+	 *
+	 * Under `delver.review.mode: auto` the proposal is still appended as a
+	 * proposal and then resolved by a second, rule-authored append. It is never
+	 * written straight to accepted: the two-record form is what keeps "a model
+	 * claimed this" and "a policy accepted it" separate facts, which is what a
+	 * later reader needs in order to tell either of them from a human agreeing.
+	 * The returned edit is the resolution when one was made, so a caller that
+	 * reports what it did reports what actually stands.
 	 */
 	propose(anchor: Anchor, op: EditOp, value: EditValue, author: IAuthor): Promise<IEdit>;
 
@@ -136,6 +146,7 @@ export class DelverInterpretationService extends Disposable implements IDelverIn
 
 	constructor(
 		@IDelverInterpretationStoreService private readonly storeService: IDelverInterpretationStoreService,
+		@IConfigurationService private readonly configurationService: IConfigurationService,
 	) {
 		super();
 	}
@@ -206,7 +217,20 @@ export class DelverInterpretationService extends Disposable implements IDelverIn
 	propose(anchor: Anchor, op: EditOp, value: EditValue, author: IAuthor): Promise<IEdit> {
 		return this.queueEdit(anchor.contentHash, async () => {
 			await this.load(anchor.contentHash);
-			return this.appendPersisted(anchor.contentHash, { author, anchor, op, value, status: EditStatus.Proposed });
+			const proposal = await this.appendPersisted(anchor.contentHash, { author, anchor, op, value, status: EditStatus.Proposed });
+			if (delverReviewMode(this.configurationService) === 'manual') {
+				return proposal;
+			}
+			// Both appends happen inside the one queued operation, so no reader
+			// can observe the proposal in its undecided state and no concurrent
+			// edit can slip between them. The mode is read here rather than
+			// cached, so turning review back on takes effect on the next
+			// proposal instead of at the next reload.
+			const log = this.logs.get(anchor.contentHash)!;
+			return this.appendPersisted(
+				anchor.contentHash,
+				log.resolutionOf(proposal.seq, EditStatus.Accepted, DELVER_AUTO_REVIEWER),
+			);
 		});
 	}
 

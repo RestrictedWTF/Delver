@@ -81,7 +81,9 @@ import {
 	serializedByteLength,
 	toWireAddress,
 } from './delverAgentTypes.js';
+import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { renderDelverFindingReport } from './delverFindingReport.js';
+import { delverReviewMode } from './delverReviewPolicy.js';
 import { IDelverInterpretationService } from './delverInterpretationService.js';
 import { IDelverHistoricalSignature, IDelverProjectService } from './delverProjectService.js';
 import { IDelverSession, IDelverSessionService } from './delverSessionService.js';
@@ -581,6 +583,7 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 		@IDelverProjectService private readonly projectService: IDelverProjectService,
 		@ILogService private readonly logService: ILogService,
 		@ITelemetryService private readonly telemetryService: ITelemetryService,
+		@IConfigurationService private readonly configurationService: IConfigurationService,
 	) {
 		super();
 		this._register(this.sessionService.onDidChangeActiveSession(() => { this.functionIndex = undefined; }));
@@ -961,6 +964,12 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 					available: capability.requiresAttachedTarget ? session?.sessionId !== undefined : true,
 				})),
 				limits: DELVER_AGENT_LIMITS,
+				// Which changes the meaning of every `propose_*` result an agent
+				// gets back. Under `auto` a proposal is not provisional: it is
+				// applied on arrival, so an agent that tells the analyst "I have
+				// proposed this for your review" would be describing something
+				// that already happened without them.
+				reviewMode: delverReviewMode(this.configurationService),
 				decompiler: describeDecompilerStatus(status),
 				errorCodes: DELVER_AGENT_ERROR_CODES,
 			},

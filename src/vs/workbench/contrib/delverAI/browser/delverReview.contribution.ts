@@ -16,7 +16,9 @@ import { EditStatus } from '../../../../platform/delver/common/interpretation.js
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
+import { ConfigurationScope, Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
+import { DELVER_REVIEW_MODE_SETTING } from '../../../services/delver/common/delverReviewPolicy.js';
 import { TreeView, TreeViewPane } from '../../../browser/parts/views/treeView.js';
 import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { Extensions as ViewExtensions, ITreeViewDescriptor, IViewsRegistry, TreeViewItemHandleArg } from '../../../common/views.js';
@@ -301,3 +303,24 @@ async function decideReviewItem(accessor: ServicesAccessor, handle: string, outc
 		notificationService.error(error instanceof Error ? error.message : String(error));
 	}
 }
+
+Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).registerConfiguration({
+	id: 'delver',
+	order: 100,
+	title: localize('delverConfigurationTitle', "Delver"),
+	type: 'object',
+	properties: {
+		[DELVER_REVIEW_MODE_SETTING]: {
+			type: 'string',
+			enum: ['manual', 'auto'],
+			default: 'manual',
+			markdownDescription: localize('delverReviewMode', "Controls whether model proposals wait for review. In `manual` mode a proposal is visible but changes nothing until you accept it. In `auto` mode every proposal and finding is accepted as it arrives, attributed to the review policy rather than to you — exported reports list automatically accepted findings under their own heading, because nobody read them."),
+			enumDescriptions: [
+				localize('delverReviewMode.manual', "Proposals and findings wait for you to accept or reject them."),
+				localize('delverReviewMode.auto', "Proposals and findings are accepted as they arrive, without review."),
+			],
+			scope: ConfigurationScope.RESOURCE,
+			tags: ['delver'],
+		},
+	},
+});

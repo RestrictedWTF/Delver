@@ -30,7 +30,9 @@ import { IDelverProjectDecompilation, IDelverProjectHandle, IDelverProjectRevisi
 import { editFromWire, editToWire } from '../../../../platform/delver/common/delverInterpretationStoreService.js';
 import { Anchor, anchorKey, EditOp, EditValue, IAuthor, InterpretationLog } from '../../../../platform/delver/common/interpretation.js';
 import { IFunctionsResult, IXrefWire } from '../../../../platform/delver/common/protocol.generated.js';
+import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IDialogService, IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
+import { DELVER_AUTO_REVIEWER, delverReviewMode } from './delverReviewPolicy.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { IDelverInterpretationService } from './delverInterpretationService.js';
@@ -242,6 +244,7 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 		@IDelverInterpretationService private readonly interpretationService: IDelverInterpretationService,
 		@IFileDialogService private readonly fileDialogService: IFileDialogService,
 		@IDialogService private readonly dialogService: IDialogService,
+		@IConfigurationService private readonly configurationService: IConfigurationService,
 	) {
 		super();
 		this._register(this.interpretationService.onDidChange(event => {
@@ -584,6 +587,14 @@ export class DelverProjectService extends Disposable implements IDelverProjectSe
 		}
 		if (findings.length > 0) {
 			this._onDidChangeFindings.fire({ contentHash, findingIds: findings.map(finding => finding.id), kind: 'reported' });
+			// Automatic acceptance is a real decision appended after the fact,
+			// authored by the rule that made it. Writing the findings straight
+			// to `accepted` would have been simpler and would have erased the
+			// only evidence that nobody read them — which is precisely what a
+			// report must be able to say.
+			if (delverReviewMode(this.configurationService) === 'auto') {
+				await this.resolveFindings(contentHash, findings.map(finding => finding.id), 'accepted', DELVER_AUTO_REVIEWER);
+			}
 		}
 		return findings;
 	}

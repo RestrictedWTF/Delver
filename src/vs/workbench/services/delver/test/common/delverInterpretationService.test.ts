@@ -11,6 +11,8 @@ import {
 	IInterpretationEditWire,
 } from '../../../../../platform/delver/common/delverInterpretationStoreService.js';
 import { EditOp, EditStatus, IAuthor } from '../../../../../platform/delver/common/interpretation.js';
+import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
+import { DELVER_AUTO_REVIEWER, DELVER_REVIEW_MODE_SETTING } from '../../common/delverReviewPolicy.js';
 import { DelverInterpretationService } from '../../common/delverInterpretationService.js';
 
 const HASH = 'a'.repeat(64);
@@ -57,12 +59,88 @@ class FakeStore implements Partial<IDelverInterpretationStoreService> {
 	}
 }
 
+/**
+ * Configuration stub selecting a review mode.
+ *
+ * Defaults to `manual`, which is the product default too, so every test
+ * written before automatic review existed keeps asserting the behaviour it was
+ * written for.
+ */
+function reviewMode(mode: 'manual' | 'auto' = 'manual'): IConfigurationService {
+	return { getValue: (key?: string) => (key === DELVER_REVIEW_MODE_SETTING ? mode : undefined) } as unknown as IConfigurationService;
+}
+
 suite('DelverInterpretationService persistence', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
 
+	test('automatic review records who accepted, and never that a person did', async () => {
+		// The mode exists so an analyst driving an agent is not made to click
+		// four hundred times. What it must not do is make the log — or anything
+		// reading it — say a human agreed. The proposal is still appended as a
+		// proposal and then resolved by a second, rule-authored record, so "a
+		// model claimed this" and "a policy accepted it" stay separate facts.
+		const persistence = new FakeStore();
+		const service = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService, reviewMode('auto')));
+		const anchor = { kind: 'image' as const, contentHash: HASH, rva: 0x1000n };
+		await service.load(HASH);
+
+		const returned = await service.propose(anchor, EditOp.Rename, 'decode_config', MODEL);
+
+		// Scoped to this anchor: the fake store seeds an unrelated edit, and the
+		// claim here is about the pair of records one proposal produces.
+		const written = service.logFor(HASH).filter(edit => edit.anchor.kind === 'image' && edit.anchor.rva === anchor.rva);
+		assert.deepStrictEqual({
+			log: written.map(edit => ({ status: edit.status, author: edit.author, resolves: edit.resolves?.length })),
+			// The value stands, which is the point of the mode.
+			applied: service.nameAt(anchor),
+			// Nothing is left waiting, so the review view is not quietly filling
+			// with work nobody intends to do.
+			pending: service.pendingProposals(HASH).length,
+			// The caller is handed the record that actually stands, not the
+			// superseded proposal, so an agent reporting what it did is right.
+			returnedStatus: returned.status,
+		}, {
+			log: [
+				{ status: 'proposed', author: MODEL, resolves: undefined },
+				// Resolving exactly the proposal above it — the link is what lets
+				// a reader see that a policy decided a model's claim, rather
+				// than finding an accepted edit with no account of how it got
+				// that way.
+				{ status: 'accepted', author: DELVER_AUTO_REVIEWER, resolves: 1 },
+			],
+			applied: 'decode_config',
+			pending: 0,
+			returnedStatus: 'accepted',
+		});
+	});
+
+	test('manual review is the default, including for a value nobody recognises', async () => {
+		// Failing closed matters here because the two directions are not
+		// symmetric: defaulting to manual costs clicking, defaulting to auto
+		// accepts a model's claims nobody asked it to accept. A typo in settings
+		// must not be a way to arrive at the permissive mode.
+		const persistence = new FakeStore();
+		const service = store.add(new DelverInterpretationService(
+			persistence as unknown as IDelverInterpretationStoreService,
+			{ getValue: () => 'automatic' } as unknown as IConfigurationService,
+		));
+		const anchor = { kind: 'image' as const, contentHash: HASH, rva: 0x1000n };
+		await service.load(HASH);
+
+		await service.propose(anchor, EditOp.Rename, 'decode_config', MODEL);
+
+		assert.deepStrictEqual({
+			pending: service.pendingProposals(HASH).length,
+			applied: service.nameAt(anchor),
+		}, {
+			pending: 1,
+			applied: undefined,
+		});
+	});
+
 	test('replays before reads and persists before announcing an edit', async () => {
 		const persistence = new FakeStore();
-		const service = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService));
+		const service = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService, reviewMode()));
 		const anchor = { kind: 'image' as const, contentHash: HASH, rva: 0x1000000000000001n };
 		await service.load(HASH);
 
@@ -100,8 +178,8 @@ suite('DelverInterpretationService persistence', () => {
 		// then collides with the first, and the store that resolves the collision
 		// by ignoring it loses an authored edit while reporting success.
 		const persistence = new FakeStore();
-		const first = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService));
-		const second = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService));
+		const first = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService, reviewMode()));
+		const second = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService, reviewMode()));
 		const anchor = { kind: 'image' as const, contentHash: HASH, rva: 0x4000n };
 		await first.load(HASH);
 		await second.load(HASH);
@@ -124,7 +202,7 @@ suite('DelverInterpretationService persistence', () => {
 
 	test('undo appends compensations and continues backward through local history', async () => {
 		const persistence = new FakeStore();
-		const service = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService));
+		const service = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService, reviewMode()));
 		const anchor = { kind: 'image' as const, contentHash: HASH, rva: 0x1000000000000001n };
 		await service.edit(anchor, EditOp.Rename, 'first');
 		await service.edit(anchor, EditOp.Rename, 'second');
@@ -148,7 +226,7 @@ suite('DelverInterpretationService persistence', () => {
 
 	test('redo takes an undo back, and undo then continues further into history', async () => {
 		const persistence = new FakeStore();
-		const service = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService));
+		const service = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService, reviewMode()));
 		const anchor = { kind: 'image' as const, contentHash: HASH, rva: 0x1000000000000001n };
 		await service.edit(anchor, EditOp.Rename, 'first');
 		await service.edit(anchor, EditOp.Rename, 'second');
@@ -168,7 +246,7 @@ suite('DelverInterpretationService persistence', () => {
 
 	test('redo reports nothing to take back when no undo is standing', async () => {
 		const persistence = new FakeStore();
-		const service = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService));
+		const service = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService, reviewMode()));
 		const anchor = { kind: 'image' as const, contentHash: HASH, rva: 0x1000000000000001n };
 		await service.edit(anchor, EditOp.Rename, 'first');
 
@@ -185,7 +263,7 @@ suite('DelverInterpretationService persistence', () => {
 
 	test('revert author restores every affected field without removing other authors', async () => {
 		const persistence = new FakeStore();
-		const service = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService));
+		const service = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService, reviewMode()));
 		const anchor = { kind: 'image' as const, contentHash: HASH, rva: 0x3000n };
 		const model = { kind: 'model' as const, id: 'assistant' };
 		await service.edit(anchor, EditOp.Rename, 'model_name', model);
@@ -211,7 +289,7 @@ suite('DelverInterpretationService persistence', () => {
 
 	test('import appends and materializes the shared edits', async () => {
 		const persistence = new FakeStore();
-		const service = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService));
+		const service = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService, reviewMode()));
 		const announced: string[] = [];
 		store.add(service.onDidChange(event => announced.push(event.edit.author.id)));
 
@@ -235,7 +313,7 @@ suite('DelverInterpretationService persistence', () => {
 
 	test('a proposal is persisted and pending until a reviewer decides it', async () => {
 		const persistence = new FakeStore();
-		const service = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService));
+		const service = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService, reviewMode()));
 		const anchor = { kind: 'image' as const, contentHash: HASH, rva: 0x2000n };
 		await service.load(HASH);
 
@@ -266,7 +344,7 @@ suite('DelverInterpretationService persistence', () => {
 
 	test('an invalid review batch appends no resolutions', async () => {
 		const persistence = new FakeStore();
-		const service = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService));
+		const service = store.add(new DelverInterpretationService(persistence as unknown as IDelverInterpretationStoreService, reviewMode()));
 		await service.load(HASH);
 
 		const first = await service.propose({ kind: 'image', contentHash: HASH, rva: 0x2000n }, EditOp.Rename, 'first', MODEL);

@@ -29,6 +29,7 @@
 import { IAuthor } from '../../../../platform/delver/common/interpretation.js';
 import { IDelverFinding, IDelverFindingDecision } from '../../../../platform/delver/common/findings.js';
 import { IDelverToolCallRecord } from '../../../../platform/delver/common/delverToolCall.js';
+import { isAutomaticReview } from './delverReviewPolicy.js';
 
 /** Everything a report is rendered from. */
 export interface IDelverReportInput {
@@ -53,7 +54,7 @@ export interface IDelverReportInput {
  * conclusion and an open question, and a report that renders them alike is
  * presenting unreviewed model output as reviewed.
  */
-type ReportStanding = 'accepted' | 'rejected' | 'undecided';
+type ReportStanding = 'accepted' | 'automatic' | 'undecided' | 'rejected';
 
 /**
  * Renders the report as GitHub-flavored Markdown.
@@ -65,14 +66,27 @@ type ReportStanding = 'accepted' | 'rejected' | 'undecided';
 export function renderDelverFindingReport(input: IDelverReportInput): string {
 	const decisionFor = (finding: IDelverFinding): IDelverFindingDecision | undefined =>
 		input.decisions.find(decision => decision.findingId === finding.id && decision.contentHash === input.contentHash);
-	const standingOf = (finding: IDelverFinding): ReportStanding => decisionFor(finding)?.outcome ?? 'undecided';
+	const standingOf = (finding: IDelverFinding): ReportStanding => {
+		const decision = decisionFor(finding);
+		if (decision === undefined) {
+			return 'undecided';
+		}
+		// An automatic acceptance is not an acceptance for reporting purposes.
+		// Both mean "not rejected"; only one means a person looked, and a reader
+		// who cannot check the sample has nothing but this document to tell them
+		// apart.
+		if (decision.outcome === 'accepted' && isAutomaticReview(decision.author)) {
+			return 'automatic';
+		}
+		return decision.outcome;
+	};
 
 	// Ordered by what a reader has to act on, not by when it was written:
 	// accepted conclusions first, then what is still open, then what was
 	// rejected — which is kept rather than dropped, because "we looked at this
 	// and it was nothing" is a result, and re-deriving it costs the next reader
 	// the same work it cost this one.
-	const order: readonly ReportStanding[] = ['accepted', 'undecided', 'rejected'];
+	const order: readonly ReportStanding[] = ['accepted', 'automatic', 'undecided', 'rejected'];
 	const sections = order.map(standing => ({
 		standing,
 		findings: input.findings.filter(finding => standingOf(finding) === standing),
@@ -91,6 +105,13 @@ export function renderDelverFindingReport(input: IDelverReportInput): string {
 	lines.push(`- **Rendered:** ${new Date(input.renderedAt).toISOString()}`);
 	lines.push(`- **Findings:** ${input.findings.length} total — `
 		+ sections.map(section => `${section.findings.length} ${section.standing}`).join(', '));
+	// Stated at the top, not left to be inferred from a heading further down.
+	// A reader who skims the summary and stops is the reader most likely to
+	// mistake automatic acceptance for review.
+	const automatic = sections.find(section => section.standing === 'automatic')?.findings.length ?? 0;
+	if (automatic > 0) {
+		lines.push(`- **Review policy:** automatic — ${automatic} of these findings were accepted without human review`);
+	}
 	lines.push('');
 	// Said once, at the top, rather than repeated per finding: every string,
 	// symbol, and identifier quoted below originated in the sample, and a
@@ -123,6 +144,13 @@ function sectionTitle(standing: ReportStanding): string {
 	switch (standing) {
 		case 'accepted':
 			return 'Accepted findings';
+		case 'automatic':
+			// Deliberately not a variant of "Accepted". The mode exists so an
+			// analyst is not made to click four hundred times, which is a fair
+			// thing to want — but the resulting document goes to people who
+			// were not there, and a heading is the only thing most of them will
+			// read.
+			return 'Accepted automatically — no human reviewed these';
 		case 'undecided':
 			// Named for what it costs the reader, not for the field's value: an
 			// unreviewed finding is work outstanding, and a heading that said
@@ -156,7 +184,9 @@ function renderFinding(
 	lines.push(`- **Recorded:** ${new Date(finding.at).toISOString()}`);
 	lines.push(decision === undefined
 		? '- **Review:** not yet reviewed by a human'
-		: `- **Review:** ${decision.outcome} by ${describeAuthor(decision.author)} at ${new Date(decision.at).toISOString()}`);
+		: isAutomaticReview(decision.author)
+			? `- **Review:** accepted automatically by \`${untrustedLine(decision.author.id)}\` at ${new Date(decision.at).toISOString()} — no human reviewed this`
+			: `- **Review:** ${decision.outcome} by ${describeAuthor(decision.author)} at ${new Date(decision.at).toISOString()}`);
 	lines.push(`- **Reported through:** \`${untrustedLine(finding.provenance.capability)}\` (call \`${untrustedLine(finding.provenance.callId)}\`)`);
 	lines.push('');
 	lines.push(untrustedBlock(finding.description));

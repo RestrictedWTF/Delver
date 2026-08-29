@@ -15,6 +15,40 @@ codebase on 2026-08-26, ranked, with the fixed rows deleted as they land.
 
 ## Just landed
 
+**Review has modes.** `delver.review.mode` is `manual` (the default) or
+`auto`; it is registered `RESOURCE`-scoped, so a workspace can override a
+permissive user default and not the reverse, and an unrecognised value settles
+to `manual` because the two failure directions are not symmetric — defaulting
+to manual costs clicking, defaulting to auto accepts a model's claims nobody
+asked it to accept.
+
+The mode selects whether proposals wait. It does **not** select what the record
+says, and that distinction is most of the work
+([ADR 0016](../history/adr/0016-review-modes-and-the-automatic-reviewer.md)).
+Under `auto` a proposal is still appended as a proposal and then decided by a
+second append authored by `{ kind: 'rule', id: 'delver.review.mode' }` — the
+author kind the data model already had for exactly this. Writing it straight to
+`accepted` would have been one line shorter and would have destroyed the only
+evidence that nobody read it. Findings are decided the same way, and each
+finding's own `status` stays `proposed`, because that field records what the
+model claimed while the decision records what happened to it.
+
+Every surface that reports a decision now distinguishes the two. The exported
+report gives automatically accepted findings their own heading — *Accepted
+automatically — no human reviewed these* — rather than a variant of *Accepted*,
+and states the policy in the summary block where a reader who skims and stops
+will see it. `delver_capabilities` reports `reviewMode`, because under `auto` a
+proposal is not provisional and an agent saying "I have proposed this for your
+review" would be describing something that already happened without the
+analyst.
+
+**The cost is real and is not a defect.** Automatic acceptance covers
+corrections, so an accepted `data` range that is wrong can erase most of the
+function list before anyone is asked. The mitigation is that the correction is
+recorded, the re-derivation is announced, and a refused set is surfaced rather
+than swallowed — all of which landed earlier today.
+
+
 **Four things landed: an agent can read its own findings back, an analyst can
 say that a run of bytes is data, not code, a caller can ask for a re-derivation
 without authoring anything to force one, and an investigation exports as a

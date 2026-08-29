@@ -50,3 +50,4 @@ for reconsideration, and let the ADR carry the *change*, not the history.
 | [0013](0013-accepted-semantics-as-decompilation-input.md) | Accepted interpretation is an input to decompilation, not backend state | accepted | 2026-08-28 |
 | [0014](0014-type-anchors-for-authored-composites.md) | An anchor may name a type instead of a place | accepted | 2026-08-28 |
 | [0015](0015-authored-corrections-re-derive-facts.md) | An authored correction changes what analysis derives from, not what it derived | accepted | 2026-08-28 |
+| [0016](0016-review-modes-and-the-automatic-reviewer.md) | Automatic review is recorded, never simulated | accepted | 2026-08-29 |
