@@ -803,6 +803,12 @@ export interface IFunctionWire {
 	 */
 	fingerprint?: IFunctionFingerprintWire;
 	/**
+	 * Further ranges of this function that do not adjoin `end_rva`.
+	 *
+	 * A compiler may split one function across several ranges; the pieces after the first are discontiguous and cannot be folded into `end_rva` without swallowing whatever lies between. Empty for the overwhelming majority of functions, and omitted from the wire when it is.
+	 */
+	fragments?: IRangeWire[];
+	/**
 	 * Entry RVA.
 	 */
 	rva: string;

@@ -756,6 +756,14 @@ pub struct FunctionWire {
 	/// Whether the image itself vouches for this boundary. Consumers must
 	/// render an inferred boundary differently from a confirmed one.
 	pub authoritative: bool,
+	/// Further ranges of this function that do not adjoin `end_rva`.
+	///
+	/// A compiler may split one function across several ranges; the pieces after
+	/// the first are discontiguous and cannot be folded into `end_rva` without
+	/// swallowing whatever lies between. Empty for the overwhelming majority of
+	/// functions, and omitted from the wire when it is.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub fragments: Vec<RangeWire>,
 	/// Relocation-insensitive identity of the function's normalized listing.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub fingerprint: Option<FunctionFingerprintWire>,

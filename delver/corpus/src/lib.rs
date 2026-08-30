@@ -107,6 +107,51 @@ mod tests {
 	}
 
 	#[test]
+	fn a_chained_fragment_is_not_seeded_as_a_function_start() {
+		let sample = all_samples()
+			.into_iter()
+			.find(|s| s.name == "x64-chained-unwind")
+			.expect("sample present");
+		let image = delver_format::parse_pe(&sample.bytes).expect("parse");
+
+		let from_exception: Vec<u64> = image
+			.function_seeds
+			.iter()
+			.filter(|s| s.source == delver_format::SeedSource::ExceptionDirectory)
+			.map(|s| s.rva)
+			.collect();
+		// Two RUNTIME_FUNCTION entries, one of them a fragment of the other. Only
+		// the primary is a function start, and reading `BeginAddress` alone would
+		// report both.
+		assert_eq!(from_exception, vec![0x1000]);
+		assert!(
+			!image.completeness.exception_directory_failed,
+			"a well-formed chained record is not a parse failure"
+		);
+	}
+
+	#[test]
+	fn a_fragment_names_the_function_it_belongs_to() {
+		let sample = all_samples()
+			.into_iter()
+			.find(|s| s.name == "x64-chained-unwind")
+			.expect("sample present");
+		let image = delver_format::parse_pe(&sample.bytes).expect("parse");
+
+		// The primary is its own first piece and chains to nothing; the fragment
+		// names the primary. Attributing a fragment to itself would be the same
+		// false claim as seeding it as a function.
+		assert_eq!(
+			image
+				.exception_ranges
+				.iter()
+				.map(|entry| (entry.range.start, entry.range.end, entry.chained_to))
+				.collect::<Vec<_>>(),
+			vec![(0x1000, 0x1005, None), (0x1005, 0x100A, Some(0x1000))],
+		);
+	}
+
+	#[test]
 	fn x86_sample_yields_no_exception_seeds() {
 		let sample = all_samples()
 			.into_iter()

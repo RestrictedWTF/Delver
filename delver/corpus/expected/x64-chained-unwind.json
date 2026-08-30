@@ -1,0 +1,49 @@
+{
+  "name": "x64-chained-unwind",
+  "covers": "chained RUNTIME_FUNCTION fragments are not function starts",
+  "arch": "X86_64",
+  "entry": "0x1000",
+  "image_base": "0x140000000",
+  "sections": [
+    {
+      "name": ".text",
+      "rva": "0x1000",
+      "virtual_size": 10
+    },
+    {
+      "name": ".pdata",
+      "rva": "0x2000",
+      "virtual_size": 24
+    },
+    {
+      "name": ".xdata",
+      "rva": "0x3000",
+      "virtual_size": 32
+    }
+  ],
+  "imports": [],
+  "exports": [],
+  "seeds": [
+    {
+      "rva": "0x1000",
+      "end": "0x1005",
+      "source": "ExceptionDirectory"
+    }
+  ],
+  "entry_disassembly": [
+    "0x1000 call 0000000000001015h",
+    "0x1005 jmp short 0000000000001009h"
+  ],
+  "analysis": {
+    "instruction_count": 3,
+    "functions": [
+      "0x1000..0x1005:ExceptionDirectory",
+      "0x1015:CallTarget"
+    ],
+    "xrefs": [
+      "0x1000->0x1015:Call",
+      "0x1005->0x1009:Jump"
+    ],
+    "strings": []
+  }
+}

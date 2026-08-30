@@ -501,6 +501,7 @@ mod tests {
 			rva,
 			end_rva: Some(end_rva),
 			source: FunctionSource::ExceptionDirectory,
+			fragments: Vec::new(),
 		}
 	}
 

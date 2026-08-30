@@ -29,7 +29,8 @@ use delver_protocol::{
 	GlobalAccessesResult, GlobalWire, GlobalsParams, GlobalsResult, ImageQueryParams,
 	IndirectCallSiteWire, IndirectResolutionMethodWire, InitializeResult, ListingRowWire,
 	ListingStringRowWire, ListingWindowParams, ListingWindowResult, ListingWindowRowWire,
-	OpenImageParams, OpenImageResult, Request, ResolutionConfidenceWire, ResolvedImportWire,
+	OpenImageParams, OpenImageResult, RangeWire, Request, ResolutionConfidenceWire,
+	ResolvedImportWire,
 	Response, RowForAddressParams, RowForAddressResult, RpcError, ScanStringsParams,
 	ScanStringsResult, SetCorrectionsParams, SetCorrectionsResult, SignatureFieldReasonWire,
 	SignatureFieldWire, StringEncodingWire, StringWire, StringsResult, TargetCapabilityWire,
@@ -1005,6 +1006,11 @@ fn functions(request: &Request, state: &Arc<Mutex<State>>) -> Result<serde_json:
 				end_rva: f.end_rva,
 				source: function_source_wire(f.source),
 				authoritative: f.source.is_authoritative(),
+				fragments: f
+					.fragments
+					.iter()
+					.map(|range| RangeWire { start: range.start, end: range.end })
+					.collect(),
 				fingerprint: function_fingerprint(image, index),
 			})
 			.collect();

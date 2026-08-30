@@ -14,6 +14,11 @@
       "name": ".pdata",
       "rva": "0x2000",
       "virtual_size": 24
+    },
+    {
+      "name": ".xdata",
+      "rva": "0x3000",
+      "virtual_size": 32
     }
   ],
   "imports": [],

@@ -135,6 +135,16 @@ pub struct Function {
 	pub end_rva: Option<u64>,
 	/// Where the start came from.
 	pub source: FunctionSource,
+	/// Further ranges of this function that do not adjoin [`Self::end_rva`].
+	///
+	/// x64 lets a compiler split a function across several ranges; each extra
+	/// piece is a chained `RUNTIME_FUNCTION` naming this entry as its primary.
+	/// They are kept separate rather than folded into `end_rva` because they are
+	/// genuinely discontiguous — a cold piece can sit far from the entry, and
+	/// stretching one extent over the gap would swallow every function between.
+	///
+	/// Ascending by start, and never overlapping `rva..end_rva`.
+	pub fragments: Vec<Range<u64>>,
 }
 
 /// Whether the code passes ran at all, and why not when they did not.
@@ -507,7 +517,7 @@ impl<'a> Descent<'a> {
 		// Compiler-provided ranges may contain unreachable code, jump tables, or
 		// embedded data. None of those gaps are evidence for a nested function.
 		// Keep the sweep from manufacturing weak starts inside a stronger range.
-		let authoritative_ranges: Vec<_> = self
+		let mut authoritative_ranges: Vec<_> = self
 			.functions
 			.iter()
 			.filter_map(|(&start, &(end, source))| {
@@ -516,6 +526,17 @@ impl<'a> Descent<'a> {
 					.flatten()
 			})
 			.collect();
+		// A chained `RUNTIME_FUNCTION` fragment is compiler-declared code inside
+		// a function, but its start is not a function start, so it is in no
+		// seed and contributes no range above. Without it the sweep walks into
+		// the middle of a split function and guesses a start there — which is
+		// what excluding authoritative ranges exists to prevent (ADR 0017).
+		authoritative_ranges.extend(
+			self.image
+				.exception_ranges
+				.iter()
+				.map(|entry| (entry.range.start, entry.range.end)),
+		);
 		let executable: Vec<_> = self
 			.image
 			.sections
@@ -608,6 +629,26 @@ impl<'a> Descent<'a> {
 		self.instruction_flows.sort_unstable_by_key(|fact| fact.rva);
 		self.instruction_flows.dedup_by_key(|fact| fact.rva);
 
+		// A fragment belongs to the function its chain names, and only when that
+		// function actually exists here: a chain into an address nothing
+		// detected is a claim the analysis cannot honour, and inventing an owner
+		// for it would be worse than leaving the bytes unattributed.
+		let mut fragments_by_primary: BTreeMap<u64, Vec<Range<u64>>> = BTreeMap::new();
+		for entry in &self.image.exception_ranges {
+			let Some(primary) = entry.chained_to else {
+				continue;
+			};
+			if self.functions.contains_key(&primary) {
+				fragments_by_primary
+					.entry(primary)
+					.or_default()
+					.push(entry.range.clone());
+			}
+		}
+		for ranges in fragments_by_primary.values_mut() {
+			ranges.sort_by_key(|range| range.start);
+		}
+
 		let functions = self
 			.functions
 			.into_iter()
@@ -615,6 +656,7 @@ impl<'a> Descent<'a> {
 				rva,
 				end_rva,
 				source,
+				fragments: fragments_by_primary.remove(&rva).unwrap_or_default(),
 			})
 			.collect();
 
@@ -870,7 +912,78 @@ mod tests {
 				rva: 0x1000,
 				end_rva: Some(0x1005),
 				source: FunctionSource::ExceptionDirectory,
+				fragments: Vec::new(),
 			}],
+		);
+	}
+
+	#[test]
+	fn linear_sweep_does_not_invent_a_function_inside_a_chained_fragment() {
+		// A function the compiler split: `0x1000..0x1005` is the primary and has
+		// a seed, `0x1005..0x100A` is a chained fragment that has none because
+		// its start is not a function start. The fragment's bytes still decode,
+		// so nothing but its declared range keeps the sweep out of them.
+		let code = &[0xC3, 0x48, 0x89, 0xD8, 0xC3, 0x48, 0x89, 0xC8, 0xC3, 0x90];
+		let (mut image, file) = image_with_code(code);
+		image.function_seeds = vec![FunctionSeed {
+			rva: 0x1000,
+			end_rva: Some(0x1005),
+			source: SeedSource::ExceptionDirectory,
+		}];
+		image.exception_ranges = vec![
+			delver_format::ExceptionRange { range: 0x1000..0x1005, chained_to: None },
+			delver_format::ExceptionRange { range: 0x1005..0x100A, chained_to: Some(0x1000) },
+		];
+
+		let analysis = analyze(&image, &file);
+
+		// The fragment is not a function, and it is not nothing either: it is
+		// this function's other piece, and the chain says so.
+		assert_eq!(
+			analysis.functions,
+			vec![Function {
+				rva: 0x1000,
+				end_rva: Some(0x1005),
+				source: FunctionSource::ExceptionDirectory,
+				fragments: vec![0x1005..0x100A],
+			}],
+		);
+		assert_eq!(
+			crate::call_graph::containing_function(&analysis.functions, 0x1007),
+			Some(0x1000),
+			"an address in a cold piece belongs to the function it was split from"
+		);
+	}
+
+	#[test]
+	fn a_fragment_range_the_directory_never_declared_is_still_swept() {
+		// The guard is the declared range, not the absence of a seed. Identical
+		// bytes with no `exception_ranges` entry must still be guessed at, or
+		// the fix above would be silently suppressing real unreachable code.
+		let code = &[0xC3, 0x48, 0x89, 0xD8, 0xC3, 0x48, 0x89, 0xC8, 0xC3, 0x90];
+		let (mut image, file) = image_with_code(code);
+		image.function_seeds = vec![FunctionSeed {
+			rva: 0x1000,
+			end_rva: Some(0x1005),
+			source: SeedSource::ExceptionDirectory,
+		}];
+		image.exception_ranges = vec![delver_format::ExceptionRange {
+			range: 0x1000..0x1005,
+			chained_to: None,
+		}];
+
+		let analysis = analyze(&image, &file);
+
+		assert_eq!(
+			analysis
+				.functions
+				.iter()
+				.map(|f| (f.rva, f.source))
+				.collect::<Vec<_>>(),
+			vec![
+				(0x1000, FunctionSource::ExceptionDirectory),
+				(0x1005, FunctionSource::LinearSweep),
+			],
 		);
 	}
 
@@ -1106,11 +1219,13 @@ mod tests {
 					rva: 0x1000,
 					end_rva: None,
 					source: FunctionSource::EntryPoint,
+					fragments: Vec::new(),
 				},
 				Function {
 					rva: 0x1004,
 					end_rva: Some(0x1009),
 					source: FunctionSource::Authored,
+					fragments: Vec::new(),
 				},
 			],
 		);
@@ -1154,6 +1269,7 @@ mod tests {
 				rva: 0x1000,
 				end_rva: Some(0x1005),
 				source: FunctionSource::Authored,
+				fragments: Vec::new(),
 			}],
 			"an absent end means 'infer it the way a detected one is inferred'",
 		);

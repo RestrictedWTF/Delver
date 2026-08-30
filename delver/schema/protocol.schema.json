@@ -1140,6 +1140,13 @@
           ],
           "description": "Relocation-insensitive identity of the function's normalized listing."
         },
+        "fragments": {
+          "description": "Further ranges of this function that do not adjoin `end_rva`.\n\nA compiler may split one function across several ranges; the pieces after the first are discontiguous and cannot be folded into `end_rva` without swallowing whatever lies between. Empty for the overwhelming majority of functions, and omitted from the wire when it is.",
+          "items": {
+            "$ref": "#/definitions/RangeWire"
+          },
+          "type": "array"
+        },
         "rva": {
           "description": "Entry RVA.",
           "type": "string"

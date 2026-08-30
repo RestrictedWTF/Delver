@@ -74,6 +74,16 @@ pub fn all_samples() -> Vec<Sample> {
 				.build(),
 		},
 		Sample {
+			name: "x64-chained-unwind",
+			covers: "chained RUNTIME_FUNCTION fragments are not function starts",
+			bytes: PeBuilder::new(Machine::Amd64)
+				.code(X64_CONTROL_FLOW)
+				.entry(0x1000)
+				.runtime_function(0x1000, 0x1005)
+				.runtime_function_fragment(0x1005, 0x100A, 0x1000)
+				.build(),
+		},
+		Sample {
 			name: "x64-imports",
 			covers: "import descriptors, IAT RVAs, and multi-module ordering",
 			bytes: PeBuilder::new(Machine::Amd64)

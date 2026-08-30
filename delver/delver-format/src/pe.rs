@@ -26,7 +26,7 @@ use object::{Object, ObjectSection, ReadRef};
 
 use crate::{
 	BaseRelocation, Export, FunctionSeed, ImportedModule, ImportedSymbol, ParseCompleteness,
-	ParsedImage, Section, SeedSource, Subsystem, TlsInfo,
+	ExceptionRange, ParsedImage, Section, SeedSource, Subsystem, TlsInfo,
 };
 
 /// Upper bounds applied to anything sized by a value read from the file.
@@ -114,7 +114,7 @@ where
 	let relocations = extract_relocations(file, limits, &mut completeness);
 	let tls = extract_tls(file, image_base, limits, &mut completeness);
 
-	let mut function_seeds = extract_exception_seeds(file, limits, &mut completeness);
+	let (mut function_seeds, exception_ranges) = extract_exception_seeds(file, limits, &mut completeness);
 	if entry != 0 {
 		function_seeds.push(FunctionSeed {
 			rva: entry,
@@ -151,6 +151,7 @@ where
 		imports,
 		exports,
 		function_seeds,
+		exception_ranges,
 		relocations,
 		tls,
 		completeness,
@@ -406,6 +407,12 @@ where
 	exports
 }
 
+/// `UNWIND_INFO.Flags` bit marking a `RUNTIME_FUNCTION` as a fragment of a
+/// function that starts elsewhere. The chained entry that follows the unwind
+/// codes points at the primary, so the fragment's `BeginAddress` is not a
+/// function start and must not be seeded as one.
+const UNW_FLAG_CHAININFO: u8 = 0x4;
+
 /// Reads `RUNTIME_FUNCTION` entries from the exception directory.
 ///
 /// On x64 PE this is the highest-value function-start source available: the
@@ -417,25 +424,25 @@ fn extract_exception_seeds<'data, Pe, R>(
 	file: &PeFile<'data, Pe, R>,
 	limits: Limits,
 	completeness: &mut ParseCompleteness,
-) -> Vec<FunctionSeed>
+) -> (Vec<FunctionSeed>, Vec<ExceptionRange>)
 where
 	Pe: ImageNtHeaders,
 	R: ReadRef<'data>,
 {
 	let Some(directory) = file.data_directory(IMAGE_DIRECTORY_ENTRY_EXCEPTION) else {
-		return Vec::new();
+		return (Vec::new(), Vec::new());
 	};
 	let directory_rva = directory.virtual_address.get(LE);
 	let size = directory.size.get(LE) as usize;
 	// An empty entry is how a PE says it has no exception directory. That is an
 	// absence, and must not be reported as a failure.
 	if directory_rva == 0 || size == 0 {
-		return Vec::new();
+		return (Vec::new(), Vec::new());
 	}
 
 	let Some(bytes) = file.section_table().pe_data_at(file.data(), directory_rva) else {
 		completeness.exception_directory_failed = true;
-		return Vec::new();
+		return (Vec::new(), Vec::new());
 	};
 
 	// The directory claims more bytes than the section backing it holds.
@@ -445,7 +452,7 @@ where
 	let bytes = &bytes[..size.min(bytes.len())];
 	let entry_size = core::mem::size_of::<ImageRuntimeFunctionEntry>();
 	if entry_size == 0 {
-		return Vec::new();
+		return (Vec::new(), Vec::new());
 	}
 
 	// A directory that is not a whole number of entries is malformed, and the
@@ -456,12 +463,43 @@ where
 	completeness.function_seeds_truncated = bytes.len() / entry_size > limits.seeds;
 
 	let mut seeds = Vec::new();
+	let mut ranges = Vec::new();
 	for chunk in bytes.chunks_exact(entry_size).take(limits.seeds) {
 		// chunks_exact guarantees the length, so the slice reads cannot fail.
 		let begin = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
 		let end = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+		let unwind_rva = u32::from_le_bytes([chunk[8], chunk[9], chunk[10], chunk[11]]);
 		if begin == 0 {
 			continue;
+		}
+		let flags = unwind_info_flags(file, unwind_rva);
+		let chained = flags.is_some_and(|flags| flags & UNW_FLAG_CHAININFO != 0);
+		// Recorded before the fragment test, because a fragment's bytes are
+		// exactly what a later sweep must not walk into.
+		if end > begin {
+			ranges.push(ExceptionRange {
+				range: begin as u64..end as u64,
+				chained_to: if chained {
+					resolve_chain_primary(file, unwind_rva).map(u64::from)
+				} else {
+					None
+				},
+			});
+		}
+		match flags {
+			Some(_) if chained => {
+				// A fragment of a function that starts elsewhere, not a function.
+				continue;
+			}
+			Some(_) => {}
+			None => {
+				// The entry claims unwind info nothing maps, so whether this is a
+				// fragment is unknown. Keeping the seed risks one false start;
+				// dropping it loses a real function outright, and a missing start
+				// is the more expensive error. Say the directory did not read
+				// whole rather than let the guess pass as a compiler-emitted fact.
+				completeness.exception_directory_failed = true;
+			}
 		}
 		seeds.push(FunctionSeed {
 			rva: begin as u64,
@@ -469,7 +507,103 @@ where
 			source: SeedSource::ExceptionDirectory,
 		});
 	}
-	seeds
+	ranges.sort_by(|left, right| left.range.start.cmp(&right.range.start));
+	(seeds, ranges)
+}
+
+/// `UNWIND_INFO.Flags` for the record at `rva`, or `None` when nothing maps it.
+fn unwind_info_flags<'data, Pe, R>(file: &PeFile<'data, Pe, R>, rva: u32) -> Option<u8>
+where
+	Pe: ImageNtHeaders,
+	R: ReadRef<'data>,
+{
+	Some(unwind_flags_byte(*unwind_record(file, rva)?.first()?))
+}
+
+/// The bytes of the `UNWIND_INFO` record at `rva`.
+fn unwind_record<'data, Pe, R>(file: &PeFile<'data, Pe, R>, rva: u32) -> Option<&'data [u8]>
+where
+	Pe: ImageNtHeaders,
+	R: ReadRef<'data>,
+{
+	if rva == 0 {
+		return None;
+	}
+	file.section_table().pe_data_at(file.data(), rva)
+}
+
+/// `BeginAddress` of the function a chained record continues.
+///
+/// The chained `RUNTIME_FUNCTION` sits after the unwind codes, which are two
+/// bytes each and padded to an even count. `CountOfCodes` is a single
+/// attacker-controlled byte, so the largest offset this can compute is 516 —
+/// bounded by the type, with no cap needed.
+fn chained_primary<'data, Pe, R>(file: &PeFile<'data, Pe, R>, rva: u32) -> Option<u32>
+where
+	Pe: ImageNtHeaders,
+	R: ReadRef<'data>,
+{
+	let record = unwind_record(file, rva)?;
+	let count = *record.get(2)? as usize;
+	let offset = 4 + 2 * count.div_ceil(2) * 2;
+	let chained = record.get(offset..offset + 12)?;
+	Some(u32::from_le_bytes([chained[0], chained[1], chained[2], chained[3]]))
+}
+
+/// How many links of a chain to follow before giving up.
+///
+/// A chain is normally one link. The bound exists because the file controls
+/// where each link points and may point one at another forever; refusing a
+/// pathological chain is correct, and following it is a hang.
+const MAX_UNWIND_CHAIN: usize = 8;
+
+/// Follows a chain to the function start it ultimately belongs to.
+///
+/// `None` when the chain cannot be resolved — unmapped unwind info, a truncated
+/// record, or more links than [`MAX_UNWIND_CHAIN`]. A caller must treat that as
+/// "unknown owner", never as "owns itself".
+fn resolve_chain_primary<'data, Pe, R>(
+	file: &PeFile<'data, Pe, R>,
+	mut unwind_rva: u32,
+) -> Option<u32>
+where
+	Pe: ImageNtHeaders,
+	R: ReadRef<'data>,
+{
+	for _ in 0..MAX_UNWIND_CHAIN {
+		let begin = chained_primary(file, unwind_rva)?;
+		// The primary's own record decides whether this was the last link.
+		let Some(next_unwind) = primary_unwind_rva(file, unwind_rva) else {
+			return Some(begin);
+		};
+		if !unwind_info_flags(file, next_unwind).is_some_and(|flags| flags & UNW_FLAG_CHAININFO != 0) {
+			return Some(begin);
+		}
+		unwind_rva = next_unwind;
+	}
+	None
+}
+
+/// `UnwindInfoAddress` of the chained `RUNTIME_FUNCTION` inside a record.
+fn primary_unwind_rva<'data, Pe, R>(file: &PeFile<'data, Pe, R>, rva: u32) -> Option<u32>
+where
+	Pe: ImageNtHeaders,
+	R: ReadRef<'data>,
+{
+	let record = unwind_record(file, rva)?;
+	let count = *record.get(2)? as usize;
+	let offset = 4 + 2 * count.div_ceil(2) * 2;
+	let chained = record.get(offset..offset + 12)?;
+	Some(u32::from_le_bytes([chained[8], chained[9], chained[10], chained[11]]))
+}
+
+/// Splits `UNWIND_INFO`'s first byte into its flags.
+///
+/// The low three bits are the version and carry no meaning here, so a record
+/// from a future version still reports its flags rather than being read as
+/// unflagged — which would silently reinstate the fragment as a function start.
+fn unwind_flags_byte(first: u8) -> u8 {
+	(first >> 3) & 0x1f
 }
 
 /// Reads base relocation targets.
@@ -760,6 +894,26 @@ mod tests {
 		assert_eq!(relocation_width(IMAGE_REL_BASED_DIR64), Some(8));
 		assert_eq!(relocation_width(0), None);
 		assert_eq!(relocation_width(u16::MAX), None);
+	}
+
+	#[test]
+	fn unwind_flags_ignore_the_version_and_report_chaining() {
+		// Version lives in the low three bits and must not reach the flags. A
+		// record that is chained is chained whatever version wrote it.
+		let chained_v1 = unwind_flags_byte(0b0010_0_001);
+		let chained_v2 = unwind_flags_byte(0b0010_0_010);
+		let plain_v1 = unwind_flags_byte(0b0000_0_001);
+		let ehandler_v1 = unwind_flags_byte(0b0000_1_001);
+
+		assert_eq!(
+			[
+				chained_v1 & UNW_FLAG_CHAININFO != 0,
+				chained_v2 & UNW_FLAG_CHAININFO != 0,
+				plain_v1 & UNW_FLAG_CHAININFO != 0,
+				ehandler_v1 & UNW_FLAG_CHAININFO != 0,
+			],
+			[true, true, false, false]
+		);
 	}
 
 	#[test]

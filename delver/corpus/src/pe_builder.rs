@@ -58,7 +58,17 @@ pub struct RuntimeFunction {
 	pub begin: u32,
 	/// Exclusive end RVA.
 	pub end: u32,
+	/// When set, this entry is a fragment of the function starting at that RVA:
+	/// its `UNWIND_INFO` carries `UNW_FLAG_CHAININFO` and it is not a function
+	/// start. Real compilers emit these whenever they split a function.
+	pub chained_to: Option<u32>,
 }
+
+/// Bytes each synthetic `UNWIND_INFO` record occupies.
+///
+/// Fixed so an entry's record address is `xdata_rva + index * stride`, which
+/// keeps the directory writable before the records themselves exist.
+const UNWIND_RECORD_SIZE: u32 = 16;
 
 /// Builds one synthetic PE image.
 pub struct PeBuilder {
@@ -101,7 +111,24 @@ impl PeBuilder {
 
 	/// Publishes a function range in the exception directory.
 	pub fn runtime_function(mut self, begin: u32, end: u32) -> Self {
-		self.runtime_functions.push(RuntimeFunction { begin, end });
+		self.runtime_functions.push(RuntimeFunction {
+			begin,
+			end,
+			chained_to: None,
+		});
+		self
+	}
+
+	/// Publishes a *fragment* of `primary` in the exception directory.
+	///
+	/// The entry looks exactly like a function to anything that reads only
+	/// `BeginAddress`, which is what makes it worth a fixture.
+	pub fn runtime_function_fragment(mut self, begin: u32, end: u32, primary: u32) -> Self {
+		self.runtime_functions.push(RuntimeFunction {
+			begin,
+			end,
+			chained_to: Some(primary),
+		});
 		self
 	}
 
@@ -126,7 +153,6 @@ impl PeBuilder {
 
 		let rdata_rva = text_rva + align(text_size, SECTION_ALIGNMENT);
 		let (idata, import_dir_size) = self.build_import_directory(rdata_rva);
-		let pdata = self.build_exception_directory();
 
 		let mut sections = vec![SectionSpec {
 			name: ".text",
@@ -145,12 +171,27 @@ impl PeBuilder {
 			next_rva += align(raw, SECTION_ALIGNMENT);
 		}
 
+		// The directory has to name unwind records that do not exist yet, so
+		// `.xdata`'s RVA is derived from `.pdata`'s known size rather than from
+		// the placement walk below.
 		let pdata_rva = next_rva;
+		let pdata_size = (self.runtime_functions.len() * 12) as u32;
+		let xdata_rva = pdata_rva
+			+ align(
+				align(pdata_size, FILE_ALIGNMENT).max(FILE_ALIGNMENT),
+				SECTION_ALIGNMENT,
+			);
+		let pdata = self.build_exception_directory(xdata_rva);
 		if !pdata.is_empty() {
 			sections.push(SectionSpec {
 				name: ".pdata",
 				characteristics: 0x4000_0040,
 				data: pdata,
+			});
+			sections.push(SectionSpec {
+				name: ".xdata",
+				characteristics: 0x4000_0040,
+				data: self.build_unwind_info(xdata_rva),
 			});
 		}
 
@@ -374,12 +415,50 @@ impl PeBuilder {
 		(out, descriptors_size)
 	}
 
-	fn build_exception_directory(&self) -> Vec<u8> {
+	fn build_exception_directory(&self, xdata_rva: u32) -> Vec<u8> {
 		let mut out = Vec::new();
-		for function in &self.runtime_functions {
+		for (index, function) in self.runtime_functions.iter().enumerate() {
 			out.extend_from_slice(&function.begin.to_le_bytes());
 			out.extend_from_slice(&function.end.to_le_bytes());
-			out.extend_from_slice(&0u32.to_le_bytes()); // UnwindInfoAddress
+			let unwind_rva = xdata_rva + index as u32 * UNWIND_RECORD_SIZE;
+			out.extend_from_slice(&unwind_rva.to_le_bytes());
+		}
+		out
+	}
+
+	/// Builds the `.xdata` records the exception directory points at.
+	///
+	/// A real `UNWIND_INFO` is version 1 with a flags nibble above it; a chained
+	/// record follows its (here empty) unwind codes with the `RUNTIME_FUNCTION`
+	/// of the primary. Every record is padded to [`UNWIND_RECORD_SIZE`].
+	fn build_unwind_info(&self, xdata_rva: u32) -> Vec<u8> {
+		let mut out = Vec::new();
+		for function in &self.runtime_functions {
+			let start = out.len();
+			let flags: u8 = if function.chained_to.is_some() { 0x4 } else { 0 };
+			out.push((flags << 3) | 1); // Flags | Version 1
+			out.push(0); // SizeOfProlog
+			out.push(0); // CountOfCodes
+			out.push(0); // FrameRegister | FrameOffset
+			if let Some(primary) = function.chained_to {
+				// The chained RUNTIME_FUNCTION names the primary, and its
+				// UnwindInfoAddress points at the primary's own record so a
+				// reader can tell whether the chain continues.
+				let primary_index = self
+					.runtime_functions
+					.iter()
+					.position(|candidate| candidate.begin == primary);
+				let primary_end = primary_index
+					.map(|index| self.runtime_functions[index].end)
+					.unwrap_or(primary);
+				let primary_unwind = primary_index
+					.map(|index| xdata_rva + index as u32 * UNWIND_RECORD_SIZE)
+					.unwrap_or(0);
+				out.extend_from_slice(&primary.to_le_bytes());
+				out.extend_from_slice(&primary_end.to_le_bytes());
+				out.extend_from_slice(&primary_unwind.to_le_bytes());
+			}
+			out.resize(start + UNWIND_RECORD_SIZE as usize, 0);
 		}
 		out
 	}

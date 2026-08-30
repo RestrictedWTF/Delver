@@ -301,11 +301,34 @@ fn decoded_run_end(flows: &[InstructionFlow], start: u64) -> Option<u64> {
 /// answers the same question the same way, and the two must not disagree.
 pub fn containing_function(functions: &[Function], rva: u64) -> Option<u64> {
 	let index = functions.partition_point(|function| function.rva <= rva);
-	let candidate = functions.get(index.checked_sub(1)?)?;
-	match candidate.end_rva {
-		Some(end) if rva >= end => None,
-		_ => Some(candidate.rva),
+	if let Some(candidate) = index.checked_sub(1).and_then(|index| functions.get(index)) {
+		match candidate.end_rva {
+			Some(end) if rva >= end => {}
+			_ => return Some(candidate.rva),
+		}
 	}
+	// The address is past the preceding entry's extent, but a split function's
+	// later pieces sit outside that extent by construction, and one of them may
+	// own this address. Searched only after the contiguous answer fails, so the
+	// common case still costs one binary search.
+	containing_fragment(functions, rva)
+}
+
+/// The entry of the function one of whose chained fragments covers `rva`.
+///
+/// Fragments are rare and scattered, so this is a linear scan over the functions
+/// that have any rather than an index — building one would cost more than it
+/// saves on every image that has no split functions at all.
+fn containing_fragment(functions: &[Function], rva: u64) -> Option<u64> {
+	functions
+		.iter()
+		.find(|function| {
+			function
+				.fragments
+				.iter()
+				.any(|fragment| fragment.contains(&rva))
+		})
+		.map(|function| function.rva)
 }
 
 /// Builds the bounded direct call graph around one function extent.
@@ -1095,6 +1118,7 @@ mod tests {
 			rva,
 			end_rva,
 			source: FunctionSource::ExceptionDirectory,
+			fragments: Vec::new(),
 		}
 	}
 

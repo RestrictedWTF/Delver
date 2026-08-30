@@ -136,6 +136,7 @@ mod tests {
 			rva: 0x1000,
 			end_rva: Some(0x1020),
 			source: FunctionSource::ExceptionDirectory,
+			fragments: Vec::new(),
 		}];
 		let xrefs = XrefTable::new(vec![
 			xref(0x1010, 0x3000, XrefKind::Data),

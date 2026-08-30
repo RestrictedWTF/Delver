@@ -20,8 +20,24 @@ export function containingFunctionRva(functions: readonly IFunctionWire[], rva: 
 			high = middle - 1;
 		}
 	}
-	if (!candidate || candidate.end_rva !== undefined && rva >= BigInt(candidate.end_rva)) {
-		return undefined;
+	if (candidate && !(candidate.end_rva !== undefined && rva >= BigInt(candidate.end_rva))) {
+		return BigInt(candidate.rva);
 	}
-	return BigInt(candidate.rva);
+	// Past the preceding entry's extent, but a split function's later pieces sit
+	// outside that extent by construction and one of them may own this address.
+	// `delver_analysis::call_graph::containing_function` answers the same
+	// question the same way, and the two must not disagree.
+	return containingFragmentRva(functions, rva);
+}
+
+/** The entry of the function one of whose chained fragments covers `rva`. */
+function containingFragmentRva(functions: readonly IFunctionWire[], rva: bigint): bigint | undefined {
+	for (const candidate of functions) {
+		for (const fragment of candidate.fragments ?? []) {
+			if (rva >= BigInt(fragment.start) && rva < BigInt(fragment.end)) {
+				return BigInt(candidate.rva);
+			}
+		}
+	}
+	return undefined;
 }

@@ -16,12 +16,32 @@
 
 mod pe;
 
+use std::ops::Range;
 use object::pe::{
 	IMAGE_SUBSYSTEM_NATIVE, IMAGE_SUBSYSTEM_UNKNOWN, IMAGE_SUBSYSTEM_WINDOWS_CUI,
 	IMAGE_SUBSYSTEM_WINDOWS_GUI,
 };
 
 pub use pe::parse_pe;
+
+/// One `RUNTIME_FUNCTION` range, and the function it belongs to.
+///
+/// x64 lets a compiler split one function into several ranges. Each gets its own
+/// `RUNTIME_FUNCTION`, and every range but the first carries
+/// `UNW_FLAG_CHAININFO` and names its primary. Only the primary is a function
+/// start; the rest are that function's other pieces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExceptionRange {
+	/// The covered bytes.
+	pub range: Range<u64>,
+	/// The function this range belongs to, when it is a chained fragment.
+	///
+	/// `None` means the range is its own function's first piece — it is not
+	/// chained, so its start is the function start. `Some(rva)` names the
+	/// primary this fragment continues, already followed to the end of the
+	/// chain, so a consumer never has to walk it again.
+	pub chained_to: Option<u64>,
+}
 
 /// Parsed image metadata, extracted once when the image is opened.
 #[derive(Debug, Clone, Default)]
@@ -51,6 +71,14 @@ pub struct ParsedImage {
 	pub exports: Vec<Export>,
 	/// Candidate function starts, ordered by descending confidence.
 	pub function_seeds: Vec<FunctionSeed>,
+	/// Ranges the exception directory covers, ascending by start.
+	///
+	/// Every `RUNTIME_FUNCTION` range, **including chained fragments** whose
+	/// `BeginAddress` is not a function start and so appears in no
+	/// [`Self::function_seeds`] entry. A fragment is still compiler-declared
+	/// code belonging to a function, and dropping that with the seed would let a
+	/// linear sweep guess a function start in the middle of one (ADR 0017).
+	pub exception_ranges: Vec<ExceptionRange>,
 	/// Base relocation targets and their encoded widths.
 	pub relocations: Vec<BaseRelocation>,
 	/// TLS directory, when present.
