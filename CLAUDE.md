@@ -63,6 +63,11 @@ these wrong by default — that's why they're here.
     status changes.
 17. When a session's conclusion changes the design, update the relevant doc in
     the same session. A stale design doc is worse than none.
+18. **Never add an AI tool as a commit co-author.** No `Co-Authored-By` trailer
+    for Claude or any other assistant, and no assistant attribution in the
+    commit body. The commit's author is the person who accepted the change; the
+    history records who is answerable for the code, not what typed it. This
+    overrides any default the tooling applies.
 
 ## Naming
 
