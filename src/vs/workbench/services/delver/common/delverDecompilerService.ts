@@ -10,7 +10,7 @@ import { IDisposable } from '../../../../base/common/lifecycle.js';
 import { stringHash } from '../../../../base/common/hash.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { localize } from '../../../../nls.js';
-import { AnalysisSessionId, DelverDecompilerStatusWire, IDelverAnalysisService, IDelverBackendFunctionsWire, IDelverDecompilationTimingsWire, IDelverDecompilerCacheInfoWire } from '../../../../platform/delver/common/delverAnalysisService.js';
+import { AnalysisSessionId, DelverDecompilerStatusWire, IDelverAnalysisService, IDelverBackendAnalysisWire, IDelverBackendFunctionsWire, IDelverDecompilationTimingsWire, IDelverDecompilerCacheInfoWire } from '../../../../platform/delver/common/delverAnalysisService.js';
 import { IDelverProjectSnapshot } from '../../../../platform/delver/common/delverProjectStoreService.js';
 import { EditOp } from '../../../../platform/delver/common/interpretation.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
@@ -183,6 +183,7 @@ export interface IDelverDecompilerBackend {
 	prepareTarget?(request: Omit<IDecompileFunctionRequest, 'functionRva'>): Promise<void>;
 	decompileFunction(request: IDecompileFunctionRequest, token: CancellationToken): Promise<IDecompiledFunction>;
 	listBackendFunctions?(request: Omit<IDecompileFunctionRequest, 'functionRva'>): Promise<IDelverBackendFunctionsWire | undefined>;
+	analyzeBackendTarget?(request: Omit<IDecompileFunctionRequest, 'functionRva'>, token: CancellationToken): Promise<IDelverBackendAnalysisWire | undefined>;
 }
 
 /** Decompiles functions through the configured replaceable backend. */
@@ -210,6 +211,11 @@ export interface IDelverDecompilerService {
 	 * backend believes right now.
 	 */
 	listBackendFunctions(request: Omit<IDecompileFunctionRequest, 'functionRva'>): Promise<IDelverBackendFunctionsWire | undefined>;
+	/**
+	 * Finishes the backend's analysis of one target, so its whole function set
+	 * means something. Minutes on a large image, and cancellable.
+	 */
+	analyzeBackendTarget(request: Omit<IDecompileFunctionRequest, 'functionRva'>, token: CancellationToken): Promise<IDelverBackendAnalysisWire | undefined>;
 }
 
 /** Raised when pseudocode is requested before a backend is available. */
@@ -307,6 +313,33 @@ export class SharedProcessDecompilerBackend implements IDelverDecompilerBackend 
 		}
 		const prepared = await this.analysisService.prepareDecompilerTarget(request.sessionId, request.contentHash, ghidraHome, this.pythonPath);
 		this.logService?.info(`[Delver decompiler] prepared target generation ${prepared.processGeneration}: spawn=${prepared.spawnMs}ms handshake=${prepared.handshakeMs}ms open=${prepared.targetOpenMs}ms`);
+	}
+
+	async analyzeBackendTarget(request: Omit<IDecompileFunctionRequest, 'functionRva'>, token: CancellationToken): Promise<IDelverBackendAnalysisWire | undefined> {
+		const ghidraHome = this.ghidraHome;
+		const status = this.status.state === 'ready' ? this.status : await this.prepare();
+		if (!ghidraHome || status.state !== 'ready') {
+			throw new DelverDecompilerUnavailableError(status.available ? '' : formatStatusError(status));
+		}
+		if (!request.sessionId || !request.targetPath) {
+			throw new DelverDecompilerUnavailableError(localize('delverDecompilerAnalyzeTargetRequired', "Attach the matching target before asking the decompiler backend to analyze it."));
+		}
+		const operationId = generateUuid();
+		const cancellationListener = token.onCancellationRequested(() => {
+			void this.analysisService.cancelDecompile(operationId);
+		});
+		try {
+			return await this.analysisService.analyzeBackendTarget(
+				request.sessionId,
+				request.contentHash,
+				ghidraHome,
+				this.pythonPath,
+				this.backendSelection === 'headless' ? 'headless' : 'pyghidra',
+				operationId,
+			);
+		} finally {
+			cancellationListener.dispose();
+		}
 	}
 
 	async listBackendFunctions(request: Omit<IDecompileFunctionRequest, 'functionRva'>): Promise<IDelverBackendFunctionsWire | undefined> {
@@ -485,6 +518,10 @@ export class DelverDecompilerService implements IDelverDecompilerService {
 		// A backend that cannot enumerate answers `undefined`, which reads as
 		// "no comparison is available" rather than "the sets agree" (ADR 0017).
 		return this.backend.listBackendFunctions?.(request) ?? Promise.resolve(undefined);
+	}
+
+	analyzeBackendTarget(request: Omit<IDecompileFunctionRequest, 'functionRva'>, token: CancellationToken): Promise<IDelverBackendAnalysisWire | undefined> {
+		return this.backend.analyzeBackendTarget?.(request, token) ?? Promise.resolve(undefined);
 	}
 
 	decompileFunction(request: IDecompileFunctionRequest, token: CancellationToken): Promise<IDecompiledFunction> {

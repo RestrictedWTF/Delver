@@ -166,6 +166,7 @@ class PyGhidraDriver:
 			"capabilities": {
 				"decompileFunction": True,
 				"listFunctions": True,
+				"analyzeTarget": True,
 				"cancel": True,
 				"persistentTargets": True,
 				"addressMappings": True,
@@ -312,6 +313,60 @@ class PyGhidraDriver:
 				target.program.endTransaction(transaction_id, False)
 			with self._monitor_lock:
 				self._active_monitors.pop(request_id, None)
+
+	def analyze_target(self, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
+		"""Runs Ghidra's auto-analysis to completion on one open target.
+
+		`open_target` deliberately imports with `analyze=False`, because full
+		analysis takes minutes and pseudocode for one function does not need it.
+		Anything that reasons about the backend's *whole* function set does, so
+		this is the explicit, cancellable way to ask for it rather than a cost
+		hidden inside another call (ADR 0017).
+
+		Idempotent: a program Ghidra already analyzed returns immediately and
+		says it did no work, so a caller may always ask.
+		"""
+		self.start()
+		started = time.perf_counter()
+		target_id = required_string(params, "targetId")
+		target = self._targets.get(target_id)
+		if target is None:
+			raise WorkerError("target_not_open", f"Target '{target_id}' is not open.")
+		if program_is_analyzed(target.program):
+			return {
+				"protocolVersion": PROTOCOL_VERSION,
+				"schemaVersion": RESULT_SCHEMA_VERSION,
+				"analysisComplete": True,
+				"alreadyAnalyzed": True,
+				"timings": {"analyzeMs": elapsed_ms(started)},
+			}
+
+		monitor = self._pyghidra.task_monitor()
+		with self._monitor_lock:
+			self._active_monitors[request_id] = monitor
+		transaction_id: int | None = None
+		try:
+			transaction_id = target.program.startTransaction("Delver full analysis")
+			with contextlib.redirect_stdout(sys.stderr):
+				target.flat_api.analyzeAll(target.program)
+				mark_program_analyzed(target.program)
+		finally:
+			if transaction_id is not None:
+				# Committed, unlike the semantic snapshot a decompilation applies.
+				# Analysis is a fact the backend derived from the bytes, not
+				# authored interpretation, so the persistent content-hash project
+				# is exactly where it belongs (ADR 0005, ADR 0013).
+				target.program.endTransaction(transaction_id, True)
+			with self._monitor_lock:
+				self._active_monitors.pop(request_id, None)
+
+		return {
+			"protocolVersion": PROTOCOL_VERSION,
+			"schemaVersion": RESULT_SCHEMA_VERSION,
+			"analysisComplete": program_is_analyzed(target.program),
+			"alreadyAnalyzed": False,
+			"timings": {"analyzeMs": elapsed_ms(started)},
+		}
 
 	def list_functions(self, params: dict[str, Any]) -> dict[str, Any]:
 		"""Every function Ghidra recovered in one target, as image-relative RVAs.
@@ -590,6 +645,8 @@ class WorkerServer:
 			return self._driver.open_target(request_id, params)
 		if method == "decompileFunction":
 			return self._driver.decompile_function(request_id, params)
+		if method == "analyzeTarget":
+			return self._driver.analyze_target(request_id, params)
 		if method == "listFunctions":
 			return self._driver.list_functions(params)
 		if method == "closeTarget":
@@ -831,6 +888,22 @@ def program_is_analyzed(program: Any) -> bool:
 		# reported as analyzed produces confident nonsense; the reverse only
 		# declines to answer.
 		return False
+
+
+def mark_program_analyzed(program: Any) -> None:
+	"""Records that auto-analysis has run, the way Ghidra's own tooling does.
+
+	`analyzeAll` does not set the flag itself — the GUI sets it after the
+	analysis task finishes. Without it every later `analyzeTarget` would run the
+	whole analysis again on a program that is already complete.
+	"""
+	try:
+		options = program.getOptions("Program Information")
+		options.setBoolean("Analyzed", True)
+	except Exception:
+		# The flag is an optimisation; failing to set it costs a repeat analysis,
+		# not correctness. `program_is_analyzed` still reads whatever is there.
+		pass
 
 
 def encode_rva(value: int) -> str:

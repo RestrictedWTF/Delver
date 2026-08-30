@@ -2234,3 +2234,48 @@ Verified: Rust workspace green, corpus 7/7, client typecheck clean, 399 Delver T
 tests, worker 13/13.
 
 Still not built: a surface that shows a reconciliation, and repair.
+
+## The comparison actually runs
+
+Driving the built workbench turned up the defect that mattered most, and it was
+mine. `open_target` imports with `analyze=False` — full auto-analysis takes
+minutes and pseudocode for one function does not need it — so the first live run
+of the pane reported **0 of 1765 functions agreeing** against a partially
+imported program. Every function Ghidra had not got to yet read as a
+disagreement. Confident, plausible, and wrong, arrived at from the measurement
+side rather than the parsing side.
+
+The worker now reports `analysisComplete` from Ghidra's own `Analyzed` program
+option, and a caller that cannot tell assumes the weaker thing. Refusing on that
+alone was honest but left the feature permanently unavailable, so `analyzeTarget`
+finishes the work on request: explicit rather than hidden inside another call,
+cancellable through the same path a decompilation uses, idempotent, and marking
+the program analyzed afterwards because `analyzeAll` does not do it itself.
+
+With analysis complete the pane answers for real, against `Auto-updater.exe`:
+
+```
+1007 of 1765 functions agree      vs ghidra-pyghidra (1550 functions)
+Only Delver found these      82 — mostly guess
+Only the backend found these  9
+Split differently           142 — mostly guess
+Bounded differently         534
+```
+
+Worth putting beside the IDA 9.1 numbers measured offline — 1040 agree, 540
+bounded differently, 11 backend-only, out of 1591. Two independent backends land
+within a few percent of each other on every count, which is the cross-backend
+signal ADR 0017 predicted would be available without ever plumbing the backends
+together. And both concentrations now read *mostly guess*: where Delver differs
+from a real analyzer, it is overwhelmingly on its own unvouched boundaries, which
+is exactly where it should be.
+
+The view is a navigator surface named **Comparison** — one word, because
+"Backend Comparison" truncated to "Backer" in the segment strip, which reads as
+a different word. Verified in the running workbench: the segment fits at 71px
+beside References at 65 and Signatures at 63, groups expand, and rows navigate.
+
+Verified: Rust workspace green, corpus 7/7, client typecheck clean, 406 Delver TS
+tests, worker 13/13, plus a live end-to-end run against a real Ghidra backend.
+
+Still not built: repair.

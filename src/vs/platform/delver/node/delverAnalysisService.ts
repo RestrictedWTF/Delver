@@ -16,7 +16,7 @@ import {
 	IDelverDecompilerCacheInfoWire,
 	IDelverDecompilerTargetPreparationWire,
 	IDelverDecompilationSemanticsWire,
-	IDelverBackendFunctionsWire, IDelverDecompilationWire,
+	IDelverBackendAnalysisWire, IDelverBackendFunctionsWire, IDelverDecompilationWire,
 	IDelverAnalysisService,
 	IDelverReadMemoryWire,
 } from '../common/delverAnalysisService.js';
@@ -191,6 +191,36 @@ export class DelverAnalysisService extends Disposable implements IDelverAnalysis
 		assertSafeDecompilerCacheRoot(this.pyGhidraCacheRoot);
 		await fs.rm(this.pyGhidraCacheRoot, { recursive: true, force: true });
 		return previous;
+	}
+
+	async analyzeBackendTarget(sessionId: AnalysisSessionId, contentHash: string, ghidraHome: string, pythonPath: string, backend: 'pyghidra' | 'headless', operationId: string): Promise<IDelverBackendAnalysisWire | undefined> {
+		if (backend !== 'pyghidra') {
+			return undefined;
+		}
+		const workerDiscovery = discoverPyGhidraWorker(ghidraHome, pythonPath);
+		if (!workerDiscovery.available) {
+			throw new Error(workerDiscovery.reason);
+		}
+		if (this.decompilations.has(operationId)) {
+			throw new Error(`Duplicate decompiler operation ${operationId}`);
+		}
+		// Registered like a decompilation so `cancelDecompile` reaches it: this
+		// runs for minutes and an analyst who changes their mind must be able to
+		// stop it.
+		const source = new CancellationTokenSource();
+		this.decompilations.set(operationId, { sessionId, source });
+		try {
+			const decompiler = this.getPyGhidra(workerDiscovery.configuration);
+			return await decompiler.analyzeTarget(
+				sessionId,
+				this.session(sessionId).targetPath,
+				contentHash,
+				source.token,
+			);
+		} finally {
+			this.decompilations.delete(operationId);
+			source.dispose();
+		}
 	}
 
 	async listBackendFunctions(sessionId: AnalysisSessionId, contentHash: string, ghidraHome: string, pythonPath: string, backend: 'pyghidra' | 'headless'): Promise<IDelverBackendFunctionsWire | undefined> {

@@ -65,6 +65,13 @@ export interface IDecompilerWorkerCapabilities {
 	 * (ADR 0017). Nothing branches on the backend's id to decide this.
 	 */
 	readonly listFunctions?: boolean;
+	/**
+	 * Whether the backend can be asked to finish analyzing an open target.
+	 *
+	 * Separate from `listFunctions` because a backend may be able to report what
+	 * it has without being able to complete the work on request.
+	 */
+	readonly analyzeTarget?: boolean;
 	readonly cancel: boolean;
 	readonly persistentTargets: boolean;
 	readonly addressMappings: boolean;

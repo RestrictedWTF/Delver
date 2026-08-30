@@ -102,6 +102,13 @@ export interface IDelverBackendFunctionsWire {
 	readonly analysisComplete: boolean;
 }
 
+/** Outcome of asking a backend to finish analyzing a target. */
+export interface IDelverBackendAnalysisWire {
+	readonly analysisComplete: boolean;
+	/** Whether the program was already analyzed, so no work was done. */
+	readonly alreadyAnalyzed: boolean;
+}
+
 export interface IDelverDecompilerCacheInfoWire {
 	readonly path: string;
 	readonly projectCount: number;
@@ -290,6 +297,14 @@ export interface IDelverAnalysisService {
 	 * sets agreeing (ADR 0017).
 	 */
 	listBackendFunctions(sessionId: AnalysisSessionId, contentHash: string, ghidraHome: string, pythonPath: string, backend: 'pyghidra' | 'headless'): Promise<IDelverBackendFunctionsWire | undefined>;
+
+	/**
+	 * Finishes the decompiler backend's analysis of one target.
+	 *
+	 * Minutes on a large image, so it is never implied by another call.
+	 * `undefined` when the backend cannot be asked.
+	 */
+	analyzeBackendTarget(sessionId: AnalysisSessionId, contentHash: string, ghidraHome: string, pythonPath: string, backend: 'pyghidra' | 'headless', operationId: string): Promise<IDelverBackendAnalysisWire | undefined>;
 
 	/** Starts and opens a verified target in PyGhidra before the first F5 request. */
 	prepareDecompilerTarget(sessionId: AnalysisSessionId, contentHash: string, ghidraHome: string, pythonPath: string): Promise<IDelverDecompilerTargetPreparationWire>;

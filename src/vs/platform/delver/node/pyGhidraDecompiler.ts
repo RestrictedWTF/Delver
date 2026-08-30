@@ -153,6 +153,35 @@ export class PyGhidraDecompiler extends Disposable {
 	}
 
 	/**
+	 * Finishes the backend's analysis of one target.
+	 *
+	 * `openTarget` imports without auto-analysis because pseudocode for a single
+	 * function does not need it. Anything reasoning about the whole function set
+	 * does, so the cost is asked for explicitly rather than hidden inside
+	 * another call (ADR 0017). Idempotent, and cancellable — it takes minutes on
+	 * a large image.
+	 *
+	 * `undefined` when the backend does not advertise the capability.
+	 */
+	async analyzeTarget(targetId: string, targetPath: string, contentHash: string, token: CancellationToken): Promise<{ readonly analysisComplete: boolean; readonly alreadyAnalyzed: boolean } | undefined> {
+		const hello = await this.worker.start();
+		if (hello.capabilities?.analyzeTarget !== true) {
+			return undefined;
+		}
+		await this.prepareTarget(targetId, targetPath, contentHash, token);
+		const workerTargetId = this.openedTargets.get(targetId)?.workerTargetId;
+		if (!workerTargetId) {
+			throw new Error(`Target '${targetId}' was not retained after preparation.`);
+		}
+		const result = await this.worker.request('analyzeTarget', { targetId: workerTargetId }, token);
+		const record = result as { analysisComplete?: unknown; alreadyAnalyzed?: unknown };
+		return {
+			analysisComplete: record.analysisComplete === true,
+			alreadyAnalyzed: record.alreadyAnalyzed === true,
+		};
+	}
+
+	/**
 	 * Every function the backend recovered in one target.
 	 *
 	 * The handshake's backend side (ADR 0017). Returns `undefined` when the

@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Codicon } from '../../../../base/common/codicons.js';
+import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { toErrorMessage } from '../../../../base/common/errorMessage.js';
 import { onUnexpectedError } from '../../../../base/common/errors.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
@@ -122,13 +123,46 @@ class DelverHandshakeViewContribution extends Disposable {
 						"The configured decompiler backend cannot list the functions it recovered, so there is nothing to compare against.",
 					));
 				}
-				if (!backend.analysisComplete) {
-					throw new Error(localize(
-						'delverHandshakeIncomplete',
-						"The decompiler backend has not finished analyzing this image. Its function set is still incomplete, and comparing it now would report the shortfall as disagreement.",
-					));
+				let complete = backend;
+				if (!complete.analysisComplete) {
+					// The backend imports without auto-analysis, so its first
+					// answer is a fraction of its eventual one. Finish the work
+					// rather than refuse: refusing is honest but leaves the
+					// comparison permanently unavailable, and the cost is the
+					// analyst's to accept once per image.
+					treeView.message = localize('delverHandshakeAnalyzing', "Waiting for the decompiler backend to finish analyzing…");
+					treeView.refresh().catch(onUnexpectedError);
+					const analyzed = await decompilerService.analyzeBackendTarget({
+						contentHash: session.contentHash,
+						sessionId: session.sessionId,
+						targetPath: session.targetPath,
+					}, CancellationToken.None);
+					if (token !== generation) {
+						return;
+					}
+					if (!analyzed?.analysisComplete) {
+						throw new Error(localize(
+							'delverHandshakeIncomplete',
+							"The decompiler backend has not finished analyzing this image. Its function set is still incomplete, and comparing it now would report the shortfall as disagreement.",
+						));
+					}
+					const refreshed = await decompilerService.listBackendFunctions({
+						contentHash: session.contentHash,
+						sessionId: session.sessionId,
+						targetPath: session.targetPath,
+					});
+					if (token !== generation) {
+						return;
+					}
+					if (!refreshed?.analysisComplete) {
+						throw new Error(localize(
+							'delverHandshakeStillIncomplete',
+							"The decompiler backend still reports an incomplete function set after analyzing, so there is nothing trustworthy to compare.",
+						));
+					}
+					complete = refreshed;
 				}
-				dataProvider.setResult(handshake(bound.functions, backend));
+				dataProvider.setResult(handshake(bound.functions, complete));
 				treeView.message = undefined;
 			} catch (error) {
 				if (token !== generation) {
