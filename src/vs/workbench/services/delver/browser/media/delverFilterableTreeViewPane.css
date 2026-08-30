@@ -27,3 +27,38 @@
 .delver-filterable-tree {
 	min-height: 0;
 }
+
+/*
+ * A surface's persistent choice, above its filter when it has one. Kept to the
+ * same 8px gutter and the same input tokens as the filter row so the two read
+ * as one control strip rather than two bolted-on rows.
+ */
+.delver-tree-choice {
+	box-sizing: border-box;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	height: 30px;
+	padding: 4px 8px 2px;
+}
+
+.delver-tree-choice-label {
+	flex: 0 0 auto;
+	color: var(--vscode-descriptionForeground);
+	white-space: nowrap;
+}
+
+.delver-tree-choice-select {
+	flex: 1 1 auto;
+	min-width: 0;
+	height: 22px;
+	padding: 1px 4px;
+	border: 1px solid var(--vscode-dropdown-border, transparent);
+	outline: none;
+	color: var(--vscode-dropdown-foreground);
+	background: var(--vscode-dropdown-background);
+}
+
+.delver-tree-choice-select:focus {
+	border-color: var(--vscode-focusBorder);
+}

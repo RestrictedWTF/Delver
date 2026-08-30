@@ -17,6 +17,8 @@ import { ITreeView } from '../../../common/views.js';
 import { Extensions as ViewExtensions, ITreeViewDescriptor, IViewsRegistry } from '../../../common/views.js';
 import { DELVER_VIEW_CONTAINER } from './delverViewContainer.js';
 import { delverTreeFilterProvider } from './delverFilterableTreeViewPane.js';
+import { delverTreeChoice } from './delverTreeChoice.js';
+import './media/delverFilterableTreeViewPane.css';
 import { DelverZone, IDelverSurface } from './delverSurface.js';
 import { registerDelverSurface } from './delverSurfaceRegistry.js';
 
@@ -40,6 +42,7 @@ export class DelverTreeSurface extends Disposable implements IDelverSurface {
 	 */
 	private treeContainer: HTMLElement | undefined;
 	private filterRow: HTMLElement | undefined;
+	private choiceRow: HTMLElement | undefined;
 	private readonly filterDelayer = this._register(new Delayer<void>(120));
 
 	constructor(private readonly treeView: ITreeView) {
@@ -67,10 +70,16 @@ export class DelverTreeSurface extends Disposable implements IDelverSurface {
 	}
 
 	render(container: HTMLElement): void {
+		// Above the filter, when a surface has both: a choice decides what the
+		// tree is showing at all, and a filter narrows whatever that turned out
+		// to be. Reading them in the other order would be reading the sentence
+		// backwards.
+		this.renderChoice(container);
 		const provider = delverTreeFilterProvider(this.treeView);
 		if (!provider) {
-			this.treeContainer = container;
-			this.treeView.show(container);
+			const treeOnly = dom.append(container, dom.$('.delver-filterable-tree'));
+			this.treeContainer = treeOnly;
+			this.treeView.show(treeOnly);
 			return;
 		}
 		this.filterRow = dom.append(container, dom.$('.delver-tree-filter'));
@@ -95,9 +104,43 @@ export class DelverTreeSurface extends Disposable implements IDelverSurface {
 		this.treeView.show(treeContainer);
 	}
 
+	/**
+	 * Builds the surface's persistent choice control, when it declares one.
+	 *
+	 * Rebuilt from `current()` on every change rather than trusting the control
+	 * to already agree: the value can move from the Settings UI, a workspace
+	 * file, or another window, and a select that only updated when clicked would
+	 * sit there naming a mode the analyst is no longer in.
+	 */
+	private renderChoice(container: HTMLElement): void {
+		const choice = delverTreeChoice(this.treeView);
+		if (!choice) {
+			return;
+		}
+		this.choiceRow = dom.append(container, dom.$('.delver-tree-choice'));
+		const label = dom.append(this.choiceRow, dom.$('label.delver-tree-choice-label')) as HTMLLabelElement;
+		label.textContent = choice.label;
+		const select = dom.append(this.choiceRow, dom.$('select.delver-tree-choice-select')) as HTMLSelectElement;
+		select.ariaLabel = choice.ariaLabel;
+		// The label is associated with the control rather than merely sitting
+		// beside it, so a screen reader announces the choice and not a bare
+		// combo box. Unique per surface because two zones can be on screen.
+		select.id = `delver-tree-choice-${choice.ariaLabel.replace(/\W+/g, '-').toLowerCase()}`;
+		label.htmlFor = select.id;
+		for (const option of choice.options) {
+			const element = dom.append(select, dom.$('option')) as HTMLOptionElement;
+			element.value = option.value;
+			element.textContent = option.label;
+		}
+		select.value = choice.current();
+		this._register(dom.addDisposableListener(select, dom.EventType.CHANGE, () => choice.select(select.value)));
+		this._register(choice.onDidChange(() => { select.value = choice.current(); }));
+	}
+
 	layout(dimension: Dimension): void {
 		const filterHeight = this.filterRow?.offsetHeight || (this.filterRow ? 34 : 0);
-		this.treeView.layout(Math.max(0, dimension.height - filterHeight), dimension.width);
+		const choiceHeight = this.choiceRow?.offsetHeight || (this.choiceRow ? 30 : 0);
+		this.treeView.layout(Math.max(0, dimension.height - filterHeight - choiceHeight), dimension.width);
 	}
 
 	setVisible(visible: boolean): void {

@@ -8,7 +8,7 @@ import { onUnexpectedError } from '../../../../base/common/errors.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { ITextModelService } from '../../../../editor/common/services/resolverService.js';
-import { Action2, MenuId, MenuRegistry, registerAction2 } from '../../../../platform/actions/common/actions.js';
+import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
 import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
 import { DelverFindingOutcome } from '../../../../platform/delver/common/findings.js';
@@ -25,6 +25,7 @@ import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/
 import { Extensions as ViewExtensions, ITreeViewDescriptor, IViewsRegistry, TreeViewItemHandleArg } from '../../../common/views.js';
 import { Emitter } from '../../../../base/common/event.js';
 import { DelverSurfaceId, DelverZone } from '../../../services/delver/browser/delverSurface.js';
+import { registerDelverTreeChoice } from '../../../services/delver/browser/delverTreeChoice.js';
 import { registerDelverTreeSurface } from '../../../services/delver/browser/delverTreeSurface.js';
 import { FocusReason, IDelverFocusService } from '../../../services/delver/common/delverFocusService.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
@@ -85,6 +86,23 @@ export class DelverReviewViewContribution extends Disposable {
 			collapsed: false,
 			order: 80,
 		};
+		// The always-visible mode control. It sits above the tree rather than in
+		// a view title because these surfaces have no view title — see
+		// `delverTreeChoice.ts`. Rendering it inside the surface also puts it
+		// where the consequence is: the pane it empties.
+		const modeChanged = this._register(new Emitter<void>());
+		registerDelverTreeChoice(treeView, {
+			label: localize('delverReviewModeLabel', "Review"),
+			ariaLabel: localize('delverReviewModeAria', "Review mode"),
+			options: [
+				{ value: 'manual', label: localize('delverReviewModeOptionManual', "Manual — wait for my review") },
+				{ value: 'auto', label: localize('delverReviewModeOptionAuto', "Automatic — accept as they arrive") },
+			],
+			current: () => delverReviewMode(configurationService),
+			select: value => void configurationService.updateValue(DELVER_REVIEW_MODE_SETTING, value),
+			onDidChange: modeChanged.event,
+		});
+
 		const badge = this._register(new Emitter<number | undefined>());
 		this._register(registerDelverTreeSurface(DelverSurfaceId.Review, DelverZone.Inspector, viewDescriptor, badge.event));
 
@@ -122,6 +140,10 @@ export class DelverReviewViewContribution extends Disposable {
 		// longer in.
 		this._register(configurationService.onDidChangeConfiguration(event => {
 			if (event.affectsConfiguration(DELVER_REVIEW_MODE_SETTING)) {
+				// The control has to follow the setting, not only drive it: the
+				// mode also moves from the Settings UI, a workspace file, and
+				// the two commands above.
+				modeChanged.fire();
 				update();
 			}
 		}));
@@ -212,50 +234,21 @@ const reviewGroupWhen = ContextKeyExpr.and(
 );
 
 /**
- * The review-mode dropdown in the view title.
+ * The review-mode commands.
  *
- * Placed here rather than left to the Settings UI because the mode changes what
- * this view *is*. Under `auto` the pane is empty not because there is nothing to
- * review but because nothing waits for review, and those two are impossible to
- * tell apart from an empty tree. The title always naming the current mode is the
- * cheapest way to keep an empty pane honest.
+ * Reachable from the Command Palette, and mirrored by the dropdown the Review
+ * surface renders above its tree. Deliberately *not* a `MenuId.ViewTitle`
+ * submenu: Delver's tree surfaces live in the workspace editor's zones, are
+ * registered with the views registry under `when: false` purely so `TreeView`
+ * can find a progress location, and nothing on that path renders a view title
+ * menu. A submenu there is a control nobody can reach.
  */
-const reviewModeSubmenu = new MenuId('delverReviewModeSubmenu');
-MenuRegistry.appendMenuItem(MenuId.ViewTitle, {
-	submenu: reviewModeSubmenu,
-	// The label carries the current mode. A bare "Review Mode" would make the
-	// analyst open the menu to find out which one they are in, which is the
-	// question they most often have.
-	title: localize2('delverReviewModeManualTitle', "Review Mode: Manual"),
-	icon: Codicon.checklist,
-	group: 'navigation',
-	order: 1,
-	when: ContextKeyExpr.and(
-		ContextKeyExpr.equals('view', DELVER_REVIEW_VIEW_ID),
-		ContextKeyExpr.notEquals(`config.${DELVER_REVIEW_MODE_SETTING}`, 'auto'),
-	),
-});
-MenuRegistry.appendMenuItem(MenuId.ViewTitle, {
-	submenu: reviewModeSubmenu,
-	title: localize2('delverReviewModeAutoTitle', "Review Mode: Automatic"),
-	// A different icon, not just different text. The permissive mode should be
-	// visible at a glance from across the workbench, without reading a label.
-	icon: Codicon.zap,
-	group: 'navigation',
-	order: 1,
-	when: ContextKeyExpr.and(
-		ContextKeyExpr.equals('view', DELVER_REVIEW_VIEW_ID),
-		ContextKeyExpr.equals(`config.${DELVER_REVIEW_MODE_SETTING}`, 'auto'),
-	),
-});
-
 registerAction2(class UseManualDelverReviewModeAction extends Action2 {
 	constructor() {
 		super({
 			id: 'delver.review.useManualMode',
-			title: localize2('delverReviewModeManual', "Manual — wait for my review"),
-			toggled: ContextKeyExpr.notEquals(`config.${DELVER_REVIEW_MODE_SETTING}`, 'auto'),
-			menu: { id: reviewModeSubmenu, group: 'navigation', order: 1 },
+			title: localize2('delverReviewModeManual', "Delver: Review Proposals Manually"),
+			f1: true,
 		});
 	}
 
@@ -267,13 +260,12 @@ registerAction2(class UseManualDelverReviewModeAction extends Action2 {
 registerAction2(class UseAutomaticDelverReviewModeAction extends Action2 {
 	constructor() {
 		super({
+			// Names what it does to the analyst's work, not what it sets. "Auto
+			// accept" alone reads as a convenience; it is a decision to let a
+			// model's conclusions stand unread.
 			id: 'delver.review.useAutomaticMode',
-			// Says what it does to the analyst's work, not what it does to a
-			// setting. "Auto accept" alone reads as a convenience; it is a
-			// decision to let a model's conclusions stand unread.
-			title: localize2('delverReviewModeAuto', "Automatic — accept proposals and findings as they arrive"),
-			toggled: ContextKeyExpr.equals(`config.${DELVER_REVIEW_MODE_SETTING}`, 'auto'),
-			menu: { id: reviewModeSubmenu, group: 'navigation', order: 2 },
+			title: localize2('delverReviewModeAuto', "Delver: Accept Proposals and Findings Automatically"),
+			f1: true,
 		});
 	}
 
