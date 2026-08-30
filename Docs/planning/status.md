@@ -1970,7 +1970,267 @@ Types are no longer a later extension — `dataType` and `functionPrototype` are
 authored interpretation like any other edit, and accepted ones reach the
 decompiler. Merge and conflict detection remain collaboration work.
 
+## Pseudocode context menu, second pass
+
+The earlier fix (`6fd32013d94`) taught Rename, Set Comment and Set Tags to prefer
+the address the menu was opened on, but left two ways for a right-click to act on
+the previously selected object.
+
+`DecompileFunctionAction` never took the forwarded target at all: it asked
+`activeListing().selectedFunctionRva()`, so right-clicking a function entry in the
+pseudocode pane decompiled whatever row the listing was on. It now prefers the
+menu's address, which the entry's `whenSelectionIs('function')` gate already
+guarantees is an entry, and falls back to the listing only for the keybinding and
+palette paths. `GenerateSignatureAction` was already correct — it parses
+`requestedRva` first.
+
+Separately, the listing's `publishSelection` was not guarded by `applyingFocus`
+the way `publishFocus` is. `applyFocus` ends in `table.setSelection`, and it is
+async — one address lookup per focus — so an echo still in flight when the analyst
+right-clicked elsewhere landed after that click and overwrote the selection the
+menu had just published. Nothing needed the echo: every surface that opens the
+selection menu publishes the object under the cursor first.
+
+Verified: client typecheck clean, 369 Delver tests passing. Both are UI paths, so
+the live check — right-clicking a pseudocode line and confirming Decompile
+Function follows the cursor rather than the listing — is still outstanding.
+
 ## Known limitation
 
 Wrapped/unbounded source or pseudocode interleaving still needs a custom dynamic
 list delegate. Comments deliberately remain bounded on the instruction line.
+
+## Cross-backend function handshake (stage 1)
+
+Delver recovers functions and so does every decompiler backend it drives, and
+nothing compared the two. The disagreement was visible only where it leaked into
+pseudocode: a call whose target Ghidra recovered no function at printed as
+`func_0x00014001d7a0` beside `SUB_E2A0` in the same pane.
+
+The cause was narrow. `normalize_generated_function_names` matched
+`\bFUN_([0-9A-Fa-f]+)\b` and nothing else, so Ghidra's `FUN_<absolute>` became
+`SUB_<rva>` while the `func_0x<absolute>` fallback passed through untouched,
+carrying an absolute address into a pane where every other name is
+image-relative. The worker now rewrites it to `UNDEF_<rva>` — image-relative, and
+deliberately *not* `SUB_`, because collapsing the two would present an address no
+function was recovered at as a function. Both rewrites still leave an address
+below the image base alone.
+
+[ADR 0017](../history/adr/0017-cross-backend-function-handshake.md) settles the
+shape before a second backend arrives: Delver's set is the one reference frame,
+each backend reconciles against it and nothing else. Pairwise comparison would
+have been N² relationships with no principled tiebreak; this is N, and adding
+IDALib is one adapter that touches no existing comparison. `reconcileFunctions`
+implements the join — total over the union of entry RVAs, classifying `agree`,
+`boundsDiffer`, `delverOnly` and `backendOnly`, carrying Delver's
+`FunctionSource` through and deciding nothing. Adjudication is kept out of the
+join on purpose: a ranking heuristic will be wrong at least once, and one that
+lives in the join takes the corpus with it.
+
+Verified: `python -m unittest test_delver_decompiler_worker` 13/13, client
+typecheck clean, `scripts\test.bat --grep reconciliation` 7/7 for the new suite.
+
+Not built, and tracked in the ledger: the `listFunctions` backend capability, the
+adjudication pass, a surface that shows the reconciliation, and repair. Repair
+stays gated until the reconciliation has been read on real samples — pushing an
+unvalidated function set at a decompiler makes it emit confident wrong C.
+
+## Handshake stage 2, and the defect it found
+
+The reconciliation ran against `Auto-updater.exe` with IDA 9.1 as the second
+party, and its first output was a defect in Delver rather than in a backend.
+640 boundaries came back `delverOnly` from `ExceptionDirectory` — the most
+authoritative source there is. 638 of them were chained `RUNTIME_FUNCTION`
+fragments: `extract_exception_seeds` read `BeginAddress` and `EndAddress` and
+never `UnwindInfoAddress`, so a function the compiler split across ranges
+became one function per fragment, each wearing compiler-emitted authority.
+
+Fixed. `unwind_info_flags` resolves the record and the seed is skipped when
+`UNW_FLAG_CHAININFO` is set; unwind info that cannot be mapped keeps the seed
+and sets `exception_directory_failed`, because a missing function start costs
+more than a false one and neither may pass silently as fact. Delver's count on
+that sample fell 2403 → 2113 and `delverOnly/exceptionDirectory` fell 640 → 2 —
+the two that remain are real IDA misses, so the handshake reported a defect in
+both directions on its first run.
+
+The count did not fall to the 1264 real `RUNTIME_FUNCTION` entries: the linear
+sweep now finds the fragment bodies itself, and `delverOnly/linearSweep` rose
+183 → 528. Much less severe, and recorded unfixed in the defect audit — the
+load-bearing change is that those addresses are labelled a guess instead of a
+compiler-emitted fact.
+
+ADR 0017's Consequences section has been corrected. Its first draft reasoned
+that a vouched source plus `delverOnly` was evidence of a backend miss; the data
+refuted that 638 times out of 640. What provenance actually buys is a shape to
+investigate — a disagreement concentrated in one source is a claim about a
+parser. Keeping adjudication out of the join is what made that correction cost a
+paragraph.
+
+Stage 2 landed alongside it: the worker advertises a `listFunctions` capability
+and answers it from Ghidra's function manager without creating anything, and
+`PyGhidraDecompiler.listFunctions` returns `undefined` when a backend does not
+advertise it — the absence of an answer, never an empty one.
+
+Verified: Rust workspace green (0 failing suites, corpus 7/7 including the new
+`x64-chained-unwind`), client typecheck clean, 377 Delver TS tests passing,
+worker 13/13.
+
+Still not built: the adjudication pass, and any surface that shows a
+reconciliation. Repair stays gated.
+
+## Continuing the handshake: two more fixes, and the rule that replaced the wrong one
+
+**The sweep regression.** Removing the fragment seeds removed their ranges too,
+and the linear sweep's guard is a range — it skips addresses inside an
+authoritative extent. Fragment bodies suddenly belonged to no recorded range, so
+the sweep walked in and guessed starts in the middle of split functions:
+`delverOnly/linearSweep` rose 183 → 528. `ParsedImage::exception_ranges` now
+carries every `RUNTIME_FUNCTION` range, fragments included, and the sweep
+excludes them. A fragment is compiler-declared code belonging to a function even
+though its start is not a function start; dropping that with the seed was the
+mistake. The sample's count fell 2113 → 1765 and the sweep figure returned to
+exactly its 183 baseline. Two tests pin it, including a negative control on
+identical bytes with no declared range so the guard is tied to the range rather
+than to the absence of a seed.
+
+**Validated at scale.** 26 real PEs parsed clean, no failures and no
+`exception_directory_failed`. The fragment share varies enormously and the fix
+matters most where it is largest: `amd_comgr_3.dll` has 204,349
+`RUNTIME_FUNCTION` entries and 102,902 real function starts, so 101,447 false
+functions no longer enter the analysis. Many DLLs have no fragments at all,
+which is the right answer for unsplit code.
+
+**Adjudication, on the rule the evidence actually supports.** `adjudicate`
+classifies each row by **containment** rather than provenance: does the disputed
+address fall strictly inside a function the other side already has? Inside is a
+boundary dispute, outside a coverage gap. Across four images after the fragment
+fix, every remaining exception-directory disagreement fell outside any backend
+function — 23 of 23, against 638 of 640 inside beforehand. Provenance did not
+separate those populations; containment does. Source concentration survives as
+an advisory signal because it is what made the fragment defect legible.
+
+Run against IDA 9.1, the pass reports what it should: `backendCoverageGap`
+concentrated in `exceptionDirectory` on `advpack` and `appinfo` (genuine IDA
+misses, all outside IDA functions), and on `Auto-updater.exe` a
+`boundaryDispute` population of 142 concentrated in `linearSweep` — Delver's
+sweep guessing inside functions IDA has, correctly labelled a guess rather than
+a fact.
+
+**Coherence fix.** `UNDEF_` had been invented inside the Python worker with no
+counterpart in `naming.ts`, which owns placeholder naming — the drift invariant
+14 exists to catch. It is now `placeholderUnrecoveredFunctionName`, documented
+against `SUB_` and `loc_` as a third distinct claim, and `isPlaceholderName`
+recognizes it, so a generated name can never be logged as one an analyst chose.
+
+**Anchors need no migration.** Under [ADR 0015](../history/adr/0015-authored-corrections-re-derive-facts.md)
+a correction is an input to the derivation: a `Define` at a fragment RVA
+survives the fix and re-adds that seed, which is the analyst correctly
+overruling the derivation, and an `Undefine` that now matches no seed suppresses
+nothing and errors on no path. Authored names are append-only and untouched; one
+at an address that is no longer an entry decorates an address rather than a
+function, which is the true statement.
+
+Verified: Rust workspace green, corpus 7/7, client typecheck clean, 385 Delver
+TS tests, worker 13/13.
+
+Still open: a split function's recorded extent stops at its first fragment
+(defect audit — about half the `cdd.dll` extent disagreements fit that shape,
+and the rest are unexplained), no surface shows a reconciliation, and repair
+stays gated.
+
+## Split functions are whole again
+
+The last defect the handshake had surfaced: a function the compiler split across
+several ranges kept only its first piece. `containing_function` enforces a
+recorded end, so every address in a cold piece answered `None` — no owning
+function for any call site, global access or listing header inside it. Measured
+across five images, **every** fragment was orphaned: 638 of 638 in
+`Auto-updater.exe` (113,727 bytes), 1,719 of 1,719 in `ntdll.dll` (213,596
+bytes). Nothing was misattributed, which is precisely why it stayed invisible —
+the analysis declined to answer rather than answering wrongly.
+
+Fixed by following the chain rather than stretching the extent. A chained
+`UNWIND_INFO` carries the primary's `RUNTIME_FUNCTION` after its unwind codes;
+`resolve_chain_primary` reads it and follows nested chains up to a bound,
+because the file controls where each link points and an unbounded walk is a
+hang. `Function::fragments` holds the extra ranges and `containing_function`
+consults them only after the contiguous answer fails, so an image with no split
+functions pays one binary search as before.
+
+Folding fragments into `end_rva` would have been the shorter fix and is wrong: a
+cold piece can sit far from its entry, and one extent stretched over the gap
+swallows every function in between. A test pins that case on both sides of the
+wire.
+
+`FunctionWire.fragments` carries the ranges to the workbench —
+`protocol.generated.ts` regenerated from the crate, not hand-edited — and
+`containingFunctionRva` mirrors the Rust rule. Both now have parallel test
+cases, since the two answering differently is the failure that matters. After
+the fix all five images report zero orphaned and zero misattributed fragments.
+
+This also bore on the extent disagreements with IDA, though the reading of them
+recorded here at the time was wrong — see the correction in the following
+section.
+
+## The handshake is reachable
+
+It had been tested code with no caller. `IDelverAnalysisService.listBackendFunctions`
+now crosses the shared-process boundary — `ProxyChannel` forwards by name, so no
+per-method registration — and answers from the PyGhidra worker's function
+manager. The headless backend returns `undefined`: it runs one function at a time
+and never holds a program, so it advertises nothing and the handshake is simply
+absent for it, which is not the same claim as the sets agreeing.
+
+`delverFunctionHandshake.ts` closes the pipeline. It is where the wire's `"0x…"`
+strings become `bigint` — on the renderer side of the boundary and nowhere
+earlier — and it returns the reconciliation, the adjudication, and a summary
+that counts each kind of disagreement separately rather than as one number.
+
+Verified: Rust workspace green, corpus 7/7, client typecheck clean, 396 Delver
+TS tests, worker 13/13.
+
+Still not built: a trigger — a command or agent capability that runs the
+handshake and somewhere to show it — and repair.
+
+## The handshake has a trigger, and a correction
+
+`delver_function_handshake` is a read capability on the agent surface: no
+arguments, because it compares the whole image at once and naming a subset
+answers a different question. It is the first caller the reconciliation has had.
+
+Two refusals in it are the load-bearing part. A Delver function list cut short by
+the response bound is refused outright rather than disclosed as partial: a
+truncated set does not merely omit rows, it turns every backend function missing
+from it into a "Delver missed this" row, and the disagreement *is* the output, so
+a caller cannot subtract a bound from it afterwards. The test asserts the backend
+is never even asked. Separately, a backend that cannot enumerate answers
+`CAPABILITY_UNAVAILABLE` — the absence of a comparison, never agreement.
+
+**Correction to what this document said last session.** The extent disagreements
+with IDA were reported here as "28 of 60 explained, the residual small deltas
+both ways, one real 866-byte outlier". That was measured against Delver's
+*primary* end, which for a split function is where the first piece stops — not a
+comparison of two extents at all. Measured against the outermost extent:
+
+| | compared | identical | differing | largest |
+| --- | --- | --- | --- | --- |
+| `advpack.dll` | 334 | 333 | 1 | 3 bytes |
+| `cdd.dll` | 483 | 451 | 32 | 5 bytes |
+| `appinfo.dll` | 1012 | 974 | 38 | 11 bytes |
+
+93–99.7% agree exactly and every difference is at most 11 bytes of trailing
+padding. The 866-byte outlier does not exist: it is `appinfo.dll` `0xc4c0`, whose
+pieces run to `0xc835` against IDA's `0xc840`, and comparing against the primary
+end at `0xc4de` invented the other 855.
+
+The lesson is about the handshake rather than about either tool. A comparison is
+only as good as the question it asks, and a wrong question yields confident
+numbers rather than no numbers — which is the failure mode this project ranks
+worst, arrived at from the measurement side. Entry comparison was well defined on
+both sides from the start; extent comparison needed the fragment model before it
+meant anything.
+
+Verified: Rust workspace green, corpus 7/7, client typecheck clean, 399 Delver TS
+tests, worker 13/13.
+
+Still not built: a surface that shows a reconciliation, and repair.

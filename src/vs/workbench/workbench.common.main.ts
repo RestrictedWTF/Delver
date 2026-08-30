@@ -490,6 +490,7 @@ import './services/delver/common/delverWorkspaceService.js';
 import './contrib/delverOverview/browser/delverOverview.contribution.js';
 import './contrib/delverPseudocode/browser/delverPseudocode.contribution.js';
 import './contrib/delverFunctions/browser/delverFunctions.contribution.js';
+import './contrib/delverHandshake/browser/delverHandshake.contribution.js';
 import './contrib/delverImports/browser/delverImports.contribution.js';
 import './contrib/delverExports/browser/delverExports.contribution.js';
 import './contrib/delverStrings/browser/delverStrings.contribution.js';

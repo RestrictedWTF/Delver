@@ -33,6 +33,24 @@ export function placeholderLocationName(rva: bigint): string {
 }
 
 /**
+ * Placeholder for an address that is *called* but where the backend that
+ * produced the text recovered no function.
+ *
+ * Three placeholder forms, and the distinction between them is load-bearing:
+ * `SUB_` is a function entry nobody has named, `loc_` is a labelled address
+ * inside one, and this is neither — something calls the address and no function
+ * was recovered there at all. Spelling it `SUB_` would present a non-function as
+ * a function, and `loc_` would present a call target as a jump label; both are a
+ * confident claim the analysis has not earned (ADR 0017).
+ *
+ * Ghidra emits `func_0x<absolute>` for this case, which is neither Delver's
+ * spelling nor image-relative; the decompiler worker rewrites it to this form.
+ */
+export function placeholderUnrecoveredFunctionName(rva: bigint): string {
+	return `UNDEF_${bareHex(rva)}`;
+}
+
+/**
  * What to display for a function: the authored name if there is one, otherwise
  * a placeholder.
  *
@@ -47,5 +65,7 @@ export function functionDisplayName(rva: bigint, authored: string | undefined): 
 export function isPlaceholderName(name: string): boolean {
 	// Lower-case sub_ is retained for project/log compatibility with builds
 	// created before Delver standardized its generated function spelling.
-	return /^(?:SUB|sub|loc)_[0-9A-F]+$/.test(name);
+	// UNDEF_ is generated too: it must never be written to the interpretation
+	// log as though an analyst had chosen it.
+	return /^(?:SUB|sub|loc|UNDEF)_[0-9A-F]+$/.test(name);
 }

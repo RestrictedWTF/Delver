@@ -36,8 +36,16 @@ delver_lookup_function   delver_disassemble       delver_decompile
 delver_xrefs_to          delver_xrefs_from        delver_list_strings
 delver_search_strings    delver_imports           delver_exports
 delver_get_interpretation delver_propose_rename      delver_propose_comment
-delver_propose_tag       delver_report_finding
+delver_propose_tag       delver_report_finding    delver_function_handshake
 ```
+
+`delver_function_handshake` is the one tool here that reports on Delver rather
+than on the sample: it compares Delver's recovered function set against the
+decompiler backend's and classifies every disagreement
+([ADR 0017](../history/adr/0017-cross-backend-function-handshake.md)). Neither
+set is ground truth, so it returns four counts rather than a score, and it
+refuses outright when Delver's own list was cut short by the response bound —
+a truncated set does not omit disagreements, it invents them.
 
 The runtime tools this section once listed — processes, threads, registers,
 modules, regions, image diff — belong to P4 and are not stubs waiting to be

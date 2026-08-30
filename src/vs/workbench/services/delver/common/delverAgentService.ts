@@ -18,6 +18,7 @@
  * labelling, and error classification.
  */
 
+import { handshake } from './delverFunctionHandshake.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { isCancellationError } from '../../../../base/common/errors.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
@@ -140,6 +141,7 @@ export const enum DelverAgentCapabilityId {
 	SaveSignature = 'delver_save_signature',
 	Disassemble = 'delver_disassemble',
 	Decompile = 'delver_decompile',
+	FunctionHandshake = 'delver_function_handshake',
 	XrefsTo = 'delver_xrefs_to',
 	XrefsFrom = 'delver_xrefs_from',
 	ListStrings = 'delver_list_strings',
@@ -275,6 +277,11 @@ export const DELVER_AGENT_CAPABILITIES: readonly IDelverAgentCapability[] = [
 		id: DelverAgentCapabilityId.Decompile, group: 'analysis', kind: 'read', requiresAttachedTarget: false,
 		title: 'Delver Decompile',
 		description: 'Returns pseudocode for the function containing an address, with recovered variables and line-to-address mappings. Saved pseudocode is served without starting a decompiler.',
+	},
+	{
+		id: DelverAgentCapabilityId.FunctionHandshake, group: 'analysis', kind: 'read', requiresAttachedTarget: true,
+		title: 'Delver Function Handshake',
+		description: "Compares Delver's recovered function set against the decompiler backend's and classifies every disagreement. Requires the sample to be attached, because the backend has to open it.",
 	},
 	{
 		id: DelverAgentCapabilityId.XrefsTo, group: 'analysis', kind: 'read', requiresAttachedTarget: false,
@@ -778,6 +785,7 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 		this.handlers.set(DelverAgentCapabilityId.SaveSignature, context => this.handleSaveSignature(context));
 		this.handlers.set(DelverAgentCapabilityId.Disassemble, context => this.handleDisassemble(context));
 		this.handlers.set(DelverAgentCapabilityId.Decompile, context => this.handleDecompile(context));
+		this.handlers.set(DelverAgentCapabilityId.FunctionHandshake, context => this.handleFunctionHandshake(context));
 		this.handlers.set(DelverAgentCapabilityId.XrefsTo, context => this.handleXrefs(context, 'to'));
 		this.handlers.set(DelverAgentCapabilityId.XrefsFrom, context => this.handleXrefs(context, 'from'));
 		this.handlers.set(DelverAgentCapabilityId.ListStrings, context => this.handleStrings(context, false));
@@ -1095,6 +1103,69 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 			provenance: [{
 				source: session.sessionId ? 'analysis' : 'project',
 				detail: 'PE headers as parsed by the Delver file provider.',
+				contentHash: session.contentHash,
+				untrusted: true,
+			}],
+		};
+	}
+
+	private async handleFunctionHandshake(context: IHandlerContext): Promise<IHandlerOutput> {
+		const session = this.requireSession();
+		const bound = await this.rawFunctions(session);
+		this.throwIfCancelled(context.token);
+		// A Delver set cut short by the server's response bound does not just
+		// omit rows, it *invents* them: every function the backend has and this
+		// truncated list does not becomes a "Delver missed it" row. Refused
+		// rather than disclosed, because the disagreement is the entire output
+		// and a caller cannot subtract a bound from it.
+		if (bound.listTruncated) {
+			throw new DelverAgentError(
+				DelverAgentErrorCode.ResultLimitExceeded,
+				'This image has more functions than one analysis response carries, so the two sets cannot be compared without inventing disagreements.',
+			);
+		}
+		if (!this.decompilerService) {
+			throw new DelverAgentError(
+				DelverAgentErrorCode.DecompilerUnavailable,
+				'No decompiler backend is configured, so there is no second function set to compare against.',
+			);
+		}
+
+		const backend = await this.decompilerService.listBackendFunctions({
+			contentHash: session.contentHash,
+			sessionId: session.sessionId,
+			targetPath: session.targetPath,
+		});
+		this.throwIfCancelled(context.token);
+		// Absent, not empty. A backend that cannot enumerate has told us nothing
+		// about its functions, which is a different claim from agreeing with us.
+		if (!backend) {
+			throw new DelverAgentError(
+				DelverAgentErrorCode.CapabilityUnavailable,
+				'The configured decompiler backend cannot list the functions it recovered, so no comparison is possible.',
+			);
+		}
+
+		// A backend that recovers lazily returns a fraction of its eventual set
+		// until analysis finishes. Comparing that reports the shortfall as
+		// disagreement — a false claim about both tools, not a partial one.
+		if (!backend.analysisComplete) {
+			throw new DelverAgentError(
+				DelverAgentErrorCode.AnalysisIncomplete,
+				'The decompiler backend has not finished analyzing this image, so its function set is still incomplete and any comparison would report the shortfall as disagreement.',
+			);
+		}
+
+		const result = handshake(bound.functions, backend);
+		return {
+			data: {
+				...result.summary,
+				concentrations: result.summary.concentrations.map(([kind, source]) => ({ kind, source })),
+			},
+			completeness: 'complete',
+			provenance: [{
+				source: 'analysis',
+				detail: `Delver's recovered functions compared against ${backend.backendId} ${backend.backendVersion}.`,
 				contentHash: session.contentHash,
 				untrusted: true,
 			}],

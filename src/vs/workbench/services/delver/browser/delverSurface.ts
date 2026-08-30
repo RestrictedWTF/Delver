@@ -45,6 +45,7 @@ export const DelverSurfaceId = {
 	Xrefs: 'delver.surface.xrefs',
 	Signatures: 'delver.surface.signatures',
 	Review: 'delver.surface.review',
+	Handshake: 'delver.surface.handshake',
 } as const;
 
 /**

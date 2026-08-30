@@ -79,6 +79,29 @@ export interface IDelverDecompilationSemanticsWire {
 	readonly functionPrototypes: readonly IDelverDecompilationSemanticDeclarationWire[];
 }
 
+/** One function a decompiler backend reports having recovered. */
+export interface IDelverBackendFunctionWire {
+	readonly rva: string;
+	readonly endRva: string | undefined;
+	readonly name: string;
+}
+
+/** A backend's whole function set, for the cross-backend handshake (ADR 0017). */
+export interface IDelverBackendFunctionsWire {
+	readonly backendId: string;
+	readonly backendVersion: string;
+	readonly functions: readonly IDelverBackendFunctionWire[];
+	/**
+	 * Whether the backend had finished analyzing when it answered.
+	 *
+	 * A backend that recovers functions lazily returns a partial set until its
+	 * analysis completes. Comparing a partial set against a complete one reports
+	 * the shortfall as disagreement, so a consumer must refuse rather than
+	 * present it as a comparison (ADR 0017).
+	 */
+	readonly analysisComplete: boolean;
+}
+
 export interface IDelverDecompilerCacheInfoWire {
 	readonly path: string;
 	readonly projectCount: number;
@@ -258,6 +281,15 @@ export interface IDelverAnalysisService {
 
 	/** Runs one decompilation and identifies the backend that emitted its versioned JSON. */
 	decompileFunction(sessionId: AnalysisSessionId, rva: string, contentHash: string, ghidraHome: string, pythonPath: string, operationId: string, backend: 'pyghidra' | 'headless', semantics: IDelverDecompilationSemanticsWire): Promise<IDelverDecompilationWire>;
+
+	/**
+	 * Every function the configured decompiler backend recovered in one target.
+	 *
+	 * `undefined` when the backend does not advertise the capability — the
+	 * absence of an answer, which a caller must not read as the two function
+	 * sets agreeing (ADR 0017).
+	 */
+	listBackendFunctions(sessionId: AnalysisSessionId, contentHash: string, ghidraHome: string, pythonPath: string, backend: 'pyghidra' | 'headless'): Promise<IDelverBackendFunctionsWire | undefined>;
 
 	/** Starts and opens a verified target in PyGhidra before the first F5 request. */
 	prepareDecompilerTarget(sessionId: AnalysisSessionId, contentHash: string, ghidraHome: string, pythonPath: string): Promise<IDelverDecompilerTargetPreparationWire>;

@@ -29,6 +29,9 @@ RESULT_SCHEMA_VERSION = 1
 DECOMPILE_TIMEOUT_SECONDS = 60
 BACKEND_ID = "ghidra-pyghidra"
 GHIDRA_GENERATED_FUNCTION_PATTERN = re.compile(r"\bFUN_([0-9A-Fa-f]+)\b")
+# Ghidra prints a call whose target it recovered no function at as
+# `func_0x<absolute>`, which is neither Delver's naming nor image-relative.
+GHIDRA_UNRECOVERED_FUNCTION_PATTERN = re.compile(r"\bfunc_0x([0-9A-Fa-f]+)\b")
 MAX_SEMANTIC_DECLARATIONS = 10000
 MAX_DECLARATION_CHARACTERS = 2048
 MAX_SEMANTIC_COMPOSITES = 1000
@@ -162,6 +165,7 @@ class PyGhidraDriver:
 			},
 			"capabilities": {
 				"decompileFunction": True,
+				"listFunctions": True,
 				"cancel": True,
 				"persistentTargets": True,
 				"addressMappings": True,
@@ -308,6 +312,48 @@ class PyGhidraDriver:
 				target.program.endTransaction(transaction_id, False)
 			with self._monitor_lock:
 				self._active_monitors.pop(request_id, None)
+
+	def list_functions(self, params: dict[str, Any]) -> dict[str, Any]:
+		"""Every function Ghidra recovered in one target, as image-relative RVAs.
+
+		The reference frame for the handshake is Delver's function set, so this
+		reports what the backend believes and interprets nothing (ADR 0017). No
+		function is created here — asking a backend what it recovered must not
+		change what it recovered.
+		"""
+		self.start()
+		started = time.perf_counter()
+		target_id = required_string(params, "targetId")
+		target = self._targets.get(target_id)
+		if target is None:
+			raise WorkerError("target_not_open", f"Target '{target_id}' is not open.")
+		image_base = target.program.getImageBase()
+		# `open_target` imports with `analyze=False` and recovers functions on
+		# demand, so this list is whatever Ghidra happens to hold right now. On an
+		# unanalyzed program that is a fraction of what it would find, and a
+		# caller that compared it against a complete set would report the
+		# difference as disagreement. Say which it is; do not let the caller guess.
+		analysis_complete = program_is_analyzed(target.program)
+		functions = []
+		for function in target.program.getFunctionManager().getFunctions(True):
+			entry = function.getEntryPoint()
+			body = function.getBody()
+			maximum = body.getMaxAddress() if body is not None else None
+			# Ghidra's body max is inclusive and may be a later chunk, so the
+			# exclusive end is one past it. A body Ghidra does not have is
+			# reported as absent rather than guessed from the next entry.
+			functions.append({
+				"rva": encode_rva(int(entry.subtract(image_base))),
+				"endRva": encode_rva(int(maximum.subtract(image_base)) + 1) if maximum is not None else None,
+				"name": str(function.getName()),
+			})
+		return {
+			"protocolVersion": PROTOCOL_VERSION,
+			"schemaVersion": RESULT_SCHEMA_VERSION,
+			"functions": functions,
+			"analysisComplete": analysis_complete,
+			"timings": {"listFunctionsMs": elapsed_ms(started)},
+		}
 
 	def close_target(self, params: dict[str, Any]) -> dict[str, Any]:
 		target_id = required_string(params, "targetId")
@@ -544,6 +590,8 @@ class WorkerServer:
 			return self._driver.open_target(request_id, params)
 		if method == "decompileFunction":
 			return self._driver.decompile_function(request_id, params)
+		if method == "listFunctions":
+			return self._driver.list_functions(params)
 		if method == "closeTarget":
 			return self._driver.close_target(params)
 		raise WorkerError("method_not_found", f"Unsupported method '{method}'.")
@@ -767,19 +815,52 @@ def sha256_file(path: Path) -> str:
 	return digest.hexdigest()
 
 
+def program_is_analyzed(program: Any) -> bool:
+	"""Whether Ghidra's auto-analysis has run to completion on this program.
+
+	Ghidra records this as the `Analyzed` program-info option. A program that
+	does not say so is one whose function list is still being discovered, and
+	treating that as a complete answer is how a partial import gets reported as
+	the backend disagreeing.
+	"""
+	try:
+		options = program.getOptions("Program Information")
+		return bool(options.getBoolean("Analyzed", False))
+	except Exception:
+		# Unable to tell, so claim the weaker thing. An unanalyzed program
+		# reported as analyzed produces confident nonsense; the reverse only
+		# declines to answer.
+		return False
+
+
 def encode_rva(value: int) -> str:
 	return f"0x{value:x}"
 
 
 def normalize_generated_function_names(text: str, image_base: int) -> str:
-	"""Convert Ghidra's absolute FUN names to Delver's stable RVA placeholders."""
-	def replace(match: re.Match[str]) -> str:
-		absolute_address = int(match.group(1), 16)
-		if absolute_address < image_base:
-			return match.group(0)
-		return f"SUB_{absolute_address - image_base:X}"
+	"""Convert Ghidra's absolute generated names to Delver's stable RVA placeholders.
 
-	return GHIDRA_GENERATED_FUNCTION_PATTERN.sub(replace, text)
+	Two forms arrive and they make different claims. `FUN_<absolute>` is a
+	function Ghidra recovered and did not name, and becomes `SUB_<rva>`.
+	`func_0x<absolute>` is a call target Ghidra recovered *no* function at, and
+	becomes `UNDEF_<rva>` — image-relative like everything else Delver renders,
+	but deliberately not `SUB_`, because collapsing the two would present a
+	non-function as a function (ADR 0017). Both spellings are owned by
+	`platform/delver/common/naming.ts`; this worker must not invent a third.
+
+	An address below the image base is not an RVA, so both forms are left alone.
+	"""
+	def rewrite(prefix: str):
+		def replace(match: re.Match[str]) -> str:
+			absolute_address = int(match.group(1), 16)
+			if absolute_address < image_base:
+				return match.group(0)
+			return f"{prefix}{absolute_address - image_base:X}"
+
+		return replace
+
+	text = GHIDRA_GENERATED_FUNCTION_PATTERN.sub(rewrite("SUB_"), text)
+	return GHIDRA_UNRECOVERED_FUNCTION_PATTERN.sub(rewrite("UNDEF_"), text)
 
 
 def elapsed_ms(started: float) -> int:

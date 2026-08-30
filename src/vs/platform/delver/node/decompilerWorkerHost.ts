@@ -57,6 +57,14 @@ export interface IDecompilerWorkerStartupDetails {
 
 export interface IDecompilerWorkerCapabilities {
 	readonly decompileFunction: boolean;
+	/**
+	 * Whether the backend can enumerate the functions it recovered.
+	 *
+	 * Absent or false means the cross-backend handshake has nothing to reconcile
+	 * for this backend, which is a different claim from the sets agreeing
+	 * (ADR 0017). Nothing branches on the backend's id to decide this.
+	 */
+	readonly listFunctions?: boolean;
 	readonly cancel: boolean;
 	readonly persistentTargets: boolean;
 	readonly addressMappings: boolean;

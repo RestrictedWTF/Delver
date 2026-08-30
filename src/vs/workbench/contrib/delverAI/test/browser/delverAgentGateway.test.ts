@@ -127,16 +127,20 @@ suite('Delver Agent Command Gateway', () => {
 			// walk past, and the previous `DELVER_AGENT_CAPABILITIES.length` was
 			// an identity that could never fail, since the tool list is built by
 			// mapping that same list.
-			toolCount: 38,
+			toolCount: 39,
 			// Pinned rather than counted. A capability with no presentation entry
 			// still ships — with a beaker icon, no usage text and an empty input
 			// schema — so the model is handed a tool it cannot call correctly.
-			// It would land in this list. The three below are deliberate: they
+			// It would land in this list. The six below are deliberate: they
 			// genuinely take no arguments.
 			toolsTakingNoArguments: [
 				DelverAgentCapabilityId.Capabilities,
 				DelverAgentCapabilityId.SessionInfo,
 				DelverAgentCapabilityId.ImageInfo,
+				// Compares the whole image against the backend at once. Naming a
+				// subset would answer a different question from the one the
+				// handshake exists to answer.
+				DelverAgentCapabilityId.FunctionHandshake,
 				// Genuinely argument-free: it re-derives the whole image or it
 				// does nothing, so there is no subject to name.
 				// Renders what the project already holds; there is nothing to

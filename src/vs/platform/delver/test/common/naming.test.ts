@@ -10,6 +10,7 @@ import {
 	isPlaceholderName,
 	placeholderFunctionName,
 	placeholderLocationName,
+	placeholderUnrecoveredFunctionName,
 } from '../../common/naming.js';
 
 suite('Delver naming', () => {
@@ -22,6 +23,33 @@ suite('Delver naming', () => {
 		assert.deepStrictEqual(
 			[placeholderFunctionName(0x140001000n), placeholderLocationName(0x1000n)],
 			['SUB_140001000', 'loc_1000'],
+		);
+	});
+
+	test('a called address with no recovered function is neither a sub nor a loc', () => {
+		// Three distinct claims: an entry nobody named, a label inside one, and
+		// an address something calls where no function was recovered at all.
+		assert.deepStrictEqual(
+			[
+				placeholderFunctionName(0x1d7a0n),
+				placeholderLocationName(0x1d7a0n),
+				placeholderUnrecoveredFunctionName(0x1d7a0n),
+			],
+			['SUB_1D7A0', 'loc_1D7A0', 'UNDEF_1D7A0'],
+		);
+	});
+
+	test('every generated spelling reads as a placeholder, so none is logged as authored', () => {
+		assert.deepStrictEqual(
+			[
+				isPlaceholderName(placeholderFunctionName(0x1000n)),
+				isPlaceholderName(placeholderLocationName(0x1000n)),
+				isPlaceholderName(placeholderUnrecoveredFunctionName(0x1000n)),
+				isPlaceholderName('sub_1000'),
+				isPlaceholderName('decrypt_config'),
+				isPlaceholderName('UNDEFINED_BEHAVIOUR'),
+			],
+			[true, true, true, true, false, false],
 		);
 	});
 

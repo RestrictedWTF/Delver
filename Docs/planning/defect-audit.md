@@ -11,7 +11,9 @@ before being listed.
 **Delete a row when it is fixed.** A stale defect list is worse than none — the
 same rule the design docs live under.
 
-**Every row is now closed.** The 2026-08-27 pass fixed all but #30 and surfaced
+**Every row is closed.** The last one was found on 2026-08-30 not by a read of
+the code but by the cross-backend function handshake, which is the point of
+building it; a less severe follow-on is recorded below unfixed. The 2026-08-27 pass fixed all but #30 and surfaced
 thirteen further defects; the 2026-08-28 pass verified each survivor against the
 code and closed the last two; the 2026-08-29 pass ran over the *uncommitted*
 session work and found ten more, all now fixed and verified against a green tree.
@@ -252,6 +254,121 @@ because they stop the next reader from checking.
 [ADR 0010](../history/adr/0010-unsafe-code-in-os-security-modules.md) supersedes
 it, and `listener_windows.rs` now carries a SAFETY comment on every one of its 23
 `unsafe` blocks.
+
+---
+
+## Fixed 2026-08-30 — found by the cross-backend handshake
+
+### P1 — chained `RUNTIME_FUNCTION` fragments were recovered as function starts
+
+`extract_exception_seeds` emitted one `FunctionSeed` per `RUNTIME_FUNCTION` at
+its `BeginAddress`, reading `BeginAddress` and `EndAddress` and never the third
+field, `UnwindInfoAddress` — which is where x64 records that an entry is not a
+function. An `UNWIND_INFO` carrying `UNW_FLAG_CHAININFO` (0x4) describes a
+*fragment* of a function that starts elsewhere.
+
+This was worse than an inflated count. `ExceptionDirectory` is the most
+authoritative source `FunctionSource` has, so every consumer that ranks by
+provenance trusted a fragment boundary above a real inference, and
+`containing_function` could answer with a fragment rather than the entry.
+
+Measured on `Auto-updater.exe` (764 KB, x64), before and after:
+
+| | before | after |
+| --- | --- | --- |
+| functions Delver reports | 2403 | 2113 |
+| `delverOnly/exceptionDirectory` vs IDA 9.1 | 640 | **2** |
+
+The 2 that remain are `0x6b508` and `0x6b520` — unchained entries in no IDA
+function at all, so Delver is right and IDA is wrong there. That is the same
+pair under both tests, and the handshake reporting a miss in *both* directions is
+what it was built for.
+
+**Fixed:** `unwind_info_flags` resolves `UnwindInfoAddress` through the section
+table and the seed is skipped when `0x4` is set. Unwind info that cannot be
+mapped keeps the seed and sets `exception_directory_failed`, because a missing
+function start costs more than a false one and neither may pass silently as a
+compiler-emitted fact. Covered by `x64-chained-unwind` in the golden corpus and
+by a unit test pinning that the version bits never reach the flags.
+
+### Also fixed — the linear sweep walked into fragment bodies
+
+Removing the fragment seeds removed their *ranges* too, and the sweep's guard is
+a range: it skips addresses inside an authoritative function extent. Fragment
+bodies suddenly belonged to no recorded range, so the sweep walked in and guessed
+a start in the middle of a split function. `delverOnly/linearSweep` rose 183 →
+528 on the sample.
+
+`ParsedImage::exception_ranges` now carries every `RUNTIME_FUNCTION` range,
+fragments included, and the sweep excludes them. A fragment is compiler-declared
+code belonging to a function even though its start is not a function start, and
+dropping that fact with the seed was the mistake. On the sample the count fell
+2113 → 1765 and `delverOnly/linearSweep` returned to exactly its 183 baseline.
+
+Covered by two tests: one that a declared fragment range keeps the sweep out, and
+a negative control on identical bytes with no declared range, so the guard is
+pinned to the range rather than to the absence of a seed.
+
+### Fixed — a split function's later pieces belonged to no function
+
+`end_rva` for an `ExceptionDirectory` function is its own `RUNTIME_FUNCTION`
+`EndAddress`, which for a split function is the end of the *primary piece*.
+`containing_function` enforces a recorded end, so every address in a cold piece
+resolved to `None`: no owning function for any call site, global access or
+listing header in it.
+
+Measured before the fix, over five images, **every** fragment was orphaned —
+638 of 638 in `Auto-updater.exe` (113,727 bytes), 1,719 of 1,719 in `ntdll.dll`
+(213,596 bytes). Nothing was *mis*attributed, which is why it had stayed
+invisible: the analysis declined to answer rather than answering wrongly.
+
+**Fixed by following the chain, not by stretching the extent.** A chained
+`UNWIND_INFO` carries the primary's `RUNTIME_FUNCTION` after its unwind codes,
+so `resolve_chain_primary` reads it and follows nested chains up to
+`MAX_UNWIND_CHAIN` links — the file controls where each link points, and an
+unbounded walk is a hang. `Function::fragments` records the extra ranges, and
+`containing_function` consults them only after the contiguous answer fails.
+
+Fragments are deliberately **not** folded into `end_rva`. A cold piece can sit
+far from the entry, and one extent stretched across the gap would swallow every
+function in between — a test pins exactly that. After the fix all five images
+report zero orphaned and zero misattributed fragments.
+
+`FunctionWire.fragments` carries the ranges to the workbench, whose
+`containingFunctionRva` mirrors the Rust rule; both are now covered by parallel
+test cases, since the two answering differently is the failure that matters.
+
+### Closed — Delver and IDA agree on function extent once fragments are counted
+
+Recorded twice before, and wrong both times, because both measurements compared
+IDA's end against Delver's **primary** end. For a split function that is not a
+comparison of two extents at all: the primary end is where the *first piece*
+stops, so every split function looked like a large disagreement.
+
+Measured against Delver's outermost extent — the primary end or the furthest
+fragment end, whichever is greater:
+
+| | functions compared | identical | differing | largest difference |
+| --- | --- | --- | --- | --- |
+| `advpack.dll` | 334 | 333 | 1 | 3 bytes |
+| `cdd.dll` | 483 | 451 | 32 | 5 bytes |
+| `appinfo.dll` | 1012 | 974 | 38 | 11 bytes |
+
+93–99.7% agree exactly, and **every** remaining difference is at most 11 bytes.
+Those are trailing padding: Delver reports the range `.pdata` declares, IDA
+reports the extent it decoded, and alignment bytes fall inside one and outside
+the other. Neither is wrong, and there is nothing left to explain.
+
+The "866-byte outlier" recorded in the previous pass does not exist. It is
+`appinfo.dll` `0xc4c0`, whose pieces run to `0xc835`; IDA ends it at `0xc840`,
+eleven bytes later. Comparing against the primary end at `0xc4de` manufactured
+the other 855.
+
+Worth keeping as a lesson about the handshake itself: a comparison between two
+tools is only as good as the question it asks, and asking the wrong one produces
+confident numbers rather than no numbers. The reconciliation compares function
+*entries*, which is well defined on both sides; extent comparison needed the
+fragment model before it meant anything.
 
 ---
 

@@ -152,6 +152,33 @@ export class PyGhidraDecompiler extends Disposable {
 		return { serialized: JSON.stringify(serializedResult), targetOpenMs, ...timings };
 	}
 
+	/**
+	 * Every function the backend recovered in one target.
+	 *
+	 * The handshake's backend side (ADR 0017). Returns `undefined` when the
+	 * backend does not advertise the capability, which a caller must not read as
+	 * "the sets agree" — it is the absence of an answer, not an empty one.
+	 */
+	async listFunctions(targetId: string, targetPath: string, contentHash: string, token: CancellationToken): Promise<IDecompilerBackendFunctionSet | undefined> {
+		const hello = await this.worker.start();
+		if (hello.capabilities?.listFunctions !== true) {
+			return undefined;
+		}
+		await this.prepareTarget(targetId, targetPath, contentHash, token);
+		const workerTargetId = this.openedTargets.get(targetId)?.workerTargetId;
+		if (!workerTargetId) {
+			throw new Error(`Target '${targetId}' was not retained after preparation.`);
+		}
+		const result = await this.worker.request('listFunctions', { targetId: workerTargetId }, token);
+		return {
+			functions: readBackendFunctions(result),
+			// Absent is not "complete". A worker too old to report this has not
+			// told us the program was analyzed, and guessing that it was turns a
+			// partial import into a pile of fake disagreements.
+			analysisComplete: (result as { analysisComplete?: unknown }).analysisComplete === true,
+		};
+	}
+
 	async prepareTarget(targetId: string, targetPath: string, contentHash: string, token: CancellationToken = CancellationToken.None): Promise<number> {
 		const hello = await this.worker.start();
 		if (this.openedTargetsGeneration !== this.worker.generation) {
@@ -266,6 +293,64 @@ export class PyGhidraDecompiler extends Disposable {
 
 function isUnrecognizedCachedProject(error: unknown): boolean {
 	return error instanceof Error && /Unrecognized file format/i.test(error.message);
+}
+
+/** What a backend recovered, and whether it had finished looking. */
+export interface IDecompilerBackendFunctionSet {
+	readonly functions: readonly IDecompilerBackendFunction[];
+	/**
+	 * Whether the backend's analysis had completed when it answered.
+	 *
+	 * PyGhidra imports without auto-analysis and recovers functions on demand,
+	 * so a set taken early is a fraction of what the backend would eventually
+	 * find. Comparing that against a complete set reports the shortfall as
+	 * disagreement, which is a confident false claim about both tools.
+	 */
+	readonly analysisComplete: boolean;
+}
+
+/** One function a decompiler backend reports having recovered. */
+export interface IDecompilerBackendFunction {
+	/** Image-relative entry, as a `"0x…"` string (ADR 0001). */
+	readonly rva: string;
+	/** Exclusive end, absent when the backend has no body for it. */
+	readonly endRva: string | undefined;
+	readonly name: string;
+}
+
+/**
+ * Reads a `listFunctions` payload, refusing anything malformed.
+ *
+ * A backend's function set is one half of the handshake, so a payload that is
+ * partly unreadable must fail rather than silently under-report — a short list
+ * reads downstream as the backend having recovered less, which is a claim about
+ * the backend that nothing here is entitled to make.
+ */
+export function readBackendFunctions(result: object): readonly IDecompilerBackendFunction[] {
+	const functions = (result as { functions?: unknown }).functions;
+	if (!Array.isArray(functions)) {
+		throw new Error('listFunctions response has no functions array.');
+	}
+	return functions.map((entry, index) => {
+		if (typeof entry !== 'object' || entry === null) {
+			throw new Error(`listFunctions functions[${index}] is not an object.`);
+		}
+		const candidate = entry as { rva?: unknown; endRva?: unknown; name?: unknown };
+		if (typeof candidate.rva !== 'string' || !/^0x[0-9a-f]+$/.test(candidate.rva)) {
+			throw new Error(`listFunctions functions[${index}].rva is not a canonical "0x…" string.`);
+		}
+		if (candidate.endRva !== undefined && candidate.endRva !== null && (typeof candidate.endRva !== 'string' || !/^0x[0-9a-f]+$/.test(candidate.endRva))) {
+			throw new Error(`listFunctions functions[${index}].endRva is not a canonical "0x…" string.`);
+		}
+		if (typeof candidate.name !== 'string') {
+			throw new Error(`listFunctions functions[${index}].name is not a string.`);
+		}
+		return {
+			rva: candidate.rva,
+			endRva: typeof candidate.endRva === 'string' ? candidate.endRva : undefined,
+			name: candidate.name,
+		};
+	});
 }
 
 function readWorkerTimings(result: object): { readonly functionRecoveryMs: number; readonly decompilationMs: number; readonly serializationMs: number } {

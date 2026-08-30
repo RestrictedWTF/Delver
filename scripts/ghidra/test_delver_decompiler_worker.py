@@ -51,6 +51,27 @@ class ProtocolTests(unittest.TestCase):
 	def test_generated_function_name_before_image_base_is_left_untouched(self) -> None:
 		self.assertEqual(normalize_generated_function_names("FUN_1000();", 0x140000000), "FUN_1000();")
 
+	def test_a_call_ghidra_recovered_no_function_for_is_image_relative_and_not_a_sub(self) -> None:
+		self.assertEqual(
+			normalize_generated_function_names(
+				"uVar5 = func_0x00014001d7a0(param_1);",
+				0x140000000,
+			),
+			"uVar5 = UNDEF_1D7A0(param_1);",
+		)
+
+	def test_recovered_and_unrecovered_targets_stay_distinguishable_in_one_body(self) -> None:
+		self.assertEqual(
+			normalize_generated_function_names(
+				"void FUN_14000e2a0(void) { func_0x00014001d7a0(); FUN_140002000(); }",
+				0x140000000,
+			),
+			"void SUB_E2A0(void) { UNDEF_1D7A0(); SUB_2000(); }",
+		)
+
+	def test_unrecovered_target_before_image_base_is_left_untouched(self) -> None:
+		self.assertEqual(normalize_generated_function_names("func_0x1000();", 0x140000000), "func_0x1000();")
+
 	def test_distinct_entry_never_reuses_a_containing_function(self) -> None:
 		class Address:
 			def subtract(self, _other: object) -> int:

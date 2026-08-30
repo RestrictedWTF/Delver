@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Dirent, promises as fs } from 'fs';
-import { CancellationTokenSource } from '../../../base/common/cancellation.js';
+import { CancellationToken, CancellationTokenSource } from '../../../base/common/cancellation.js';
 import { CancellationError, isCancellationError } from '../../../base/common/errors.js';
 import { Disposable, MutableDisposable } from '../../../base/common/lifecycle.js';
 import { basename, dirname, isAbsolute, join, normalize } from '../../../base/common/path.js';
@@ -16,7 +16,7 @@ import {
 	IDelverDecompilerCacheInfoWire,
 	IDelverDecompilerTargetPreparationWire,
 	IDelverDecompilationSemanticsWire,
-	IDelverDecompilationWire,
+	IDelverBackendFunctionsWire, IDelverDecompilationWire,
 	IDelverAnalysisService,
 	IDelverReadMemoryWire,
 } from '../common/delverAnalysisService.js';
@@ -191,6 +191,37 @@ export class DelverAnalysisService extends Disposable implements IDelverAnalysis
 		assertSafeDecompilerCacheRoot(this.pyGhidraCacheRoot);
 		await fs.rm(this.pyGhidraCacheRoot, { recursive: true, force: true });
 		return previous;
+	}
+
+	async listBackendFunctions(sessionId: AnalysisSessionId, contentHash: string, ghidraHome: string, pythonPath: string, backend: 'pyghidra' | 'headless'): Promise<IDelverBackendFunctionsWire | undefined> {
+		// Only the persistent PyGhidra worker can be asked what it recovered. The
+		// headless backend runs one function at a time and never holds a program,
+		// so it advertises nothing and the handshake is simply absent for it —
+		// which is a different claim from the sets agreeing (ADR 0017).
+		if (backend !== 'pyghidra') {
+			return undefined;
+		}
+		const workerDiscovery = discoverPyGhidraWorker(ghidraHome, pythonPath);
+		if (!workerDiscovery.available) {
+			throw new Error(workerDiscovery.reason);
+		}
+		const decompiler = this.getPyGhidra(workerDiscovery.configuration);
+		const status = await decompiler.status();
+		const functions = await decompiler.listFunctions(
+			sessionId,
+			this.session(sessionId).targetPath,
+			contentHash,
+			CancellationToken.None,
+		);
+		if (!functions) {
+			return undefined;
+		}
+		return {
+			backendId: status.backendId,
+			backendVersion: status.backendVersion,
+			functions: functions.functions,
+			analysisComplete: functions.analysisComplete,
+		};
 	}
 
 	async decompileFunction(sessionId: AnalysisSessionId, rva: string, contentHash: string, ghidraHome: string, pythonPath: string, operationId: string, backend: 'pyghidra' | 'headless', semantics: IDelverDecompilationSemanticsWire): Promise<IDelverDecompilationWire> {

@@ -435,6 +435,13 @@ const PRESENTATIONS = new Map<string, IDelverToolPresentation>([
 			},
 		}, ['name', 'sourceCallId']),
 	}],
+	[DelverAgentCapabilityId.FunctionHandshake, {
+		icon: Codicon.gitCompare,
+		displayName: localize('delverTool.functionHandshake.displayName', "Delver Function Handshake"),
+		userDescription: localize('delverTool.functionHandshake.userDescription', "Compare Delver's functions against the decompiler backend's"),
+		usage: `Answers "do the two tools agree about what the functions here are?" — useful before trusting a function inventory, and the fastest way to find code one of them missed entirely. Takes no arguments and compares the whole image at once. Read the four counts as four different questions, not one score: \`agree\` is the shared set; \`extentDisputes\` are functions both found but bounded differently, which is usually a policy difference over trailing padding rather than an error; \`boundaryDisputes\` are entries one side places *inside* a function the other already has, so the two carved the same bytes differently; and the two \`coverageGap\` counts are the interesting ones — code one side recovered and the other has nothing for at all. \`concentrations\` names any disagreement kind that one \`FunctionSource\` accounts for most of, which points at a systematic fault rather than scattered individual mistakes; it is a lead to investigate, never a verdict about which tool is right. Neither set is ground truth, so report a disagreement as a disagreement and say which side claims what. A backend that cannot enumerate its functions answers CAPABILITY_UNAVAILABLE, which means no comparison exists — never that the two agree. ${ATTACHED_NOTE} ${UNTRUSTED_NOTE}`,
+		inputSchema: objectSchema({}),
+	}],
 	[DelverAgentCapabilityId.Disassemble, {
 		icon: Codicon.chip,
 		displayName: localize('delverTool.disassemble.displayName', "Delver Disassemble"),

@@ -7,7 +7,7 @@ import * as assert from 'assert';
 import { CancellationToken, CancellationTokenSource } from '../../../../../base/common/cancellation.js';
 import { Emitter } from '../../../../../base/common/event.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { AnalysisSessionId, IDelverAnalysisService, IDelverReadMemoryWire } from '../../../../../platform/delver/common/delverAnalysisService.js';
+import { AnalysisSessionId, IDelverAnalysisService, IDelverBackendFunctionsWire, IDelverReadMemoryWire } from '../../../../../platform/delver/common/delverAnalysisService.js';
 import { createDelverFinding, IDelverFinding, IDelverFindingDecision, IDelverFindingDraft } from '../../../../../platform/delver/common/findings.js';
 import { IDelverProjectSnapshot, IDelverRetainedXrefs } from '../../../../../platform/delver/common/delverProjectStoreService.js';
 import { IDelverToolCallRecord } from '../../../../../platform/delver/common/delverToolCall.js';
@@ -496,6 +496,19 @@ class FakeDecompilerService implements Partial<IDelverDecompilerService> {
 
 	savedResultDiagnostic(): string | undefined {
 		return undefined;
+	}
+
+	/** `undefined` models a backend that cannot enumerate its functions. */
+	backendFunctions: IDelverBackendFunctionsWire | undefined = {
+		backendId: 'ghidra-headless',
+		backendVersion: '12.1',
+		analysisComplete: true,
+		functions: [{ rva: '0x1000', endRva: '0x1100', name: 'FUN_1000' }],
+	};
+
+	async listBackendFunctions(): Promise<IDelverBackendFunctionsWire | undefined> {
+		this.calls.push('listBackendFunctions');
+		return this.backendFunctions;
 	}
 }
 
@@ -3290,6 +3303,91 @@ suite('DelverAgentService', () => {
 			reason: 'The image string scan hit its cap, so some strings were never extracted and no cursor will reach them.',
 			scanAttempted: [],
 		});
+	});
+
+	test('the handshake counts each kind of disagreement separately', async () => {
+		const { service, session, decompiler } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		session.functionsResult = { functions: [...FUNCTIONS] };
+		// 0x1000 matches; 0x2000 is Delver's alone and lands in no backend
+		// function; 0x5000 is the backend's alone.
+		decompiler.backendFunctions = {
+			backendId: 'ghidra-pyghidra',
+			backendVersion: '11.3',
+			analysisComplete: true,
+			functions: [
+				{ rva: '0x1000', endRva: '0x1100', name: 'FUN_1000' },
+				{ rva: '0x5000', endRva: '0x5010', name: 'FUN_5000' },
+			],
+		};
+
+		const payload = payloadOf<Record<string, unknown>>(
+			await service.invoke({ capability: 'delver_function_handshake', args: {} }, CancellationToken.None));
+
+		assert.deepStrictEqual(payload, {
+			backendId: 'ghidra-pyghidra',
+			delverFunctions: 2,
+			backendFunctions: 2,
+			agree: 1,
+			extentDisputes: 0,
+			boundaryDisputes: 0,
+			backendCoverageGaps: 1,
+			delverCoverageGaps: 1,
+			concentrations: [],
+		});
+	});
+
+	test('a truncated function list refuses the handshake rather than inventing disagreements', async () => {
+		// A Delver set cut short by the response bound does not merely omit
+		// rows: every backend function missing from it becomes a "Delver missed
+		// this" row. The disagreement *is* the output, so a caller cannot
+		// subtract a bound from it afterwards.
+		const { service, session, decompiler } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		session.functionsResult = { functions: [...FUNCTIONS], list_truncated: true, total: 70000 };
+
+		assert.strictEqual(
+			await errorCode(service, { capability: 'delver_function_handshake', args: {} }),
+			'RESULT_LIMIT_EXCEEDED',
+		);
+		assert.deepStrictEqual(
+			decompiler.calls.filter(call => call === 'listBackendFunctions'),
+			[],
+			'the backend is not asked for a comparison that could not be trusted'
+		);
+	});
+
+	test('a backend still analyzing is refused rather than compared', async () => {
+		// PyGhidra imports without auto-analysis and recovers functions on
+		// demand, so an early set is a fraction of its eventual one. Comparing
+		// it reports that shortfall as disagreement — measured live, 0 of 1765
+		// agreeing against a partially imported program.
+		const { service, session, decompiler } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		session.functionsResult = { functions: [...FUNCTIONS] };
+		decompiler.backendFunctions = {
+			backendId: 'ghidra-pyghidra',
+			backendVersion: '11.3',
+			analysisComplete: false,
+			functions: [{ rva: '0x1000', endRva: '0x1100', name: 'FUN_1000' }],
+		};
+
+		assert.strictEqual(
+			await errorCode(service, { capability: 'delver_function_handshake', args: {} }),
+			'ANALYSIS_INCOMPLETE',
+		);
+	});
+
+	test('a backend that cannot enumerate is unavailable, not in agreement', async () => {
+		const { service, session, decompiler } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		session.functionsResult = { functions: [...FUNCTIONS] };
+		decompiler.backendFunctions = undefined;
+
+		assert.strictEqual(
+			await errorCode(service, { capability: 'delver_function_handshake', args: {} }),
+			'CAPABILITY_UNAVAILABLE',
+		);
 	});
 
 	test('reads the response bound as well as the scanner cap', async () => {

@@ -10,12 +10,42 @@ import { join } from 'path';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import { DecompilerWorkerHost, IDecompilerWorkerHello } from '../../node/decompilerWorkerHost.js';
-import { createPyGhidraWorkerInvocation, discoverPyGhidraWorker, PyGhidraDecompiler, pyGhidraProjectDirectory, resolvePythonPath } from '../../node/pyGhidraDecompiler.js';
+import { createPyGhidraWorkerInvocation, discoverPyGhidraWorker, PyGhidraDecompiler, pyGhidraProjectDirectory, readBackendFunctions, resolvePythonPath } from '../../node/pyGhidraDecompiler.js';
 
 const EMPTY_SEMANTICS = { schemaVersion: 2 as const, composites: [], dataTypes: [], functionPrototypes: [] };
 
 suite('PyGhidraDecompiler', () => {
 	ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('reads a backend function set, keeping an absent end absent', () => {
+		assert.deepStrictEqual(
+			readBackendFunctions({
+				functions: [
+					{ rva: '0xe2a0', endRva: '0x10dc0', name: 'SUB_E2A0' },
+					{ rva: '0x1d7a0', endRva: null, name: 'thunk' },
+				],
+			}),
+			[
+				{ rva: '0xe2a0', endRva: '0x10dc0', name: 'SUB_E2A0' },
+				{ rva: '0x1d7a0', endRva: undefined, name: 'thunk' },
+			]
+		);
+	});
+
+	test('a malformed function set is refused rather than silently shortened', () => {
+		// A short list reads downstream as the backend having recovered less,
+		// which is a claim about the backend the decoder may not make for it.
+		const refusals = [
+			() => readBackendFunctions({}),
+			() => readBackendFunctions({ functions: [{ rva: 57248, name: 'n' }] }),
+			() => readBackendFunctions({ functions: [{ rva: '0xE2A0', name: 'n' }] }),
+			() => readBackendFunctions({ functions: [{ rva: '0xe2a0', endRva: '12345', name: 'n' }] }),
+			() => readBackendFunctions({ functions: [{ rva: '0xe2a0' }] }),
+			() => readBackendFunctions({ functions: [null] }),
+		];
+		assert.deepStrictEqual(refusals.map(run => { try { run(); return 'accepted'; } catch { return 'refused'; } }),
+			['refused', 'refused', 'refused', 'refused', 'refused', 'refused']);
+	});
 
 	test('discovers static prerequisites and builds a shell-free invocation', () => {
 		const discovery = discoverPyGhidraWorker('C:\\ghidra', 'C:\\Python\\python.exe', 'D:\\Delver\\worker.py', () => true);
