@@ -10,6 +10,7 @@ import { IDelverFinding } from '../../../../platform/delver/common/findings.js';
 import { EditOp, IEdit } from '../../../../platform/delver/common/interpretation.js';
 import { IDelverToolCallRecord } from '../../../../platform/delver/common/delverToolCall.js';
 import { ITreeItem, ITreeViewDataProvider, TreeItemCollapsibleState } from '../../../common/views.js';
+import { DelverReviewMode } from '../../../services/delver/common/delverReviewPolicy.js';
 
 export const DELVER_REVIEW_VIEW_ID = 'delver.view.review';
 export const DELVER_REVIEW_GO_TO_COMMAND = 'delver.review.goTo';
@@ -23,6 +24,26 @@ export const DELVER_REVIEW_PROPOSALS_HANDLE = 'delver.review.proposals';
 export const DELVER_REVIEW_FINDINGS_HANDLE = 'delver.review.findings';
 
 /** Pure tree projection for pending model-authored work. */
+/**
+ * What an empty review pane should say.
+ *
+ * Emptiness has two readings here and they are not close together: nothing was
+ * proposed, or everything proposed was accepted without anyone looking. An
+ * empty tree cannot tell them apart, and the second is the one worth saying —
+ * it is a state the analyst chose, possibly hours ago, and then stopped seeing.
+ *
+ * Returns undefined when there is something to review, because a message above
+ * a populated tree is just noise.
+ */
+export function delverReviewEmptyMessage(pending: number, mode: DelverReviewMode): string | undefined {
+	if (pending > 0) {
+		return undefined;
+	}
+	return mode === 'auto'
+		? localize('delverReviewEmptyAuto', "Nothing is waiting: review mode is Automatic, so proposals and findings are accepted as they arrive. Exported reports list them as accepted automatically.")
+		: localize('delverReviewEmptyManual', "Nothing is waiting for review.");
+}
+
 export class DelverReviewTreeDataProvider implements ITreeViewDataProvider {
 	private proposals: readonly IEdit[] = [];
 	private findings: readonly IDelverFinding[] = [];

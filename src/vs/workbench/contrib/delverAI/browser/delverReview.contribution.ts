@@ -8,7 +8,7 @@ import { onUnexpectedError } from '../../../../base/common/errors.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { ITextModelService } from '../../../../editor/common/services/resolverService.js';
-import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
+import { Action2, MenuId, MenuRegistry, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
 import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
 import { DelverFindingOutcome } from '../../../../platform/delver/common/findings.js';
@@ -16,9 +16,10 @@ import { EditStatus } from '../../../../platform/delver/common/interpretation.js
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
+import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { ConfigurationScope, Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
-import { DELVER_REVIEW_MODE_SETTING } from '../../../services/delver/common/delverReviewPolicy.js';
+import { DELVER_REVIEW_MODE_SETTING, delverReviewMode } from '../../../services/delver/common/delverReviewPolicy.js';
 import { TreeView, TreeViewPane } from '../../../browser/parts/views/treeView.js';
 import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { Extensions as ViewExtensions, ITreeViewDescriptor, IViewsRegistry, TreeViewItemHandleArg } from '../../../common/views.js';
@@ -40,6 +41,7 @@ import {
 	DELVER_REVIEW_PROPOSALS_CONTEXT,
 	DELVER_REVIEW_PROPOSALS_HANDLE,
 	DELVER_REVIEW_VIEW_ID,
+	delverReviewEmptyMessage,
 	DelverReviewTreeDataProvider,
 	findingIdFromHandle,
 	proposalSequenceFromHandle,
@@ -57,6 +59,7 @@ export class DelverReviewViewContribution extends Disposable {
 		@IDelverProjectService projectService: IDelverProjectService,
 		@ITextModelService textModelService: ITextModelService,
 		@INotificationService notificationService: INotificationService,
+		@IConfigurationService configurationService: IConfigurationService,
 	) {
 		super();
 		// A correction set applies whole or not at all, so one correction that
@@ -105,9 +108,23 @@ export class DelverReviewViewContribution extends Disposable {
 				session ? projectService.toolCallsFor(session.contentHash) : [],
 			);
 			badge.fire(proposals.length + findings.length || undefined);
+			// An empty pane has two readings and they are not close: nothing was
+			// proposed, or everything proposed was accepted without anyone
+			// looking. An empty tree cannot tell them apart, and the second is
+			// the one an analyst needs to be reminded of — it is the state they
+			// chose, hours ago, and then stopped seeing.
+			treeView.message = delverReviewEmptyMessage(proposals.length + findings.length, delverReviewMode(configurationService));
 			treeView.refresh().catch(onUnexpectedError);
 		};
 		this._register(sessionService.onDidChangeActiveSession(update));
+		// The message above is part of the view's state, so a mode change has to
+		// redraw it — otherwise the pane keeps explaining the mode it is no
+		// longer in.
+		this._register(configurationService.onDidChangeConfiguration(event => {
+			if (event.affectsConfiguration(DELVER_REVIEW_MODE_SETTING)) {
+				update();
+			}
+		}));
 		this._register(interpretationService.onDidChange(event => {
 			if (event.edit.anchor.contentHash === sessionService.activeSession?.contentHash) {
 				update();
@@ -193,6 +210,77 @@ const reviewGroupWhen = ContextKeyExpr.and(
 		ContextKeyExpr.equals('viewItem', DELVER_REVIEW_FINDINGS_CONTEXT),
 	),
 );
+
+/**
+ * The review-mode dropdown in the view title.
+ *
+ * Placed here rather than left to the Settings UI because the mode changes what
+ * this view *is*. Under `auto` the pane is empty not because there is nothing to
+ * review but because nothing waits for review, and those two are impossible to
+ * tell apart from an empty tree. The title always naming the current mode is the
+ * cheapest way to keep an empty pane honest.
+ */
+const reviewModeSubmenu = new MenuId('delverReviewModeSubmenu');
+MenuRegistry.appendMenuItem(MenuId.ViewTitle, {
+	submenu: reviewModeSubmenu,
+	// The label carries the current mode. A bare "Review Mode" would make the
+	// analyst open the menu to find out which one they are in, which is the
+	// question they most often have.
+	title: localize2('delverReviewModeManualTitle', "Review Mode: Manual"),
+	icon: Codicon.checklist,
+	group: 'navigation',
+	order: 1,
+	when: ContextKeyExpr.and(
+		ContextKeyExpr.equals('view', DELVER_REVIEW_VIEW_ID),
+		ContextKeyExpr.notEquals(`config.${DELVER_REVIEW_MODE_SETTING}`, 'auto'),
+	),
+});
+MenuRegistry.appendMenuItem(MenuId.ViewTitle, {
+	submenu: reviewModeSubmenu,
+	title: localize2('delverReviewModeAutoTitle', "Review Mode: Automatic"),
+	// A different icon, not just different text. The permissive mode should be
+	// visible at a glance from across the workbench, without reading a label.
+	icon: Codicon.zap,
+	group: 'navigation',
+	order: 1,
+	when: ContextKeyExpr.and(
+		ContextKeyExpr.equals('view', DELVER_REVIEW_VIEW_ID),
+		ContextKeyExpr.equals(`config.${DELVER_REVIEW_MODE_SETTING}`, 'auto'),
+	),
+});
+
+registerAction2(class UseManualDelverReviewModeAction extends Action2 {
+	constructor() {
+		super({
+			id: 'delver.review.useManualMode',
+			title: localize2('delverReviewModeManual', "Manual — wait for my review"),
+			toggled: ContextKeyExpr.notEquals(`config.${DELVER_REVIEW_MODE_SETTING}`, 'auto'),
+			menu: { id: reviewModeSubmenu, group: 'navigation', order: 1 },
+		});
+	}
+
+	run(accessor: ServicesAccessor): Promise<void> {
+		return accessor.get(IConfigurationService).updateValue(DELVER_REVIEW_MODE_SETTING, 'manual');
+	}
+});
+
+registerAction2(class UseAutomaticDelverReviewModeAction extends Action2 {
+	constructor() {
+		super({
+			id: 'delver.review.useAutomaticMode',
+			// Says what it does to the analyst's work, not what it does to a
+			// setting. "Auto accept" alone reads as a convenience; it is a
+			// decision to let a model's conclusions stand unread.
+			title: localize2('delverReviewModeAuto', "Automatic — accept proposals and findings as they arrive"),
+			toggled: ContextKeyExpr.equals(`config.${DELVER_REVIEW_MODE_SETTING}`, 'auto'),
+			menu: { id: reviewModeSubmenu, group: 'navigation', order: 2 },
+		});
+	}
+
+	run(accessor: ServicesAccessor): Promise<void> {
+		return accessor.get(IConfigurationService).updateValue(DELVER_REVIEW_MODE_SETTING, 'auto');
+	}
+});
 
 registerAction2(class AcceptAllDelverReviewItemsAction extends Action2 {
 	constructor() {

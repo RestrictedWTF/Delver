@@ -19,6 +19,7 @@ import { ViewDescriptorService } from '../../../../services/views/browser/viewDe
 import { workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
 import { DelverReviewViewContribution } from '../../browser/delverReview.contribution.js';
 import {
+	delverReviewEmptyMessage,
 	DelverReviewTreeDataProvider,
 	findingIdFromHandle,
 	proposalSequenceFromHandle,
@@ -181,6 +182,30 @@ function finding() {
 		provenance: { capability: 'delver_report_finding', callId: 'call-1' },
 	});
 }
+
+suite('Delver Review View empty state', () => {
+	ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('an empty pane says which of the two empty states it is', () => {
+		// Emptiness has two readings that look identical in a tree: nothing was
+		// proposed, or everything was accepted without anyone looking. The
+		// second is a state the analyst chose hours ago and then stopped
+		// seeing, and it is the one that changes what the pane means.
+		assert.deepStrictEqual({
+			manualEmpty: delverReviewEmptyMessage(0, 'manual'),
+			autoEmpty: delverReviewEmptyMessage(0, 'auto'),
+			// No message over a populated tree — it would be noise, and the tree
+			// already says what is waiting.
+			manualPending: delverReviewEmptyMessage(3, 'manual'),
+			autoPending: delverReviewEmptyMessage(3, 'auto'),
+		}, {
+			manualEmpty: 'Nothing is waiting for review.',
+			autoEmpty: 'Nothing is waiting: review mode is Automatic, so proposals and findings are accepted as they arrive. Exported reports list them as accepted automatically.',
+			manualPending: undefined,
+			autoPending: undefined,
+		});
+	});
+});
 
 suite('Delver Review View contribution lifetime', () => {
 	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
