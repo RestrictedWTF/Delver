@@ -312,7 +312,7 @@ class ProtocolTests(unittest.TestCase):
 			with self.subTest(composite=composite), self.assertRaises(WorkerError):
 				required_semantics(snapshot(composite))
 
-	def test_analysis_progress_reports_changes_and_never_invents_a_fraction(self) -> None:
+	def test_analysis_progress_reports_each_new_phase_once(self) -> None:
 		import threading
 
 		class Monitor:
@@ -334,13 +334,11 @@ class ProtocolTests(unittest.TestCase):
 				return self._current[2]
 
 		monitor = Monitor([
-			("Function Start Search", 200, 50),
-			# Unchanged: must not be reported twice.
-			("Function Start Search", 200, 50),
-			# A monitor with no maximum cannot say where it got to, and a
-			# fabricated fraction would be worse than none. The message is still
-			# worth relaying.
-			("Stack", 0, 0),
+			("Disassembled 4 K", 4295743576, 0),
+			# Unchanged: a line per tick saying what the last one said is noise
+			# on a pipe that also carries results.
+			("Disassembled 4 K", 4295743576, 0),
+			("NoReturn - Finding non-returning functions", 90, 12),
 		])
 		finished = threading.Event()
 		reported: list[tuple] = []
@@ -352,7 +350,12 @@ class ProtocolTests(unittest.TestCase):
 
 		watch_analysis_progress(monitor, finished, report, interval=0.001)
 
-		self.assertEqual(reported, [("Function Start Search", 0.25), ("Stack", None)])
+		# No fraction, ever. Each analyzer resets the maximum for its own step,
+		# so one computed from it would read as progress through the whole run.
+		self.assertEqual(reported, [
+			("Disassembled 4 K", None),
+			("NoReturn - Finding non-returning functions", None),
+		])
 
 	def test_server_writes_versioned_success_and_structured_error(self) -> None:
 		input_stream = io.StringIO(

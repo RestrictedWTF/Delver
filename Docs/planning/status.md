@@ -2441,16 +2441,27 @@ Fixing that exposed a second one. The cancelled run still answered
 analyzed program believing it whole, which is precisely what `analysisComplete`
 was added to prevent. It refuses now instead of marking the program analyzed.
 
-**The progress feature itself does not work, and is documented as such.** The
-protocol carries progress lines correlated by request id, the host routes them
-without ever mistaking one for a result, and the worker watches a monitor for
-changes — all tested. Nothing feeds them: `StubTaskMonitor` reports no message
-and no maximum, and `TaskMonitorAdapter` records neither either. Capturing
-phases needs a `TaskMonitor` implemented in Python through JPype, which is
-larger and more version-fragile than it looked. The plumbing is kept because it
-is the shape a reporting backend needs and costs a caller nothing when unfed,
-but it is not presented as working.
+**The progress feature works.** Recorded here as unfed at first, which was true
+of the two monitors tried by then: `StubTaskMonitor` reports no message and no
+maximum, and `TaskMonitorAdapter` — the one that fixes cancellation — records
+neither either. `TaskMonitorComponent` does both, which no other stock monitor
+managed: 86 distinct states over a 27s run, with cancellation still returning in
+4.2s. The worker prefers it and falls back to `TaskMonitorAdapter` when it
+cannot be constructed, because it is a Swing component and a display-less
+environment refusing one is a real possibility — losing progress is a worse UI,
+losing cancellation is a lie.
+
+Only the phase name is sent, never a fraction. Each analyzer resets the
+monitor's maximum for its own step (4295743576 during disassembly, then 90, then
+98), so a fraction from it is progress through the current analyzer and would
+read as progress through the run — marching to nearly full and restarting.
+
+This is the first event to cross the shared-process boundary on
+`IDelverAnalysisService`, so it needed the workbench to verify rather than a
+unit test. Driven live, the pane reads *"Analyzing in the decompiler backend:
+Create Address Tables"* and then the comparison result.
 
 Verified: client typecheck clean, 411 Delver TS tests, 10 worker-host tests,
-worker 18/18, plus live probes against real Ghidra for cancellation timing, the
-uncancelled path, and decompilation.
+worker 18/18, live probes against real Ghidra for cancellation timing, the
+uncancelled path and decompilation, and an end-to-end run through the
+workbench.

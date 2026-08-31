@@ -441,24 +441,39 @@ compared its function set against a partially analyzed program believing it
 whole — the exact failure `analysisComplete` was added to prevent. It now
 refuses rather than marking the program analyzed.
 
-### Not fixed — no backend reports analysis progress
+### Fixed — analysis reports the phase it is in
 
-The route that found the above was an attempt to show Ghidra's analysis phases
-during the half-minute `analyzeTarget` blocks for. The protocol, the host
-routing and the worker's watcher are built and tested, and **nothing feeds
-them**: `StubTaskMonitor` reports no message and no maximum, and
-`TaskMonitorAdapter` — which fixes cancellation — records neither either.
+The route that found the cancellation defect was an attempt to show Ghidra's
+phases during the half-minute `analyzeTarget` blocks for. The first two monitors
+tried could not feed it: `StubTaskMonitor` reports no message and no maximum,
+and `TaskMonitorAdapter` — which fixes cancellation — records neither either.
 
 ```
 adapter reports: None 0 -1
 ```
 
-Capturing phases needs a `TaskMonitor` implemented in Python through JPype so
-`setMessage`/`setProgress` can be observed, which is a larger and more
-version-fragile piece than it looked. The plumbing is kept because it is the
-shape a backend that can report needs, and because a caller that receives
-nothing behaves exactly like one that never asked. It is documented as unfed
-rather than presented as working.
+`TaskMonitorComponent` records both *and* cancels, which no other stock monitor
+did. Measured on `Auto-updater.exe`: 86 distinct states over a 27s run, and
+cancellation still returns in 4.2s. The worker takes it, falling back to
+`TaskMonitorAdapter` if it cannot be constructed — it is a Swing component, and
+a display-less environment that refuses one is a real possibility. Losing
+progress is a worse UI; losing cancellation is a lie.
+
+**Only the phase name is reported, never a fraction.** Every analyzer resets the
+monitor's maximum for its own step, so a fraction computed from it is progress
+through whichever analyzer is running and would read as progress through the
+whole run — marching to nearly full and restarting, repeatedly. The observed
+maxima bear that out: 4295743576 during disassembly, then 90, then 98. The phase
+name is the part that is true at every instant.
+
+Verified live through the workbench, which is where the shared-process event
+this needed had to work:
+
+```
+Analyzing in the decompiler backend: Decompiling FUN_14004ce00
+Analyzing in the decompiler backend: Create Address Tables
+Analyzing in the decompiler backend: Decompiler Parameter ID - decompile FUN_14002b7b0
+```
 
 ## Raised, not decided — should decompilation analyze once per image?
 

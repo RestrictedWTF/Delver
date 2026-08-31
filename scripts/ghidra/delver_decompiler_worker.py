@@ -112,6 +112,7 @@ class PyGhidraDriver:
 		self._enum_data_type_type: Any = None
 		self._auto_analysis_manager_type: Any = None
 		self._task_monitor_type: Any = None
+		self._reporting_monitor_type: Any = None
 		self._data_type_conflict_handler: Any = None
 		self._targets: dict[str, Target] = {}
 		self._active_monitors: dict[str, Any] = {}
@@ -137,7 +138,7 @@ class PyGhidraDriver:
 				from ghidra.app.cmd.function import ApplyFunctionSignatureCmd
 				from ghidra.app.util.parser import FunctionSignatureParser
 				from ghidra.app.plugin.core.analysis import AutoAnalysisManager
-				from ghidra.util.task import TaskMonitorAdapter
+				from ghidra.util.task import TaskMonitorAdapter, TaskMonitorComponent
 				from ghidra.framework import Application
 				from ghidra.program.model.data import DataTypeConflictHandler, EnumDataType, StructureDataType, UnionDataType
 				from ghidra.program.model.symbol import SourceType
@@ -160,20 +161,30 @@ class PyGhidraDriver:
 		self._enum_data_type_type = EnumDataType
 		self._auto_analysis_manager_type = AutoAnalysisManager
 		self._task_monitor_type = TaskMonitorAdapter
+		self._reporting_monitor_type = TaskMonitorComponent
 		self._data_type_conflict_handler = DataTypeConflictHandler
 		self._backend_version = str(Application.getApplicationVersion())
 		self._started = True
 
 	def _new_monitor(self) -> Any:
-		"""A monitor whose `cancel()` actually cancels.
+		"""A monitor that honours cancellation and records where it has got to.
 
-		`pyghidra.task_monitor()` returns a `StubTaskMonitor`: calling `cancel()`
-		on it leaves `isCancelled()` false, so cancelling a decompilation told
-		the caller it had stopped while Ghidra carried on holding the worker.
-		`TaskMonitorAdapter(true)` honours cancellation, which is the property
-		every caller here was already assuming.
+		`pyghidra.task_monitor()` returns a `StubTaskMonitor`: `cancel()` on it
+		leaves `isCancelled()` false, so cancelling told the caller the work had
+		stopped while Ghidra carried on holding the worker.
+
+		`TaskMonitorComponent` is the one stock monitor that both cancels and
+		keeps its message and progress, which is what lets a long analysis say
+		what it is doing. It is a Swing component and constructs fine headless
+		here, but a display-less environment that refuses to is a real
+		possibility — so a failure falls back to `TaskMonitorAdapter`, which
+		reports nothing but still cancels. Losing progress is a worse UI;
+		losing cancellation is a lie.
 		"""
-		return self._task_monitor_type(True)
+		try:
+			return self._reporting_monitor_type()
+		except Exception:
+			return self._task_monitor_type(True)
 
 	def hello(self) -> dict[str, Any]:
 		self.start()
@@ -1073,14 +1084,12 @@ def watch_analysis_progress(
 			message = str(monitor.getMessage()) if monitor.getMessage() is not None else None
 		except Exception:
 			message = None
-		fraction = None
-		try:
-			maximum = float(monitor.getMaximum())
-			if maximum > 0:
-				fraction = min(1.0, max(0.0, float(monitor.getProgress()) / maximum))
-		except Exception:
-			fraction = None
-		current = (message, None if fraction is None else round(fraction, 3))
+		# Deliberately no fraction. Every analyzer resets the monitor's maximum
+		# for its own step, so a fraction computed from it is progress through
+		# whichever analyzer is running and would be read as progress through the
+		# whole run — it would march to nearly full and restart, repeatedly. The
+		# phase name is the part that is true at every instant.
+		current = (message, None)
 		# Only when something changed: a line per half second that says exactly
 		# what the last one said is noise on a pipe that also carries results.
 		if current != last and (current[0] or current[1] is not None):
