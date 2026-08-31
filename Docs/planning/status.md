@@ -61,6 +61,30 @@ boundaries, of which **zero** are vouched — every one is a Delver linear-sweep
 guess. There is nothing to push, and pushing the rest would ask a decompiler to
 create functions where nothing vouches for them.
 
+## Just landed — structured constant search
+
+`delver_search_immediates` closes a gap the dispatcher row named and the old
+tool's own usage text admitted: `delver_search_instructions` matches *formatted
+operand text*, and one constant reaches the listing as `0x1f4`, `500` or `1F4h`
+depending on the formatter. The new capability matches the value the bytes
+encode.
+
+Two decisions carry it. A field is matched by **both** its unsigned and its
+sign-extended reading, because the bytes do not record whether the programmer
+wrote `-1` or `0xFFFFFFFF` — on `Auto-updater.exe`, searching `0xffffffff` finds
+370 dword forms and searching `0xffffffffffffffff` finds 578, the same ones plus
+every byte-width encoding. And **branch displacements are excluded**: a `jmp`
+encodes a destination, not a number, so including it would make a search for
+`0x1000` match every jump that lands there.
+
+The search walks the instruction index rather than scanning bytes, so every
+candidate starts at a boundary the analysis established — decoding from an
+arbitrary offset produces plausible garbage that differs silently from the real
+stream (Stage D, F2).
+
+Working on the real sample: `0x5a4d` — `MZ` — returns exactly two hits, which is
+this binary checking PE magic in two places.
+
 ## Where to pick up
 
 - **Local variable naming needs a durable identity design** before any of its

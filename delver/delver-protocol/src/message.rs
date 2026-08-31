@@ -1509,6 +1509,65 @@ pub struct ScanStringsResult {
 	pub next_rva: Option<u64>,
 }
 
+/// Request payload for `analysis/searchImmediates`.
+///
+/// Structured, unlike an operand-text search: `0x1f4`, `500` and `1F4h` are one
+/// constant written three ways, and matching the formatted text finds whichever
+/// the formatter chose. This matches the value the bytes encode.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SearchImmediatesParams {
+	/// Image handle.
+	pub image_id: String,
+	/// The constant to find, as a canonical `"0x..."` string.
+	///
+	/// Read as unsigned. A negative constant is written as the bits it
+	/// assembles to — `0xffffffff` finds `cmp eax, -1`, and so does
+	/// `0xffffffffffffffff`, because a field is matched by both its unsigned
+	/// and its sign-extended reading.
+	#[serde(with = "crate::hex")]
+	#[schemars(with = "String")]
+	pub value: u64,
+	/// Restrict to one encoded field width in bits — 8, 16, 32 or 64.
+	///
+	/// Absent matches any width. The same number reached through a byte field
+	/// and a dword field are different encodings, and separating them is what
+	/// this narrows.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub width: Option<u32>,
+	/// Maximum matches returned. Zero requests the server's own cap.
+	#[serde(default)]
+	pub max_matches: u32,
+}
+
+/// One instruction encoding the requested constant.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ImmediateMatchWire {
+	/// RVA of the matching instruction.
+	#[serde(with = "crate::hex")]
+	#[schemars(with = "String")]
+	pub rva: u64,
+	/// The immediate as encoded, zero-extended.
+	#[serde(with = "crate::hex")]
+	#[schemars(with = "String")]
+	pub value: u64,
+	/// Encoded width of the field in bits.
+	pub width: u32,
+}
+
+/// Response payload for `analysis/searchImmediates`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SearchImmediatesResult {
+	/// Matches in ascending address order.
+	pub matches: Vec<ImmediateMatchWire>,
+	/// Matches found before the response bound was applied.
+	pub total: u64,
+	/// Whether the bound dropped matches.
+	///
+	/// A bounded search has not shown that no further use exists, which is the
+	/// part a caller must not read as absence.
+	pub list_truncated: bool,
+}
+
 /// Response payload for `analysis/strings`.
 ///
 /// Two independent bounds, reported separately because only one of them can be

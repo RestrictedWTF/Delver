@@ -145,6 +145,21 @@ pub struct InstructionFacts {
 	pub branch_target: Option<u64>,
 	/// Target of a RIP-relative memory operand, as an RVA.
 	pub memory_target: Option<u64>,
+	/// Immediate operand encoded in the instruction, zero-extended to 64 bits.
+	///
+	/// The *encoded* value, not a sign-extended interpretation of it: `cmp
+	/// eax, -1` and `cmp eax, 0xFFFFFFFF` assemble to the same bytes and are
+	/// the same fact, so both arrive here as `0xFFFFFFFF` and a search for
+	/// either finds both. [`Self::immediate_width`] says how many bits were
+	/// actually encoded, which is what makes that value interpretable.
+	///
+	/// Branch displacements are deliberately absent: a `call` or `jmp` encodes
+	/// a target, not a constant, and it is already reported as
+	/// [`Self::branch_target`]. Reporting it twice would make a search for the
+	/// number 0x1000 match every jump that happens to land there.
+	pub immediate: Option<u64>,
+	/// Encoded width of [`Self::immediate`] in bits — 8, 16, 32 or 64.
+	pub immediate_width: Option<u32>,
 }
 
 impl InstructionFacts {
@@ -173,6 +188,10 @@ pub struct DecodedInstruction {
 	/// Target of a RIP-relative memory operand, as an RVA. This is how data
 	/// references are recovered on x64.
 	pub memory_target: Option<u64>,
+	/// Immediate operand, as encoded. See [`InstructionFacts::immediate`].
+	pub immediate: Option<u64>,
+	/// Encoded width of [`Self::immediate`] in bits.
+	pub immediate_width: Option<u32>,
 	/// Encoded address-bearing fields that a relocation-stable byte signature
 	/// should mask.
 	pub signature_fields: Vec<SignatureField>,
@@ -325,6 +344,8 @@ fn convert(
 		flow: facts.flow,
 		branch_target: facts.branch_target,
 		memory_target: facts.memory_target,
+		immediate: facts.immediate,
+		immediate_width: facts.immediate_width,
 		signature_fields: signature_fields(instruction, facts.flow, constant_offsets),
 	}
 }
@@ -387,13 +408,49 @@ fn facts(instruction: &Instruction) -> InstructionFacts {
 		None
 	};
 
+	let (immediate, immediate_width) = immediate_operand(instruction);
+
 	InstructionFacts {
 		rva: instruction.ip(),
 		len: instruction.len() as u32,
 		flow,
 		branch_target,
 		memory_target,
+		immediate,
+		immediate_width,
 	}
+}
+
+/// The immediate an instruction encodes, and how wide it was encoded.
+///
+/// Returns the first immediate operand. x86 encodes at most one except for
+/// `enter`, which is rare enough that taking the first is the honest simple
+/// rule rather than a silent choice between two.
+///
+/// The value is what the bytes hold, zero-extended. iced sign-extends the
+/// smaller forms into `immediate32to64` and friends; taking the raw operand
+/// keeps `cmp eax, -1` and `cmp eax, 0xFFFFFFFF` identical, which they are.
+fn immediate_operand(instruction: &Instruction) -> (Option<u64>, Option<u32>) {
+	for index in 0..instruction.op_count() {
+		let (value, width) = match instruction.op_kind(index) {
+			OpKind::Immediate8 => (instruction.immediate8() as u64, 8),
+			OpKind::Immediate8_2nd => (instruction.immediate8_2nd() as u64, 8),
+			OpKind::Immediate16 => (instruction.immediate16() as u64, 16),
+			OpKind::Immediate32 => (instruction.immediate32() as u64, 32),
+			OpKind::Immediate64 => (instruction.immediate64(), 64),
+			// The sign-extending forms encode a narrow field and mean a wide
+			// value. The encoded field is the fact, so it is reported at its
+			// encoded width; sign-extension is an interpretation a caller can
+			// apply and this layer must not bake in.
+			OpKind::Immediate8to16 => (instruction.immediate8() as u64, 8),
+			OpKind::Immediate8to32 => (instruction.immediate8() as u64, 8),
+			OpKind::Immediate8to64 => (instruction.immediate8() as u64, 8),
+			OpKind::Immediate32to64 => (instruction.immediate32() as u64, 32),
+			_ => continue,
+		};
+		return (Some(value), Some(width));
+	}
+	(None, None)
 }
 
 fn flow_kind(instruction: &Instruction) -> FlowKind {
@@ -422,6 +479,55 @@ mod tests {
 
 	/// `mov rax,rbx` / `add rax,1` / `ret`
 	const SIMPLE: &[u8] = &[0x48, 0x89, 0xD8, 0x48, 0x83, 0xC0, 0x01, 0xC3];
+
+	#[test]
+	fn an_immediate_is_reported_as_encoded_at_its_encoded_width() {
+		let disasm = Disassembler::new(Bitness::Bits64);
+		// mov eax,0xdeadbeef | cmp eax,0xffffffff | add rax,1 | ret
+		let code: &[u8] = &[
+			0xB8, 0xEF, 0xBE, 0xAD, 0xDE,
+			0x3D, 0xFF, 0xFF, 0xFF, 0xFF,
+			0x48, 0x83, 0xC0, 0x01,
+			0xC3,
+		];
+
+		let decoded: Vec<_> = disasm
+			.decode_from(0x1000, code)
+			.into_iter()
+			.map(|instruction| (instruction.immediate, instruction.immediate_width))
+			.collect();
+
+		assert_eq!(
+			decoded,
+			vec![
+				(Some(0xDEAD_BEEF), Some(32)),
+				// `cmp eax, -1` assembles to exactly these bytes. Reporting the
+				// encoded 0xFFFFFFFF rather than a sign-extended -1 is what
+				// makes a search for either value find this instruction.
+				(Some(0xFFFF_FFFF), Some(32)),
+				// 0x83 encodes an 8-bit field that means a 64-bit value. The
+				// encoded field is the fact; sign-extension is an
+				// interpretation a caller applies.
+				(Some(1), Some(8)),
+				(None, None),
+			]
+		);
+	}
+
+	#[test]
+	fn a_branch_displacement_is_a_target_and_not_an_immediate() {
+		// Searching for the constant 0x1005 must not match every jump that
+		// lands there — a branch encodes a destination, not a number.
+		let disasm = Disassembler::new(Bitness::Bits64);
+		let code: &[u8] = &[0xEB, 0x03, 0x90, 0x90, 0x90, 0xC3];
+
+		let first = &disasm.decode_from(0x1000, code)[0];
+
+		assert_eq!(
+			(first.immediate, first.branch_target),
+			(None, Some(0x1005))
+		);
+	}
 
 	#[test]
 	fn decodes_text_and_lengths() {

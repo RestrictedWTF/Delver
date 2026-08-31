@@ -12,7 +12,8 @@ import {
 	IDelverReadMemoryWire,
 } from '../common/delverAnalysisService.js';
 import { IAddressForRowResult, IBasicBlocksResult, ICallGraphResult, ICallPathsResult, IDataRangeCorrectionWire,
-	IFunctionCorrectionWire, IFunctionProfileResult, IFunctionsResult, IGetExportsResult, IGetImageInfoResult, IGetImportsResult, IGlobalAccessesResult, IGlobalsResult, IListingWindowResult, IOpenImageResult, IReadMemoryResult, IRowForAddressResult, IScanStringsResult, ISetCorrectionsResult, IStringsResult, IXrefIndexResult, IXrefsResult } from '../common/protocol.generated.js';
+	IFunctionCorrectionWire, IFunctionProfileResult, IFunctionsResult, IGetExportsResult, IGetImageInfoResult, IGetImportsResult, IGlobalAccessesResult, IGlobalsResult, IListingWindowResult, IOpenImageResult, IReadMemoryResult, IRowForAddressResult, IScanStringsResult,
+	ISearchImmediatesResult, ISetCorrectionsResult, IStringsResult, IXrefIndexResult, IXrefsResult } from '../common/protocol.generated.js';
 import { TargetConfig } from '../common/target.js';
 
 /**
@@ -315,6 +316,24 @@ export class DelverAnalysisSession extends Disposable {
 			max_strings: maxStrings,
 		});
 		return json.result as IScanStringsResult;
+	}
+
+	/**
+	 * Every decoded instruction encoding one constant as an immediate.
+	 *
+	 * Structured rather than textual: the same number reaches the listing as
+	 * `0x1f4`, `500` or `1F4h` depending on the formatter, and matching the
+	 * encoded value asks "where is this number used" instead of "where does this
+	 * string appear".
+	 */
+	async searchImmediates(value: string, width: number | undefined, maxMatches: number): Promise<ISearchImmediatesResult> {
+		const { json } = await this.rpc.call('analysis/searchImmediates', {
+			image_id: this.image.image_id,
+			value,
+			...(width === undefined ? {} : { width }),
+			max_matches: maxMatches,
+		});
+		return json.result as ISearchImmediatesResult;
 	}
 
 	async xrefIndex(start: number, maxXrefs: number, generation?: number): Promise<IXrefIndexResult> {

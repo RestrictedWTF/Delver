@@ -22,7 +22,7 @@ import {
 	IDelverReadMemoryWire,
 } from '../common/delverAnalysisService.js';
 import { IBasicBlocksResult, ICallGraphResult, ICallPathsResult, IDataRangeCorrectionWire,
-	IFunctionCorrectionWire, IFunctionProfileResult, IFunctionsResult, IGetExportsResult, IGetImageInfoResult, IGetImportsResult, IGlobalAccessesResult, IGlobalsResult, IListingWindowResult, IScanStringsResult, ISetCorrectionsResult, IStringsResult, IXrefIndexResult, IXrefsResult } from '../common/protocol.generated.js';
+	IFunctionCorrectionWire, IFunctionProfileResult, IFunctionsResult, IGetExportsResult, IGetImageInfoResult, IGetImportsResult, IGlobalAccessesResult, IGlobalsResult, IListingWindowResult, IScanStringsResult, ISearchImmediatesResult, ISetCorrectionsResult, IStringsResult, IXrefIndexResult, IXrefsResult } from '../common/protocol.generated.js';
 import { TargetConfig } from '../common/target.js';
 import { DelverAnalysisSession } from './analysisSession.js';
 import { discoverGhidraHeadless, GHIDRA_PINNED_VERSION, runGhidraHeadless } from './ghidraHeadlessDecompiler.js';
@@ -142,6 +142,10 @@ export class DelverAnalysisService extends Disposable implements IDelverAnalysis
 
 	async scanStrings(sessionId: AnalysisSessionId, fromRva: string, maxStrings: number): Promise<IScanStringsResult> {
 		return this.session(sessionId).scanStrings(fromRva, maxStrings);
+	}
+
+	async searchImmediates(sessionId: AnalysisSessionId, value: string, width: number | undefined, maxMatches: number): Promise<ISearchImmediatesResult> {
+		return this.session(sessionId).searchImmediates(value, width, maxMatches);
 	}
 
 	async readMemory(sessionId: AnalysisSessionId, space: 'image' | 'file', address: string, count: number): Promise<IDelverReadMemoryWire> {

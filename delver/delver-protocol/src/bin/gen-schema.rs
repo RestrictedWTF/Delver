@@ -26,6 +26,7 @@ use delver_protocol::{
 	ListingWindowRowWire, MomentKindWire, MomentWire, OpenImageParams, OpenImageResult, RangeWire,
 	ReadMemoryParams, ReadMemoryResult, Request, ResolutionConfidenceWire, ResolvedImportWire,
 	Response, RowForAddressParams, RowForAddressResult, RpcError, ScanStringsParams,
+	SearchImmediatesParams, SearchImmediatesResult,
 	ScanStringsResult, SectionWire, SeedSourceWire, SetCorrectionsParams, SetCorrectionsResult,
 	SignatureFieldReasonWire, SignatureFieldWire, StringEncodingWire, StringWire, StringsResult,
 	SubsystemWire, TargetCapabilityWire, TargetDescriptorWire, TlsWire, XrefIndexParams,
@@ -62,6 +63,8 @@ fn register_definitions(generator: &mut SchemaGenerator) {
 		// Analysis server (v1).
 		OpenImageParams,
 		ScanStringsParams,
+		SearchImmediatesParams,
+		SearchImmediatesResult,
 		ScanStringsResult,
 		SetCorrectionsParams,
 		SetCorrectionsResult,

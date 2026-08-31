@@ -32,6 +32,7 @@ use delver_protocol::{
 	OpenImageParams, OpenImageResult, RangeWire, Request, ResolutionConfidenceWire,
 	ResolvedImportWire,
 	Response, RowForAddressParams, RowForAddressResult, RpcError, ScanStringsParams,
+	SearchImmediatesParams, SearchImmediatesResult, ImmediateMatchWire,
 	ScanStringsResult, SetCorrectionsParams, SetCorrectionsResult, SignatureFieldReasonWire,
 	SignatureFieldWire, StringEncodingWire, StringWire, StringsResult, TargetCapabilityWire,
 	TargetDescriptorWire, XrefIndexParams, XrefIndexResult, XrefKindWire, XrefWire, XrefsParams,
@@ -166,6 +167,7 @@ fn handle(request: &Request, state: &Arc<Mutex<State>>) -> Response {
 		"analysis/xrefIndex" => xref_index(request, state),
 		"analysis/setCorrections" => set_corrections(request, state),
 		"analysis/scanStrings" => scan_strings(request, state),
+		"analysis/searchImmediates" => search_immediates(request, state),
 		"analysis/strings" => strings(request, state),
 		other => Err(RpcError::domain(
 			ErrorKind::UnsupportedCapability,
@@ -1368,6 +1370,12 @@ fn set_corrections(
 /// the window only has to be big enough that walking is not all it does.
 const MAX_SCANNED_STRINGS: usize = 4096;
 
+/// Matches one `analysis/searchImmediates` response carries.
+///
+/// A constant like 0 or 1 is used everywhere, so this bound is reached often and
+/// the result says so rather than implying the list is the whole answer.
+const MAX_IMMEDIATE_MATCHES: usize = 4096;
+
 /// Re-scans a bounded window of the image for strings.
 ///
 /// `analysis/strings` serves the list retained when the image was analysed,
@@ -1375,6 +1383,72 @@ const MAX_SCANNED_STRINGS: usize = 4096;
 /// binaries in a stock `System32` reach. Everything past it was unreachable by
 /// any call. This produces the strings on demand instead, so the cap bounds one
 /// answer rather than the image.
+fn search_immediates(
+	request: &Request,
+	state: &Arc<Mutex<State>>,
+) -> Result<serde_json::Value, RpcError> {
+	let params: SearchImmediatesParams = parse_params(request)?;
+	let state = state
+		.lock()
+		.map_err(|_| RpcError::domain(ErrorKind::TargetBusy, "analysis state lock is poisoned"))?;
+	let image = state
+		.image
+		.as_ref()
+		.ok_or_else(|| RpcError::domain(ErrorKind::NotAttached, "no image is open"))?;
+	if image.id != params.image_id {
+		return Err(RpcError::domain(
+			ErrorKind::InvalidAddress,
+			format!("unknown image id {}", params.image_id),
+		));
+	}
+	if let Some(width) = params.width {
+		if !matches!(width, 8 | 16 | 32 | 64) {
+			return Err(RpcError::domain(
+				ErrorKind::InvalidAddress,
+				format!("width must be 8, 16, 32 or 64, not {width}"),
+			));
+		}
+	}
+	// An architecture with no decoder cannot be searched for encoded constants,
+	// and answering zero would say the image uses none.
+	let Some(bitness) = delver_disasm::Bitness::from_arch(&image.parsed.arch) else {
+		return Err(RpcError::domain(
+			ErrorKind::UnsupportedCapability,
+			format!(
+				"no disassembler for architecture {}, so its instructions were never decoded",
+				image.parsed.arch
+			),
+		));
+	};
+
+	let limit = resolve_limit(params.max_matches, MAX_IMMEDIATE_MATCHES);
+	let found = delver_analysis::immediates::search_immediates(
+		&image.parsed,
+		&image.bytes,
+		&image.coverage,
+		&image.analysis.instructions,
+		&delver_disasm::Disassembler::new(bitness),
+		params.value,
+		params.width,
+		limit,
+	);
+
+	serde_json::to_value(SearchImmediatesResult {
+		matches: found
+			.hits
+			.into_iter()
+			.map(|hit| ImmediateMatchWire {
+				rva: hit.rva,
+				value: hit.value,
+				width: hit.width,
+			})
+			.collect(),
+		total: found.total as u64,
+		list_truncated: found.truncated,
+	})
+	.map_err(|error| RpcError::protocol(-32603, format!("serialising result: {error}")))
+}
+
 fn scan_strings(
 	request: &Request,
 	state: &Arc<Mutex<State>>,

@@ -136,6 +136,7 @@ export const enum DelverAgentCapabilityId {
 	ReadBytes = 'delver_read_bytes',
 	SearchBytes = 'delver_search_bytes',
 	SearchInstructions = 'delver_search_instructions',
+	SearchImmediates = 'delver_search_immediates',
 	MakeSignature = 'delver_make_signature',
 	ListSignatures = 'delver_list_signatures',
 	SaveSignature = 'delver_save_signature',
@@ -252,6 +253,11 @@ export const DELVER_AGENT_CAPABILITIES: readonly IDelverAgentCapability[] = [
 		id: DelverAgentCapabilityId.SearchInstructions, group: 'analysis', kind: 'read', requiresAttachedTarget: true,
 		title: 'Delver Search Instructions',
 		description: 'Searches decoded instructions by exact mnemonic and optional formatted operand-text substring. Requires the sample to be attached.',
+	},
+	{
+		id: DelverAgentCapabilityId.SearchImmediates, group: 'analysis', kind: 'read', requiresAttachedTarget: true,
+		title: 'Delver Search Immediates',
+		description: 'Finds every instruction encoding a given constant as an immediate, matched by value rather than by formatted text. Requires the sample to be attached.',
 	},
 	{
 		id: DelverAgentCapabilityId.MakeSignature, group: 'analysis', kind: 'read', requiresAttachedTarget: true,
@@ -780,6 +786,7 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 		this.handlers.set(DelverAgentCapabilityId.ReadBytes, context => this.handleReadBytes(context));
 		this.handlers.set(DelverAgentCapabilityId.SearchBytes, context => this.handleSearchBytes(context));
 		this.handlers.set(DelverAgentCapabilityId.SearchInstructions, context => this.handleSearchInstructions(context));
+		this.handlers.set(DelverAgentCapabilityId.SearchImmediates, context => this.handleSearchImmediates(context));
 		this.handlers.set(DelverAgentCapabilityId.MakeSignature, context => this.handleMakeSignature(context));
 		this.handlers.set(DelverAgentCapabilityId.ListSignatures, context => this.handleListSignatures(context));
 		this.handlers.set(DelverAgentCapabilityId.SaveSignature, context => this.handleSaveSignature(context));
@@ -1885,6 +1892,53 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 						end: toWireAddress(BigInt(rows[rows.length - 1].rva) + BigInt(rows[rows.length - 1].len)),
 					}],
 				}),
+			}],
+		};
+	}
+
+	private async handleSearchImmediates(context: IHandlerContext): Promise<IHandlerOutput> {
+		const session = this.requireAttached();
+		// Parsed as an address because that is what a canonical `"0x…"` string
+		// is on this surface; the value is a constant rather than a location,
+		// and nothing here treats it as one.
+		const value = parseWireAddress(context.args.value, 'value');
+		const width = immediateWidth(context.args.width);
+		const count = boundedCount(context.args.count, DELVER_AGENT_LIMITS.instructionSearchMatches);
+		const result = await this.analysisService.searchImmediates(session.sessionId, toWireAddress(value), width, count);
+		this.throwIfCancelled(context.token);
+		const functions = await this.resolvedFunctions(session);
+		this.throwIfCancelled(context.token);
+
+		return {
+			data: {
+				matches: result.matches.map(match => {
+					const owner = containingFunction(functions, BigInt(match.rva));
+					return {
+						address: match.rva,
+						value: match.value,
+						width: match.width,
+						...(owner ? { inFunction: owner.name } : {}),
+					};
+				}),
+				total: result.total,
+			},
+			// A capped search has not shown that no further use exists, and the
+			// difference between `total` and the returned list is exactly the
+			// part a caller must not read as absence.
+			completeness: result.list_truncated ? 'partial' : 'complete',
+			...(result.list_truncated
+				? {
+					omitted: {
+						count: result.total - result.matches.length,
+						reason: `More instructions encode this constant than one response carries: ${result.total} were found and ${result.matches.length} returned. Narrow by width, or read the list as examples rather than as every use.`,
+					},
+				}
+				: {}),
+			provenance: [{
+				source: 'analysis',
+				detail: `Instructions encoding ${toWireAddress(value)} as an immediate, matched by encoded value.`,
+				contentHash: session.contentHash,
+				untrusted: true,
 			}],
 		};
 	}
@@ -4771,6 +4825,23 @@ function requiredBoundedText(value: unknown, maxLength: number, name: string): s
 		throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, `${name} must contain between 1 and ${maxLength} characters.`);
 	}
 	return text;
+}
+
+/**
+ * The encoded field width a search is restricted to, in bits.
+ *
+ * Absent means any width. An unrecognized width is refused rather than ignored:
+ * silently widening a search the caller meant to narrow would answer a different
+ * question and look like the one they asked.
+ */
+function immediateWidth(value: unknown): number | undefined {
+	if (value === undefined || value === null) {
+		return undefined;
+	}
+	if (value !== 8 && value !== 16 && value !== 32 && value !== 64) {
+		throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, 'width must be 8, 16, 32 or 64.');
+	}
+	return value;
 }
 
 function optionalBoundedText(value: unknown, maxLength: number, name: string): string | undefined {

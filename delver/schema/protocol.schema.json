@@ -1614,6 +1614,31 @@
       ],
       "type": "object"
     },
+    "ImmediateMatchWire": {
+      "description": "One instruction encoding the requested constant.",
+      "properties": {
+        "rva": {
+          "description": "RVA of the matching instruction.",
+          "type": "string"
+        },
+        "value": {
+          "description": "The immediate as encoded, zero-extended.",
+          "type": "string"
+        },
+        "width": {
+          "description": "Encoded width of the field in bits.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "rva",
+        "value",
+        "width"
+      ],
+      "type": "object"
+    },
     "ImportedModuleWire": {
       "description": "An imported module on the wire.\n\nThe signals below are per module on purpose: the symbol cap is applied per module, and one unreadable thunk array must not cast doubt on the other four thousand modules that parsed cleanly.",
       "properties": {
@@ -2502,6 +2527,68 @@
       },
       "required": [
         "strings"
+      ],
+      "type": "object"
+    },
+    "SearchImmediatesParams": {
+      "description": "Request payload for `analysis/searchImmediates`.\n\nStructured, unlike an operand-text search: `0x1f4`, `500` and `1F4h` are one constant written three ways, and matching the formatted text finds whichever the formatter chose. This matches the value the bytes encode.",
+      "properties": {
+        "image_id": {
+          "description": "Image handle.",
+          "type": "string"
+        },
+        "max_matches": {
+          "default": 0,
+          "description": "Maximum matches returned. Zero requests the server's own cap.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "value": {
+          "description": "The constant to find, as a canonical `\"0x...\"` string.\n\nRead as unsigned. A negative constant is written as the bits it assembles to — `0xffffffff` finds `cmp eax, -1`, and so does `0xffffffffffffffff`, because a field is matched by both its unsigned and its sign-extended reading.",
+          "type": "string"
+        },
+        "width": {
+          "description": "Restrict to one encoded field width in bits — 8, 16, 32 or 64.\n\nAbsent matches any width. The same number reached through a byte field and a dword field are different encodings, and separating them is what this narrows.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "image_id",
+        "value"
+      ],
+      "type": "object"
+    },
+    "SearchImmediatesResult": {
+      "description": "Response payload for `analysis/searchImmediates`.",
+      "properties": {
+        "list_truncated": {
+          "description": "Whether the bound dropped matches.\n\nA bounded search has not shown that no further use exists, which is the part a caller must not read as absence.",
+          "type": "boolean"
+        },
+        "matches": {
+          "description": "Matches in ascending address order.",
+          "items": {
+            "$ref": "#/definitions/ImmediateMatchWire"
+          },
+          "type": "array"
+        },
+        "total": {
+          "description": "Matches found before the response bound was applied.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "list_truncated",
+        "matches",
+        "total"
       ],
       "type": "object"
     },

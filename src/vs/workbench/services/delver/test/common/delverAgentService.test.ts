@@ -35,6 +35,7 @@ import {
 	MomentKindWire,
 	IStringsResult,
 	IScanStringsResult,
+	ISearchImmediatesResult,
 	ISetCorrectionsResult,
 	IXrefsResult,
 	IXrefWire,
@@ -331,6 +332,14 @@ class FakeSessionService implements Partial<IDelverSessionService> {
 }
 
 class FakeAnalysisService implements Partial<IDelverAnalysisService> {
+
+	immediateCalls: { value: string; width: number | undefined; count: number }[] = [];
+	immediateResult: ISearchImmediatesResult = { matches: [], total: 0, list_truncated: false };
+
+	async searchImmediates(_sessionId: AnalysisSessionId, value: string, width: number | undefined, maxMatches: number): Promise<ISearchImmediatesResult> {
+		this.immediateCalls.push({ value, width, count: maxMatches });
+		return this.immediateResult;
+	}
 	readonly calls: string[] = [];
 	/** Rejects the next read, as the shared-process channel would. */
 	failWith: Error | undefined;
@@ -3388,6 +3397,76 @@ suite('DelverAgentService', () => {
 			await errorCode(service, { capability: 'delver_function_handshake', args: {} }),
 			'CAPABILITY_UNAVAILABLE',
 		);
+	});
+
+	test('an immediate search names the constant it matched and the function using it', async () => {
+		const { service, session, analysis } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		session.functionsResult = { functions: [...FUNCTIONS] };
+		analysis.immediateResult = {
+			matches: [
+				{ rva: '0x1040', value: '0x5a4d', width: 32 },
+				{ rva: '0x2010', value: '0x5a4d', width: 16 },
+			],
+			total: 2,
+			list_truncated: false,
+		};
+
+		const payload = payloadOf<Record<string, unknown>>(await service.invoke({
+			capability: 'delver_search_immediates', args: { value: '0x5a4d' },
+		}, CancellationToken.None));
+
+		assert.deepStrictEqual({ payload, forwarded: analysis.immediateCalls }, {
+			payload: {
+				matches: [
+					// 0x1040 falls inside FUNCTIONS[0]; 0x2010 inside FUNCTIONS[1].
+					{ address: '0x1040', value: '0x5a4d', width: 32, inFunction: 'SUB_1000' },
+					{ address: '0x2010', value: '0x5a4d', width: 16, inFunction: 'SUB_2000' },
+				],
+				total: 2,
+			},
+			forwarded: [{ value: '0x5a4d', width: undefined, count: 100 }],
+		});
+	});
+
+	test('a capped immediate search is partial and says the list is examples', async () => {
+		// 0 and 1 are used everywhere. A caller that read a capped list as every
+		// use would conclude a constant is unused outside it.
+		const { service, session, analysis } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		session.functionsResult = { functions: [...FUNCTIONS] };
+		analysis.immediateResult = {
+			matches: [{ rva: '0x1040', value: '0x1', width: 8 }],
+			total: 4096,
+			list_truncated: true,
+		};
+
+		const result = await service.invoke({
+			capability: 'delver_search_immediates', args: { value: '0x1', width: 8 },
+		}, CancellationToken.None);
+
+		assert.deepStrictEqual({
+			completeness: result.completeness,
+			mentionsTotal: (result.omitted?.reason ?? '').includes('4096'),
+			omittedCount: result.omitted?.count,
+			forwarded: analysis.immediateCalls,
+		}, {
+			completeness: 'partial',
+			mentionsTotal: true,
+			omittedCount: 4095,
+			forwarded: [{ value: '0x1', width: 8, count: 100 }],
+		});
+	});
+
+	test('an unusable width is refused rather than widened to any width', async () => {
+		const { service, session } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		session.functionsResult = { functions: [...FUNCTIONS] };
+
+		assert.deepStrictEqual([
+			await errorCode(service, { capability: 'delver_search_immediates', args: { value: '0x1', width: 24 } }),
+			await errorCode(service, { capability: 'delver_search_immediates', args: {} }),
+		], ['INVALID_ARGUMENT', 'INVALID_ARGUMENT']);
 	});
 
 	test('reads the response bound as well as the scanner cap', async () => {

@@ -6,7 +6,7 @@
 import { Event } from '../../../base/common/event.js';
 import { createDecorator } from '../../instantiation/common/instantiation.js';
 import { IBasicBlocksResult, ICallGraphResult, ICallPathsResult, IDataRangeCorrectionWire,
-	IFunctionCorrectionWire, IFunctionProfileResult, IFunctionsResult, IGetExportsResult, IGetImageInfoResult, IGetImportsResult, IGlobalAccessesResult, IGlobalsResult, IListingWindowResult, IMomentWire, IOpenImageResult, IRangeWire, IScanStringsResult, ISetCorrectionsResult, IStringsResult, IXrefIndexResult, IXrefsResult } from './protocol.generated.js';
+	IFunctionCorrectionWire, IFunctionProfileResult, IFunctionsResult, IGetExportsResult, IGetImageInfoResult, IGetImportsResult, IGlobalAccessesResult, IGlobalsResult, IListingWindowResult, IMomentWire, IOpenImageResult, IRangeWire, IScanStringsResult, ISearchImmediatesResult, ISetCorrectionsResult, IStringsResult, IXrefIndexResult, IXrefsResult } from './protocol.generated.js';
 import { TargetConfig } from './target.js';
 
 export const IDelverAnalysisService = createDecorator<IDelverAnalysisService>('delverAnalysisService');
@@ -317,6 +317,15 @@ export interface IDelverAnalysisService {
 	 * binaries reach. This is how a caller reaches past it.
 	 */
 	scanStrings(sessionId: AnalysisSessionId, fromRva: string, maxStrings: number): Promise<IScanStringsResult>;
+
+	/**
+	 * Finds every decoded instruction encoding `value` as an immediate.
+	 *
+	 * `value` is a canonical `"0x..."` string read as unsigned; a negative
+	 * constant is written as the bits it assembles to. `width` narrows to one
+	 * encoded field size in bits (8, 16, 32 or 64) and is absent to match any.
+	 */
+	searchImmediates(sessionId: AnalysisSessionId, value: string, width: number | undefined, maxMatches: number): Promise<ISearchImmediatesResult>;
 
 	/** Starts the selected backend and reports the backend that actually answered. */
 	decompilerStatus(ghidraHome: string | undefined, pythonPath: string | undefined, backend?: 'pyghidra' | 'headless'): Promise<DelverDecompilerStatusWire>;

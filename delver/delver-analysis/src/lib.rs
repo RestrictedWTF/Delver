@@ -35,6 +35,7 @@ pub mod control_flow;
 pub mod corrections;
 pub mod entry_role;
 pub mod globals;
+pub mod immediates;
 pub mod index;
 pub mod listing;
 pub mod strings;

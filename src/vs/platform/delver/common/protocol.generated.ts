@@ -1145,6 +1145,24 @@ export interface IImageQueryParams {
 }
 
 /**
+ * One instruction encoding the requested constant.
+ */
+export interface IImmediateMatchWire {
+	/**
+	 * RVA of the matching instruction.
+	 */
+	rva: string;
+	/**
+	 * The immediate as encoded, zero-extended.
+	 */
+	value: string;
+	/**
+	 * Encoded width of the field in bits.
+	 */
+	width: number;
+}
+
+/**
  * An imported module on the wire.
  *
  * The signals below are per module on purpose: the symbol cap is applied per module, and one unreadable thunk array must not cast doubt on the other four thousand modules that parsed cleanly.
@@ -1767,6 +1785,54 @@ export interface IScanStringsResult {
 	 * Strings found in this window, in ascending address order.
 	 */
 	strings: IStringWire[];
+}
+
+/**
+ * Request payload for `analysis/searchImmediates`.
+ *
+ * Structured, unlike an operand-text search: `0x1f4`, `500` and `1F4h` are one constant written three ways, and matching the formatted text finds whichever the formatter chose. This matches the value the bytes encode.
+ */
+export interface ISearchImmediatesParams {
+	/**
+	 * Image handle.
+	 */
+	image_id: string;
+	/**
+	 * Maximum matches returned. Zero requests the server's own cap.
+	 */
+	max_matches?: number;
+	/**
+	 * The constant to find, as a canonical `"0x..."` string.
+	 *
+	 * Read as unsigned. A negative constant is written as the bits it assembles to — `0xffffffff` finds `cmp eax, -1`, and so does `0xffffffffffffffff`, because a field is matched by both its unsigned and its sign-extended reading.
+	 */
+	value: string;
+	/**
+	 * Restrict to one encoded field width in bits — 8, 16, 32 or 64.
+	 *
+	 * Absent matches any width. The same number reached through a byte field and a dword field are different encodings, and separating them is what this narrows.
+	 */
+	width?: number;
+}
+
+/**
+ * Response payload for `analysis/searchImmediates`.
+ */
+export interface ISearchImmediatesResult {
+	/**
+	 * Whether the bound dropped matches.
+	 *
+	 * A bounded search has not shown that no further use exists, which is the part a caller must not read as absence.
+	 */
+	list_truncated: boolean;
+	/**
+	 * Matches in ascending address order.
+	 */
+	matches: IImmediateMatchWire[];
+	/**
+	 * Matches found before the response bound was applied.
+	 */
+	total: number;
 }
 
 /**
