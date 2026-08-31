@@ -4,7 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { localize } from '../../../../nls.js';
-import { IDecompilationSemanticComposite, IDecompilationSemanticDeclaration, IDecompilationSemanticDependencies, IDecompiledAddressRange, IDecompiledFunction, IDecompiledLineMapping, IDecompiledVariable } from './delverDecompilerService.js';
+import { IDecompilationSemanticComposite,
+	IDecompilationSemanticEnum, IDecompilationSemanticDeclaration, IDecompilationSemanticDependencies, IDecompiledAddressRange, IDecompiledFunction, IDecompiledLineMapping, IDecompiledVariable } from './delverDecompilerService.js';
 
 export const GHIDRA_DECOMPILER_BACKEND_ID = 'ghidra-headless';
 export const GHIDRA_DECOMPILER_SCHEMA_VERSION = 1;
@@ -101,18 +102,23 @@ function readSemanticDeclarations(value: unknown, path: string): readonly IDecom
 }
 
 function readSemanticComposites(value: unknown, path: string): readonly IDecompilationSemanticComposite[] {
-	const composites = readArray(value, path).map((entry, index) => {
+	const composites = readArray(value, path).map((entry, index): IDecompilationSemanticComposite => {
 		const entryPath = `${path}[${index}]`;
+		// The kind decides the shape, so it is read before the shape is checked.
+		// Failing closed on a kind this build does not know matters more than the
+		// message: a union decoded as a struct would lay every member out at its
+		// own offset, which is a different type wearing the analyst's name.
+		const kind = (entry as { kind?: unknown })?.kind;
+		if (kind !== 'struct' && kind !== 'union' && kind !== 'enum') {
+			invalidOutput(`${entryPath}.kind must be "struct", "union" or "enum"`);
+		}
+		if (kind === 'enum') {
+			return readSemanticEnum(entry, entryPath);
+		}
 		const object = readObject(entry, entryPath, ['name', 'kind', 'size', 'fields']);
 		const name = readString(object.name, `${entryPath}.name`, false);
 		if (!identifierPattern.test(name)) {
 			invalidOutput(`${entryPath}.name must be a C identifier`);
-		}
-		// Fail closed on a kind this build does not know. A union decoded as a
-		// struct would lay every field out at its own offset, which is a
-		// different type wearing the analyst's name for this one.
-		if (object.kind !== 'struct' && object.kind !== 'union') {
-			invalidOutput(`${entryPath}.kind must be "struct"`);
 		}
 		const size = readPositiveInteger(object.size, `${entryPath}.size`);
 		const fields = readArray(object.fields, `${entryPath}.fields`).map((field, fieldIndex) => {
@@ -132,12 +138,23 @@ function readSemanticComposites(value: unknown, path: string): readonly IDecompi
 			}
 			return { offset, name: fieldName, type };
 		});
-		for (let index = 1; index < fields.length; index++) {
-			if (fields[index - 1].offset >= fields[index].offset) {
-				invalidOutput(`${entryPath}.fields must be in ascending offset order`);
+		if (kind === 'union') {
+			// Every member of a union starts at the beginning of it. Requiring
+			// that rather than ignoring the offset keeps a saved layout that
+			// means something else from being read back as one that does not.
+			for (const field of fields) {
+				if (field.offset !== 0) {
+					invalidOutput(`${entryPath}.fields must all begin at offset 0 in a union`);
+				}
+			}
+		} else {
+			for (let index = 1; index < fields.length; index++) {
+				if (fields[index - 1].offset >= fields[index].offset) {
+					invalidOutput(`${entryPath}.fields must be in ascending offset order`);
+				}
 			}
 		}
-		return { name, kind: object.kind as 'struct' | 'union', size, fields };
+		return { name, kind, size, fields };
 	});
 	for (let index = 1; index < composites.length; index++) {
 		if (composites[index - 1].name >= composites[index].name) {
@@ -157,6 +174,36 @@ function readSemanticComposites(value: unknown, path: string): readonly IDecompi
  * so leaving the version at 1 would make every pre-existing saved function look
  * stale and re-decompile the entire project on first open.
  */
+function readSemanticEnum(entry: unknown, entryPath: string): IDecompilationSemanticEnum {
+	const object = readObject(entry, entryPath, ['name', 'kind', 'size', 'members']);
+	const name = readString(object.name, `${entryPath}.name`, false);
+	if (!identifierPattern.test(name)) {
+		invalidOutput(`${entryPath}.name must be a C identifier`);
+	}
+	const size = readPositiveInteger(object.size, `${entryPath}.size`);
+	if (size !== 1 && size !== 2 && size !== 4) {
+		invalidOutput(`${entryPath}.size must be 1, 2 or 4 bytes`);
+	}
+	const members = readArray(object.members, `${entryPath}.members`).map((member, memberIndex) => {
+		const memberPath = `${entryPath}.members[${memberIndex}]`;
+		const memberObject = readObject(member, memberPath, ['name', 'value']);
+		const memberName = readString(memberObject.name, `${memberPath}.name`, false);
+		if (!identifierPattern.test(memberName)) {
+			invalidOutput(`${memberPath}.name must be a C identifier`);
+		}
+		if (typeof memberObject.value !== 'number' || !Number.isSafeInteger(memberObject.value)) {
+			invalidOutput(`${memberPath}.value must be an integer`);
+		}
+		return { name: memberName, value: memberObject.value as number };
+	});
+	for (let index = 1; index < members.length; index++) {
+		if (members[index - 1].name >= members[index].name) {
+			invalidOutput(`${entryPath}.members must be in ascending name order`);
+		}
+	}
+	return { name, kind: 'enum', size, members };
+}
+
 function readSemanticDependencies(value: unknown): IDecompilationSemanticDependencies {
 	if (value === undefined) {
 		return { schemaVersion: 2, composites: [], dataTypes: [], functionPrototypes: [] };

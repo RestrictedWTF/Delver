@@ -2378,5 +2378,43 @@ layout it invented.
 Verified: Rust workspace green, corpus 7/7, client typecheck clean, 410 Delver
 TS tests (up 4), worker 15/15 (up 2).
 
-Next in that row: enums, which do need a new member shape and therefore a
-snapshot version.
+Next in that row: enums.
+
+## Enums, and a bug the unions landed with
+
+Enums complete the "unions and enums" half of the type-system row. They travel
+the same path — proposal, type anchor, review, snapshot, transactional
+application — and PyGhidra defines them as an `EnumDataType`.
+
+**No snapshot version bump, and the previous entry said there would be one.**
+The reasoning that made unions safe holds for enums too: the envelope's key set
+is what a version pins, and neither adds a key to it. What an enum changes is the
+*entry* shape — `members` rather than `fields` — and that is checked per entry,
+after the kind is read. An older worker meeting an enum refuses it, which is the
+direction to fail in.
+
+Reading the kind before the shape is the load-bearing detail. It means a kind a
+build does not implement is refused by name rather than by a key-set message
+about fields, which is what a reader would otherwise be told when the real
+problem is that their worker is too old.
+
+Members are canonicalized into ascending name order, the way struct fields are
+sorted by offset: declaration order is an encoding detail and the snapshot needs
+one canonical form for its digest to be stable. Duplicate *values* are kept —
+two names for one constant is what a real header does. Values accept either
+signedness, because `-1` and `0xFFFFFFFF` are the same bits.
+
+Enums are limited to 1, 2 and 4 bytes. An 8-byte constant does not survive a
+JSON number above 2⁵³ ([ADR 0001](../history/adr/0001-wire-protocol-framing-and-encoding.md)),
+and a truncated constant turns a comparison against it into a different
+comparison — so the width is refused rather than the value narrowed.
+
+**A bug the union change shipped with, found while adding enum coverage.**
+`readSemanticComposites` decodes the snapshot carried inside *saved* pseudocode,
+and it still enforced ascending field offsets. A union's members all sit at
+offset 0, so every function saved against a union would have been rejected on
+read-back and silently re-decompiled. The decoder is now kind-aware, and a test
+reads all three kinds back through it — the test that would have caught it.
+
+Verified: Rust workspace green, corpus 7/7, client typecheck clean, 411 Delver TS
+tests, worker 17/17.

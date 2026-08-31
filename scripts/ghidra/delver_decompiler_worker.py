@@ -36,8 +36,13 @@ MAX_SEMANTIC_DECLARATIONS = 10000
 MAX_DECLARATION_CHARACTERS = 2048
 MAX_SEMANTIC_COMPOSITES = 1000
 MAX_COMPOSITE_FIELDS = 1000
+MAX_ENUM_MEMBERS = 4096
+# 1, 2 and 4 byte enums only. An 8-byte value does not survive a JSON number
+# above 2^53 (ADR 0001), and truncating a constant is how a comparison against
+# it silently becomes a different comparison. Refused rather than narrowed.
+ENUM_SIZES = (1, 2, 4)
 MAX_COMPOSITE_SIZE_BYTES = 1024 * 1024
-COMPOSITE_KINDS = ("struct", "union")
+COMPOSITE_KINDS = ("struct", "union", "enum")
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Each accepted schema version pins its own key set. A sender whose payload does
 # not match the version it claims is out of step with this worker, and guessing
@@ -104,6 +109,7 @@ class PyGhidraDriver:
 		self._allowed_data_types: Any = None
 		self._structure_data_type_type: Any = None
 		self._union_data_type_type: Any = None
+		self._enum_data_type_type: Any = None
 		self._data_type_conflict_handler: Any = None
 		self._targets: dict[str, Target] = {}
 		self._active_monitors: dict[str, Any] = {}
@@ -129,7 +135,7 @@ class PyGhidraDriver:
 				from ghidra.app.cmd.function import ApplyFunctionSignatureCmd
 				from ghidra.app.util.parser import FunctionSignatureParser
 				from ghidra.framework import Application
-				from ghidra.program.model.data import DataTypeConflictHandler, StructureDataType, UnionDataType
+				from ghidra.program.model.data import DataTypeConflictHandler, EnumDataType, StructureDataType, UnionDataType
 				from ghidra.program.model.symbol import SourceType
 				from ghidra.util.data import DataTypeParser
 		except Exception as error:
@@ -147,6 +153,7 @@ class PyGhidraDriver:
 		self._allowed_data_types = DataTypeParser.AllowedDataTypes
 		self._structure_data_type_type = StructureDataType
 		self._union_data_type_type = UnionDataType
+		self._enum_data_type_type = EnumDataType
 		self._data_type_conflict_handler = DataTypeConflictHandler
 		self._backend_version = str(Application.getApplicationVersion())
 		self._started = True
@@ -523,6 +530,18 @@ def apply_composites(driver: PyGhidraDriver, data_type_manager: Any, data_type_p
 	registered: dict[str, Any] = {}
 	for composite in composites:
 		try:
+			if composite["kind"] == "enum":
+				# An enum is complete at registration: it has no member that can
+				# name another composite, so there is nothing for a second pass
+				# to resolve.
+				enumeration = driver._enum_data_type_type(composite["name"], composite["size"], data_type_manager)
+				for member in composite["members"]:
+					enumeration.add(member["name"], member["value"])
+				registered[composite["name"]] = data_type_manager.addDataType(
+					enumeration,
+					driver._data_type_conflict_handler.REPLACE_HANDLER,
+				)
+				continue
 			if composite["kind"] == "union":
 				# A union has no offsets to preserve and Ghidra sizes it from its
 				# largest member, so it takes the name alone.
@@ -544,6 +563,8 @@ def apply_composites(driver: PyGhidraDriver, data_type_manager: Any, data_type_p
 			) from error
 
 	for composite in composites:
+		if composite["kind"] == "enum":
+			continue
 		try:
 			populate_composite(data_type_parser, registered[composite["name"]], composite)
 		except WorkerError:
@@ -815,30 +836,72 @@ def required_semantic_composites(value: Any, path: str) -> list[dict[str, Any]]:
 	previous_name = ""
 	for index, entry in enumerate(value):
 		entry_path = f"{path}[{index}]"
-		if not isinstance(entry, dict) or set(entry) != {"name", "kind", "size", "fields"}:
-			raise WorkerError("invalid_params", f"{entry_path} must contain exactly name, kind, size and fields.")
-		name = required_identifier(entry, "name", entry_path)
+		if not isinstance(entry, dict):
+			raise WorkerError("invalid_params", f"{entry_path} must be an object.")
+		# The kind is read before its shape is checked, so a kind this worker
+		# does not implement is refused by name rather than by a key-set message
+		# that reads like the sender got the spelling wrong.
 		kind = entry.get("kind")
-		# Unions and the rest are not implemented yet. Treating an unrecognized
-		# kind as a struct would lay out storage the analyst never described, so
-		# refuse it and let the sender learn this worker is too old.
 		if kind not in COMPOSITE_KINDS:
 			kinds = ", ".join(COMPOSITE_KINDS)
 			raise WorkerError("invalid_params", f"{entry_path}.kind must be one of {kinds}.")
+		members_key = "members" if kind == "enum" else "fields"
+		if set(entry) != {"name", "kind", "size", members_key}:
+			raise WorkerError("invalid_params", f"{entry_path} must contain exactly name, kind, size and {members_key}.")
+		name = required_identifier(entry, "name", entry_path)
 		size = entry.get("size")
-		if not isinstance(size, int) or isinstance(size, bool) or size <= 0 or size > MAX_COMPOSITE_SIZE_BYTES:
+		if kind == "enum":
+			if size not in ENUM_SIZES or isinstance(size, bool):
+				sizes = ", ".join(str(value) for value in ENUM_SIZES)
+				raise WorkerError("invalid_params", f"{entry_path}.size must be one of {sizes} bytes for an enum.")
+		elif not isinstance(size, int) or isinstance(size, bool) or size <= 0 or size > MAX_COMPOSITE_SIZE_BYTES:
 			raise WorkerError(
 				"invalid_params",
 				f"{entry_path}.size must be a positive integer no larger than {MAX_COMPOSITE_SIZE_BYTES} bytes.",
 			)
 		if name <= previous_name:
 			raise WorkerError("invalid_params", f"{path} must contain unique composites in ascending name order.")
-		result.append({
-			"name": name,
-			"kind": kind,
-			"size": size,
-			"fields": required_composite_fields(entry.get("fields"), f"{entry_path}.fields", size, kind),
-		})
+		composite = {"name": name, "kind": kind, "size": size}
+		if kind == "enum":
+			composite["members"] = required_enum_members(entry.get("members"), f"{entry_path}.members", size)
+		else:
+			composite["fields"] = required_composite_fields(entry.get("fields"), f"{entry_path}.fields", size, kind)
+		result.append(composite)
+		previous_name = name
+	return result
+
+
+def required_enum_members(value: Any, path: str, size: int) -> list[dict[str, Any]]:
+	"""Validates one enum's members.
+
+	Names are unique and ascending, which is what makes the snapshot canonical
+	and therefore what makes its digest stable. Values may repeat: an alias for
+	an existing constant is a real thing a header does, and refusing it would
+	refuse the binary rather than the mistake.
+	"""
+	if not isinstance(value, list) or len(value) > MAX_ENUM_MEMBERS:
+		raise WorkerError("invalid_params", f"{path} must be an array with at most {MAX_ENUM_MEMBERS} entries.")
+	limit = 1 << (size * 8)
+	result: list[dict[str, Any]] = []
+	previous_name = ""
+	for index, entry in enumerate(value):
+		entry_path = f"{path}[{index}]"
+		if not isinstance(entry, dict) or set(entry) != {"name", "value"}:
+			raise WorkerError("invalid_params", f"{entry_path} must contain exactly name and value.")
+		name = required_identifier(entry, "name", entry_path)
+		if name <= previous_name:
+			raise WorkerError("invalid_params", f"{path} must contain unique members in ascending name order.")
+		member_value = entry.get("value")
+		if not isinstance(member_value, int) or isinstance(member_value, bool):
+			raise WorkerError("invalid_params", f"{entry_path}.value must be an integer.")
+		# Accepts either signedness, because a constant written as -1 and one
+		# written as 0xFFFFFFFF are the same bits and headers use both.
+		if member_value >= limit or member_value < -(limit >> 1):
+			raise WorkerError(
+				"invalid_params",
+				f"{entry_path}.value does not fit in the declared {size} bytes.",
+			)
+		result.append({"name": name, "value": member_value})
 		previous_name = name
 	return result
 

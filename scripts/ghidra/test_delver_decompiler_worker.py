@@ -254,6 +254,64 @@ class ProtocolTests(unittest.TestCase):
 		with self.assertRaises(WorkerError):
 			required_semantics(params)
 
+	def test_an_enum_carries_named_constants_and_bounds_them_by_its_size(self) -> None:
+		params = {"semantics": {"schemaVersion": 2, "composites": [{
+			"name": "Command",
+			"kind": "enum",
+			"size": 4,
+			"members": [
+				{"name": "CMD_PING", "value": 1},
+				{"name": "CMD_EXEC", "value": 2},
+			],
+		}], "dataTypes": [], "functionPrototypes": []}}
+		with self.assertRaises(WorkerError):
+			# Members ascend by name, which is what makes the snapshot canonical
+			# and therefore what keeps its digest stable. Declaration order is
+			# not it: these two are in value order, which is not name order.
+			required_semantics(params)
+
+		params["semantics"]["composites"][0]["members"] = [
+			{"name": "CMD_EXEC", "value": 2},
+			{"name": "CMD_PING", "value": 1},
+			{"name": "CMD_QUIT", "value": -1},
+		]
+
+		self.assertEqual(required_semantics(params)["composites"], [{
+			"name": "Command",
+			"kind": "enum",
+			"size": 4,
+			"members": [
+				{"name": "CMD_EXEC", "value": 2},
+				{"name": "CMD_PING", "value": 1},
+				# -1 and 0xFFFFFFFF are the same bits; headers write both.
+				{"name": "CMD_QUIT", "value": -1},
+			],
+		}])
+
+	def test_an_enum_refuses_a_shape_it_cannot_represent(self) -> None:
+		def snapshot(composite):
+			return {"semantics": {"schemaVersion": 2, "composites": [composite], "dataTypes": [], "functionPrototypes": []}}
+
+		invalid = (
+			# Eight-byte values do not survive a JSON number above 2^53.
+			{"name": "Wide", "kind": "enum", "size": 8, "members": []},
+			{"name": "Odd", "kind": "enum", "size": 3, "members": []},
+			# A value past what the declared width holds.
+			{"name": "Command", "kind": "enum", "size": 1, "members": [{"name": "BIG", "value": 256}]},
+			{"name": "Command", "kind": "enum", "size": 1, "members": [{"name": "SMALL", "value": -129}]},
+			{"name": "Command", "kind": "enum", "size": 4, "members": [{"name": "A", "value": "1"}]},
+			{"name": "Command", "kind": "enum", "size": 4, "members": [{"name": "A", "value": True}]},
+			# An enum carries members, not fields.
+			{"name": "Command", "kind": "enum", "size": 4, "fields": []},
+			{"name": "Command", "kind": "enum", "size": 4, "members": [{"name": "A", "value": 1, "comment": "x"}]},
+			{"name": "Command", "kind": "enum", "size": 4, "members": [{"name": "A", "value": 1}, {"name": "A", "value": 2}]},
+			# A struct carries fields, not members.
+			{"name": "Config", "kind": "struct", "size": 4, "members": []},
+		)
+		for composite in invalid:
+			with self.subTest(composite=composite), self.assertRaises(WorkerError):
+				required_semantics(snapshot(composite))
+
 	def test_server_writes_versioned_success_and_structured_error(self) -> None:
 		input_stream = io.StringIO(
 			'{"protocolVersion":1,"id":"1","method":"hello","params":{}}\n'

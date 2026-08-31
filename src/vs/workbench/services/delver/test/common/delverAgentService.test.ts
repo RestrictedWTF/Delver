@@ -3614,6 +3614,57 @@ suite('DelverAgentService', () => {
 		});
 	});
 
+	test('a proposed enum is canonicalized by name and bounded by its declared width', async () => {
+		const { service, session, interpretation } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		session.functionsResult = { functions: [...FUNCTIONS] };
+		const caller = { kind: 'model' as const, id: 'semantic-agent' };
+
+		await service.invoke({
+			capability: 'delver_propose_type', caller,
+			args: { proposals: [{
+				target: 'composite', composite: 'enum', name: 'Command', size: 4,
+				members: [
+					{ name: 'CMD_PING', value: 1 },
+					{ name: 'CMD_EXEC', value: 2 },
+					// An alias: two names for one value is what a header does.
+					{ name: 'CMD_ALIAS', value: 2 },
+					{ name: 'CMD_QUIT', value: -1 },
+				],
+			}] },
+		}, CancellationToken.None);
+
+		const enumOf = (fields: object) => ({ target: 'composite', composite: 'enum', name: 'E', size: 4, members: [], ...fields });
+		assert.deepStrictEqual({
+			// Sorted here rather than demanded of the caller: declaration order
+			// is an encoding detail, and the snapshot needs one canonical form.
+			stored: interpretation.proposals.map(edit => edit.value),
+			tooWide: await errorCode(service, { capability: 'delver_propose_type', caller, args: { proposals: [enumOf({ size: 8 })] } }),
+			pastWidth: await errorCode(service, { capability: 'delver_propose_type', caller, args: { proposals: [enumOf({ size: 1, members: [{ name: 'BIG', value: 256 }] })] } }),
+			duplicateName: await errorCode(service, { capability: 'delver_propose_type', caller, args: { proposals: [enumOf({ members: [{ name: 'A', value: 1 }, { name: 'A', value: 2 }] })] } }),
+			// An enum carries constants, a struct carries storage; neither may
+			// be quietly accepted wearing the other's shape.
+			enumWithFields: await errorCode(service, { capability: 'delver_propose_type', caller, args: { proposals: [{ target: 'composite', composite: 'enum', name: 'E', size: 4, fields: [] }] } }),
+			structWithMembers: await errorCode(service, { capability: 'delver_propose_type', caller, args: { proposals: [{ target: 'composite', name: 'S', size: 4, members: [] }] } }),
+		}, {
+			stored: [JSON.stringify({
+				kind: 'enum',
+				size: 4,
+				members: [
+					{ name: 'CMD_ALIAS', value: 2 },
+					{ name: 'CMD_EXEC', value: 2 },
+					{ name: 'CMD_PING', value: 1 },
+					{ name: 'CMD_QUIT', value: -1 },
+				],
+			})],
+			tooWide: 'INVALID_ARGUMENT',
+			pastWidth: 'INVALID_ARGUMENT',
+			duplicateName: 'INVALID_ARGUMENT',
+			enumWithFields: 'INVALID_ARGUMENT',
+			structWithMembers: 'INVALID_ARGUMENT',
+		});
+	});
+
 	test('a composite with no kind is still a struct, and still refuses two fields at one offset', async () => {
 		// Every caller written before unions existed omits `composite`, and must
 		// keep meaning exactly what it meant.

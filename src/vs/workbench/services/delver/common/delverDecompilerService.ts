@@ -102,7 +102,21 @@ export interface IDecompilationSemanticField {
  * with the layout rather than being inferred from whether the offsets happen to
  * collide.
  */
-export type DelverCompositeKind = 'struct' | 'union';
+export type DelverCompositeKind = 'struct' | 'union' | 'enum';
+
+/** One named constant of an authored enum. */
+export interface IDecompilationSemanticEnumMember {
+	readonly name: string;
+	/**
+	 * The constant's value.
+	 *
+	 * A plain number, because enums are restricted to 1, 2 and 4 bytes: an
+	 * 8-byte value does not survive a JSON number above 2^53 (ADR 0001), and a
+	 * truncated constant turns a comparison against it into a different
+	 * comparison. Refused at the edges rather than narrowed here.
+	 */
+	readonly value: number;
+}
 
 /**
  * One authored composite type, which belongs to the image rather than to an
@@ -115,12 +129,28 @@ export type DelverCompositeKind = 'struct' | 'union';
  * required to be 0, so a layout that means something else is refused rather
  * than quietly flattened.
  */
-export interface IDecompilationSemanticComposite {
+export interface IDecompilationSemanticLayout {
 	readonly name: string;
-	readonly kind: DelverCompositeKind;
+	readonly kind: 'struct' | 'union';
 	readonly size: number;
 	readonly fields: readonly IDecompilationSemanticField[];
 }
+
+/**
+ * One authored enum: named constants of a fixed width, belonging to the image.
+ *
+ * Members carry no offset because they are not storage, which is why this is a
+ * separate shape rather than a layout with a `kind` of `'enum'` — a reader that
+ * asked such a thing for its `fields` would get an empty answer and believe it.
+ */
+export interface IDecompilationSemanticEnum {
+	readonly name: string;
+	readonly kind: 'enum';
+	readonly size: number;
+	readonly members: readonly IDecompilationSemanticEnumMember[];
+}
+
+export type IDecompilationSemanticComposite = IDecompilationSemanticLayout | IDecompilationSemanticEnum;
 
 /**
  * Complete accepted semantic input used for one decompilation.
@@ -854,15 +884,31 @@ export function semanticDependenciesFor(interpretationService: IDelverInterpreta
  */
 function parseCompositeLayout(name: string, layout: string): IDecompilationSemanticComposite | undefined {
 	try {
-		const parsed = JSON.parse(layout) as Omit<IDecompilationSemanticComposite, 'name'>;
-		if ((parsed.kind !== 'struct' && parsed.kind !== 'union') || typeof parsed.size !== 'number' || !Array.isArray(parsed.fields)) {
+		const parsed = JSON.parse(layout) as { kind?: unknown; size?: unknown; fields?: unknown; members?: unknown };
+		if (typeof parsed.size !== 'number') {
+			return undefined;
+		}
+		if (parsed.kind === 'enum') {
+			if (!Array.isArray(parsed.members)) {
+				return undefined;
+			}
+			return {
+				name,
+				kind: 'enum',
+				size: parsed.size,
+				members: (parsed.members as readonly IDecompilationSemanticEnumMember[])
+					.map(member => ({ name: member.name, value: member.value })),
+			};
+		}
+		if ((parsed.kind !== 'struct' && parsed.kind !== 'union') || !Array.isArray(parsed.fields)) {
 			return undefined;
 		}
 		return {
 			name,
 			kind: parsed.kind,
 			size: parsed.size,
-			fields: parsed.fields.map(field => ({ offset: field.offset, name: field.name, type: field.type })),
+			fields: (parsed.fields as readonly IDecompilationSemanticField[])
+				.map(field => ({ offset: field.offset, name: field.name, type: field.type })),
 		};
 	} catch {
 		return undefined;

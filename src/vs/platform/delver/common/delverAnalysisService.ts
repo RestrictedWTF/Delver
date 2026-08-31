@@ -63,13 +63,31 @@ export interface IDelverDecompilationSemanticFieldWire {
 	readonly type: string;
 }
 
-/** One authored composite type, which belongs to the image, not to an address. */
-export interface IDelverDecompilationSemanticCompositeWire {
+/** One named constant of an authored enum. */
+export interface IDelverDecompilationSemanticEnumMemberWire {
+	readonly name: string;
+	readonly value: number;
+}
+
+/** One authored layout, which belongs to the image, not to an address. */
+export interface IDelverDecompilationSemanticLayoutWire {
 	readonly name: string;
 	readonly kind: 'struct' | 'union';
 	readonly size: number;
 	readonly fields: readonly IDelverDecompilationSemanticFieldWire[];
 }
+
+/** One authored enum. Members are constants, so they carry no offset. */
+export interface IDelverDecompilationSemanticEnumWire {
+	readonly name: string;
+	readonly kind: 'enum';
+	readonly size: number;
+	readonly members: readonly IDelverDecompilationSemanticEnumMemberWire[];
+}
+
+export type IDelverDecompilationSemanticCompositeWire =
+	| IDelverDecompilationSemanticLayoutWire
+	| IDelverDecompilationSemanticEnumWire;
 
 export interface IDelverDecompilationSemanticsWire {
 	readonly schemaVersion: 2;

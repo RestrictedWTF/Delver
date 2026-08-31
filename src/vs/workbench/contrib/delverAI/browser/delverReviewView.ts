@@ -239,8 +239,12 @@ function compositeSummary(value: IEdit['value']): string {
 		return localize('delverReviewCompositeCleared', "cleared");
 	}
 	try {
-		const layout = JSON.parse(value) as { kind?: string; size?: number; fields?: readonly unknown[] };
-		return localize('delverReviewCompositeSummary', "{0}, {1} bytes, {2} fields", String(layout.kind ?? 'struct'), Number(layout.size ?? 0), layout.fields?.length ?? 0);
+		const layout = JSON.parse(value) as { kind?: string; size?: number; fields?: readonly unknown[]; members?: readonly unknown[] };
+		// An enum's members are constants, not storage, so counting them as
+		// "fields" would describe a layout the analyst never proposed.
+		return layout.kind === 'enum'
+			? localize('delverReviewEnumSummary', "enum, {0} bytes, {1} constants", Number(layout.size ?? 0), layout.members?.length ?? 0)
+			: localize('delverReviewCompositeSummary', "{0}, {1} bytes, {2} fields", String(layout.kind ?? 'struct'), Number(layout.size ?? 0), layout.fields?.length ?? 0);
 	} catch {
 		// Shown rather than thrown: a row that cannot be summarized is still a
 		// row the reviewer must be able to see and reject.

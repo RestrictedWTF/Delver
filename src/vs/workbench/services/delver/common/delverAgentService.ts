@@ -3894,8 +3894,68 @@ function parseTypeProposals(value: unknown): readonly IParsedTypeProposal[] {
  * something the analyst knows, and a layout the tool packed itself would be a
  * different structure wearing the name they gave this one.
  */
+/**
+ * Parses one proposed enum: named constants of a fixed width.
+ *
+ * Members are canonicalized into ascending name order here rather than demanded
+ * of the caller, the same way struct fields are sorted by offset — declaration
+ * order is a detail of the encoding, and the snapshot needs one canonical form
+ * so its digest is stable. Duplicate *values* are kept: an alias for an existing
+ * constant is something real headers do.
+ */
+function parseEnumProposal(item: Readonly<Record<string, unknown>>, index: number, name: string, size: number): IParsedTypeProposal {
+	// Restricted to what a JSON number carries exactly. An 8-byte constant would
+	// truncate above 2^53 (ADR 0001), and a truncated constant turns a
+	// comparison against it into a different comparison.
+	if (size !== 1 && size !== 2 && size !== 4) {
+		throw proposalArgument(`proposals[${index}].size must be 1, 2 or 4 bytes for an enum.`);
+	}
+	if (item.fields !== undefined) {
+		throw proposalArgument(`proposals[${index}] declares fields, but an enum carries members.`);
+	}
+	if (!Array.isArray(item.members) || item.members.length > DELVER_AGENT_LIMITS.proposals.compositeFields) {
+		throw proposalArgument(`proposals[${index}].members must be an array of at most ${DELVER_AGENT_LIMITS.proposals.compositeFields} constants.`);
+	}
+	const limit = 2 ** (size * 8);
+	const members = item.members.map((candidate, memberIndex) => {
+		const path = `proposals[${index}].members[${memberIndex}]`;
+		if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) {
+			throw proposalArgument(`${path} must be an object.`);
+		}
+		const member = candidate as Readonly<Record<string, unknown>>;
+		const unknownMemberKeys = Object.keys(member).filter(key => key !== 'name' && key !== 'value');
+		if (unknownMemberKeys.length > 0) {
+			throw proposalArgument(`${path} has unknown field "${unknownMemberKeys[0]}".`);
+		}
+		const memberName = typeof member.name === 'string' ? member.name.trim() : '';
+		if (!TYPE_NAME_PATTERN.test(memberName) || memberName.length > DELVER_AGENT_LIMITS.proposals.renameCharacters) {
+			throw proposalArgument(`${path}.name must be a C identifier.`);
+		}
+		if (typeof member.value !== 'number' || !Number.isSafeInteger(member.value)) {
+			throw proposalArgument(`${path}.value must be an integer.`);
+		}
+		// Either signedness: -1 and 0xFFFFFFFF are the same bits, and headers
+		// write both.
+		if (member.value >= limit || member.value < -(limit / 2)) {
+			throw proposalArgument(`${path}.value does not fit in the declared ${size} bytes.`);
+		}
+		return { name: memberName, value: member.value };
+	});
+	members.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+	for (let member = 1; member < members.length; member++) {
+		if (members[member - 1].name === members[member].name) {
+			throw proposalArgument(`proposals[${index}].members declares the constant "${members[member].name}" twice.`);
+		}
+	}
+	return {
+		op: EditOp.CompositeType,
+		name,
+		declaration: JSON.stringify({ kind: 'enum', size, members }),
+	};
+}
+
 function parseCompositeProposal(item: Readonly<Record<string, unknown>>, index: number): IParsedTypeProposal {
-	const unknownKeys = Object.keys(item).filter(key => key !== 'target' && key !== 'name' && key !== 'size' && key !== 'fields' && key !== 'composite');
+	const unknownKeys = Object.keys(item).filter(key => key !== 'target' && key !== 'name' && key !== 'size' && key !== 'fields' && key !== 'members' && key !== 'composite');
 	if (unknownKeys.length > 0) {
 		throw proposalArgument(`proposals[${index}] has unknown field "${unknownKeys[0]}".`);
 	}
@@ -3904,8 +3964,8 @@ function parseCompositeProposal(item: Readonly<Record<string, unknown>>, index: 
 	// defaulted: laying a union out as a struct would give the analyst storage
 	// they never described.
 	const composite = item.composite === undefined ? 'struct' : item.composite;
-	if (composite !== 'struct' && composite !== 'union') {
-		throw proposalArgument(`proposals[${index}].composite must be "struct" or "union".`);
+	if (composite !== 'struct' && composite !== 'union' && composite !== 'enum') {
+		throw proposalArgument(`proposals[${index}].composite must be "struct", "union" or "enum".`);
 	}
 	const name = typeof item.name === 'string' ? item.name.trim() : '';
 	if (!TYPE_NAME_PATTERN.test(name) || name.length > DELVER_AGENT_LIMITS.proposals.renameCharacters) {
@@ -3914,6 +3974,14 @@ function parseCompositeProposal(item: Readonly<Record<string, unknown>>, index: 
 	const size = item.size;
 	if (typeof size !== 'number' || !Number.isSafeInteger(size) || size < 1 || size > DELVER_AGENT_LIMITS.proposals.compositeSizeBytes) {
 		throw proposalArgument(`proposals[${index}].size must be the total size in bytes, at most ${DELVER_AGENT_LIMITS.proposals.compositeSizeBytes}.`);
+	}
+	if (composite === 'enum') {
+		return parseEnumProposal(item, index, name, size);
+	}
+	// Accepting and ignoring `members` here would take a proposal whose author
+	// plainly meant an enum and store it as an empty struct.
+	if (item.members !== undefined) {
+		throw proposalArgument(`proposals[${index}] declares members, but only an enum carries those.`);
 	}
 	if (!Array.isArray(item.fields) || item.fields.length > DELVER_AGENT_LIMITS.proposals.compositeFields) {
 		throw proposalArgument(`proposals[${index}].fields must be an array of at most ${DELVER_AGENT_LIMITS.proposals.compositeFields} fields.`);

@@ -66,6 +66,75 @@ suite('GhidraDecompilerProtocol', () => {
 		});
 	});
 
+	test('reads back every composite kind, each by its own shape', () => {
+		// Saved pseudocode carries the snapshot it was produced against, and it
+		// is read back through here. A union whose members all sit at offset 0
+		// is the case that a struct-shaped reader rejects outright, which would
+		// make every function saved against a union unreadable.
+		const semanticDependencies = {
+			schemaVersion: 2 as const,
+			composites: [
+				{ name: 'Command', kind: 'enum' as const, size: 4, members: [{ name: 'CMD_EXEC', value: 2 }, { name: 'CMD_PING', value: 1 }] },
+				{ name: 'Config', kind: 'struct' as const, size: 8, fields: [{ offset: 0, name: 'flags', type: 'uint32_t' }] },
+				{ name: 'Overlay', kind: 'union' as const, size: 8, fields: [
+					{ offset: 0, name: 'as_bytes', type: 'char[8]' },
+					{ offset: 0, name: 'as_handle', type: 'void *' },
+				] },
+			],
+			dataTypes: [],
+			functionPrototypes: [],
+		};
+
+		const result = decodeGhidraDecompilerOutput(JSON.stringify({
+			schemaVersion: 1,
+			functionRva: '0x1000',
+			text: 'void entry(void) {}',
+			lineMappings: [],
+			variables: [],
+			semanticDependencies,
+		}), 0x1000n);
+
+		assert.deepStrictEqual(result.semanticDependencies, semanticDependencies);
+	});
+
+	test('refuses a composite whose members contradict its kind', () => {
+		const snapshot = (composite: unknown) => JSON.stringify({
+			schemaVersion: 1,
+			functionRva: '0x1000',
+			text: '',
+			lineMappings: [],
+			variables: [],
+			semanticDependencies: { schemaVersion: 2, composites: [composite], dataTypes: [], functionPrototypes: [] },
+		});
+		const refused = [
+			// A union member somewhere other than the start.
+			{ name: 'Overlay', kind: 'union', size: 8, fields: [{ offset: 4, name: 'tail', type: 'uint32_t' }] },
+			// A struct with two fields at one offset.
+			{ name: 'Config', kind: 'struct', size: 8, fields: [
+				{ offset: 0, name: 'a', type: 'uint32_t' },
+				{ offset: 0, name: 'b', type: 'uint32_t' },
+			] },
+			// An enum carrying storage, or a width it cannot cross the wire in.
+			{ name: 'Command', kind: 'enum', size: 4, fields: [] },
+			{ name: 'Command', kind: 'enum', size: 8, members: [] },
+			{ name: 'Command', kind: 'enum', size: 4, members: [{ name: 'B', value: 2 }, { name: 'A', value: 1 }] },
+			// A kind this build does not know.
+			{ name: 'Bits', kind: 'bitfield', size: 4, fields: [] },
+		];
+
+		assert.deepStrictEqual(
+			refused.map(composite => {
+				try {
+					decodeGhidraDecompilerOutput(snapshot(composite), 0x1000n);
+					return 'accepted';
+				} catch {
+					return 'refused';
+				}
+			}),
+			refused.map(() => 'refused'),
+		);
+	});
+
 	test('rejects malformed and incompatible responses', () => {
 		const responses = [
 			'not json',

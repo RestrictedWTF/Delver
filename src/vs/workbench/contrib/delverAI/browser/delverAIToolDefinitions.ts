@@ -636,12 +636,12 @@ const PRESENTATIONS = new Map<string, IDelverToolPresentation>([
 							target: {
 								type: 'string',
 								enum: ['composite'],
-								description: 'Defines a named structure layout for this image rather than declaring a type at an address.',
+								description: 'Defines a named struct or union layout for this image rather than declaring a type at an address.',
 							},
 							composite: {
 								type: 'string',
 								enum: ['struct', 'union'],
-								description: 'What the layout is. Omitted means "struct". A union overlays every member at offset 0 instead of giving each its own; use it when the same bytes are read as more than one type, which is how tagged messages and overlapping headers are written.',
+								description: 'Omitted means "struct". A union overlays every member at offset 0 instead of giving each its own, which is how tagged messages and overlapping headers are written; every `offset` must then be 0.',
 							},
 							name: {
 								type: 'string',
@@ -657,7 +657,7 @@ const PRESENTATIONS = new Map<string, IDelverToolPresentation>([
 							fields: {
 								type: 'array',
 								maxItems: DELVER_AGENT_LIMITS.proposals.compositeFields,
-								description: 'Fields at explicit byte offsets. Gaps are padding and are preserved.',
+								description: 'Fields at explicit byte offsets, for a struct or union. Gaps are padding and are preserved.',
 								items: {
 									type: 'object',
 									additionalProperties: false,
@@ -683,6 +683,53 @@ const PRESENTATIONS = new Map<string, IDelverToolPresentation>([
 							},
 						},
 						required: ['target', 'name', 'size', 'fields'],
+					}, {
+						type: 'object',
+						additionalProperties: false,
+						properties: {
+							target: {
+								type: 'string',
+								enum: ['composite'],
+								description: 'Defines a named type for this image rather than declaring one at an address.',
+							},
+							composite: {
+								type: 'string',
+								enum: ['enum'],
+								description: 'Names constants rather than storage. Reach for this when a switch or a comparison keeps testing the same magic numbers.',
+							},
+							name: {
+								type: 'string',
+								maxLength: DELVER_AGENT_LIMITS.proposals.renameCharacters,
+								description: 'C identifier naming the enum. Reference it by this name from later declarations.',
+							},
+							size: {
+								type: 'integer',
+								enum: [1, 2, 4],
+								description: 'Width of the constant in bytes. Eight-byte enums are not accepted, because such a value cannot cross the wire without truncating.',
+							},
+							members: {
+								type: 'array',
+								maxItems: DELVER_AGENT_LIMITS.proposals.compositeFields,
+								description: 'Named constants, for `composite: "enum"` only. Give the value the binary actually tests against; either signedness is accepted because -1 and 0xFFFFFFFF are the same bits. Two names for one value is allowed and is how aliases are written.',
+								items: {
+									type: 'object',
+									additionalProperties: false,
+									properties: {
+										name: {
+											type: 'string',
+											maxLength: DELVER_AGENT_LIMITS.proposals.renameCharacters,
+											description: 'C identifier naming the constant.',
+										},
+										value: {
+											type: 'integer',
+											description: 'The constant, which must fit in the declared size. Enums are limited to 1, 2 or 4 bytes.',
+										},
+									},
+									required: ['name', 'value'],
+								},
+							},
+						},
+						required: ['target', 'composite', 'name', 'size', 'members'],
 					}],
 				},
 			},
