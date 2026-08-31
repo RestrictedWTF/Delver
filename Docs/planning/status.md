@@ -2279,3 +2279,37 @@ Verified: Rust workspace green, corpus 7/7, client typecheck clean, 406 Delver T
 tests, worker 13/13, plus a live end-to-end run against a real Ghidra backend.
 
 Still not built: repair.
+
+## What the original report actually was
+
+The thread began with `uVar5 = func_0x00014001d7a0(param_1)` in a pseudocode
+pane. Rewriting that to `UNDEF_1D7A0` made it image-relative and honest, and it
+was never the cause.
+
+Driving the worker directly, no UI in the way: before `analyzeTarget`, Ghidra
+held 1265 functions and `SUB_E2A0` decompiled with **26** `UNDEF_` placeholders;
+after, 1550 functions and **zero**. Every placeholder was a call whose target
+Ghidra simply had not recovered yet, because `open_target` imports with
+`analyze=False`.
+
+The comment justifying that says analysis "can take minutes even for small
+installer-style binaries". Measured on a warm worker it is 22s for the 764 KB
+sample and 30s for a 2.5 MB `ntdll.dll`, once per content hash because the
+analyzed program is cached.
+
+**Raised rather than changed.** On-demand recovery is a recorded decision, and
+the choice between a fast first F5 with placeholders and a slower one with
+complete pseudocode is a product call. The current behaviour is unhelpful, not
+wrong — `UNDEF_` states exactly what is true. What landed is the means to
+choose: `Delver: Analyze Target in Decompiler Backend` on the palette, with
+progress and cancellation, so an analyst who sees placeholders can resolve them
+deliberately. The recommendation and its numbers are in the defect audit.
+
+Also measured and declined: the linear sweep decodes jump tables as functions —
+`SUB_D940`, `SUB_D94C`, `SUB_D950` four bytes apart are entries in a table of
+RVAs at `0xd940`. Twelve such addresses on this sample and nine on `aadtb.dll`,
+zero on four other images. Too rare to pay for a recovery change, and the cheap
+rules cost more than they save: 225 of the sample's 244 swept functions have no
+incoming reference at all, which is exactly the code the sweep exists to find.
+
+Verified: client typecheck clean, 406 Delver TS tests, worker 13/13.

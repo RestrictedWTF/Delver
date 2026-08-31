@@ -370,7 +370,74 @@ confident numbers rather than no numbers. The reconciliation compares function
 *entries*, which is well defined on both sides; extent comparison needed the
 fragment model before it meant anything.
 
+### Measured and declined — the linear sweep decodes jump tables as functions
+
+Surfaced by the handshake's own output: the Delver-only rows on
+`Auto-updater.exe` include `SUB_D940`, `SUB_D94C`, `SUB_D950`, `SUB_D954` — four
+bytes apart, which is the shape of a table rather than of code. The bytes at
+`0xd940` are `7fd60000 87d60000 8fd60000 …`, a run of 32-bit RVAs into `.text`:
+a jump table, decoded as instructions and seeded as a function per entry.
+
+Counted as runs of four consecutive in-image pointers:
+
+| | swept functions | inside a pointer run |
+| --- | --- | --- |
+| `Auto-updater.exe` | 244 | 12 |
+| `aadtb.dll` | 2652 | 9 |
+| `ntdll.dll` | 702 | 0 |
+| `appinfo.dll` | 167 | 0 |
+| `amdtee_api.dll` | 1696 | 0 |
+| `cdd.dll` | 6 | 0 |
+
+**Not fixed, deliberately.** Twenty-one addresses across six images does not pay
+for a change to function recovery, and the obvious rules cost more than they
+save. Refusing to seed unreferenced bytes would gut the sweep: 225 of
+`Auto-updater.exe`'s 244 swept functions have no incoming reference at all, which
+is precisely what the sweep exists to find — code reached only through an
+indirect call is the case that matters most on a hostile sample. Refusing bytes
+that read as pointers would suppress real code that happens to look like
+addresses.
+
+These boundaries are already labelled `LinearSweep`, which `is_vouched` reports
+as a guess, so nothing downstream treats them as fact. Real jump-table recovery
+would fix it properly and is a design decision, not a patch.
+
 ---
+
+## Raised, not decided — should decompilation analyze once per image?
+
+The original report that started this thread was pseudocode containing
+`uVar5 = func_0x00014001d7a0(param_1)`. Renaming that to `UNDEF_1D7A0` made it
+image-relative and honest, but it was never the cause. Driving the worker
+directly, with no UI in the way:
+
+| `Auto-updater.exe`, function `SUB_E2A0` | before `analyzeTarget` | after |
+| --- | --- | --- |
+| functions Ghidra holds | 1265 | 1550 |
+| `analysisComplete` | false | true |
+| `UNDEF_` placeholders in the function | **26** | **0** |
+
+Every one of those placeholders was a call whose target Ghidra had not recovered
+*yet*. `open_target` imports with `analyze=False`, so the first decompilation of
+any image is against a partial program.
+
+The comment justifying that says full auto-analysis "can take minutes even for
+small installer-style binaries". Measured, on a warm worker: **22s** for the
+764 KB `Auto-updater.exe`, **30s** for the 2.5 MB `ntdll.dll` — and once per
+content hash, because the analyzed program is cached in the persistent project.
+
+That is a much better trade than the comment assumes, and it argues for
+decompilation ensuring analysis has run rather than leaving the first F5 to
+answer from a partial program. **Not changed here.** The on-demand behaviour is
+a recorded decision, not an oversight, and the cost it buys back is a fast first
+F5 — the choice between "30s once, then complete pseudocode" and "2s now, with
+placeholders where calls should be named" is a product decision rather than a
+correctness one. The current behaviour is unhelpful, not wrong: `UNDEF_` states
+exactly what is true.
+
+What landed instead is the means to choose: `analyzeTarget` on the worker, and
+`Delver: Analyze Target in Decompiler Backend` on the palette, so an analyst who
+sees placeholders can resolve them deliberately.
 
 ## Not covered by this audit
 
