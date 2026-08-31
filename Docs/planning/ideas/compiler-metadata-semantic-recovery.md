@@ -1,6 +1,7 @@
 # Compiler metadata as semantic recovery
 
-**Status:** open; recommended for a bounded P5 spike before scheduling
+**Status:** open; the read-only spike below has been run — 2026-08-31 —
+and its result is a recommendation to schedule, not to build yet
 
 ## What
 
@@ -77,6 +78,54 @@ and a no-RTTI fallback that is visibly less confident.
 7. **Behavior summaries.** Imports, strings, constants, CFG/call paths, API
    semantics, and later dynamic observations produce concise per-function and
    per-class summaries with evidence links.
+
+## Spike result — 2026-08-31
+
+A read-only spike over 69 System32 PE32+ images plus `Auto-updater.exe`, scanning
+`.rdata` and `.data` for MSVC complete-object locators. It answers the two
+questions that decide whether this is worth scheduling: is the metadata *there*,
+and can it be validated rather than guessed at.
+
+**It is there, in more than half of what was looked at.** 38 of 69 images carry
+validated RTTI, naming 4,130 distinct classes. The distribution is very uneven —
+`cdp.dll` alone accounts for 2,228 — and the images with none are the ones you
+would expect, C code like `ntdll.dll`, `appinfo.dll` and `cdd.dll`, which is the
+honest negative rather than a parser failure.
+
+**The validation is the whole feature.** Candidates surviving each check, summed
+across those images:
+
+| check | surviving |
+| --- | --- |
+| `signature == 1` | 211,686 |
+| `pSelf` equals the locator's own RVA | 4,824 |
+| type-descriptor pointer maps into a section | 4,824 |
+| descriptor name begins `.?A` | 4,771 |
+
+The self-reference check alone removes **97.7%** of candidates. A scanner that
+skipped it — that took four bytes reading as `1` followed by plausible-looking
+pointers — would report forty-four times more classes than exist, every one of
+them confident and wrong. That is precisely the failure this document's own "why
+it might not be" section warns about, now with a number on it. It is also
+cheap: the check is a single comparison per candidate and needs no relocation
+processing, because on x64 the field is already an RVA.
+
+**What it recovers is the kind of thing that helps.** `Auto-updater.exe` yields
+eight classes including `basic_ifstream`, `basic_filebuf`, and a lambda whose
+decorated name carries the enclosing function `downloadFile` — three facts about
+a 764 KB stripped binary that no amount of reading pseudocode hands you as
+directly.
+
+**What the spike did not cover.** Only the locator → type-descriptor edge. Class
+hierarchy descriptors, base-class arrays, vftable slot mapping and virtual
+inheritance were not touched, and neither was a `/GR-` or deliberately malformed
+corpus. The zero-false-exact-match criterion below is therefore *not* yet met —
+what is established is that the entry point into the graph validates strongly and
+that the data exists at a useful rate.
+
+**Recommendation: schedule, do not start.** It stays a P5 item. The spike says
+the leverage is real and the false-positive risk is controllable, which is what
+was unknown; it does not say the remaining structures are, and this is not P5.
 
 ## What would settle it
 

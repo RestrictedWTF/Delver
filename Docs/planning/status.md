@@ -2465,3 +2465,39 @@ Verified: client typecheck clean, 411 Delver TS tests, 10 worker-host tests,
 worker 18/18, live probes against real Ghidra for cancellation timing, the
 uncancelled path and decompilation, and an end-to-end run through the
 workbench.
+
+## Two questions answered, neither of them by shipping a feature
+
+**Naming a local variable is blocked on identity, not plumbing.** It is the
+largest remaining gap in the reading workflow — an analyst can rename a function
+or a global and not the variable in front of them — so it looked like the
+obvious next slice. The only anchor the backend offers is `storage`, and
+decompiling `SUB_E2A0` shows why that does not work: `_Src` and `piVar1` are both
+reported at `unique:00023e00:8`, a Ghidra SSA temporary rather than a place in
+the binary. A rename anchored there would attach to two variables at once and be
+lost on the next decompilation. Recorded in the ledger; a durable identity has to
+be designed before any of the rest is worth building.
+
+**Compiler-metadata recovery is worth scheduling, on evidence.**
+[The idea](ideas/compiler-metadata-semantic-recovery.md) asked for a bounded
+read-only spike before scheduling, so that is what was run: 69 System32 PE32+
+images scanned for MSVC complete-object locators.
+
+38 of 69 carry validated RTTI naming 4,130 distinct classes, and the images with
+none are C code — `ntdll`, `appinfo`, `cdd` — which is the honest negative rather
+than a parser failure. The number that decides it is the funnel: 211,686
+candidates match `signature == 1`, and 4,824 survive the check that the locator's
+`pSelf` field points at its own RVA. **One comparison removes 97.7% of them.** A
+scanner without it would report forty-four times more classes than exist, every
+one confident and wrong, which is exactly what that document's own risk section
+predicted and now has a number against.
+
+The spike covered only the locator → type-descriptor edge. Hierarchy
+descriptors, base-class arrays and vftable slots were not touched, so the
+zero-false-match bar is not met and this stays P5. What was unknown — whether
+the leverage is real and whether the false positives are controllable — is now
+answered, and the recommendation recorded there is to schedule rather than to
+start.
+
+Verified: Rust workspace green, corpus 7/7, client typecheck clean, 411 Delver TS
+tests, worker 18/18.
