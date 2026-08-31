@@ -184,7 +184,9 @@ class ProtocolTests(unittest.TestCase):
 			[{"name": "Zeta", "kind": "struct", "size": 4, "fields": []}, {"name": "Alpha", "kind": "struct", "size": 4, "fields": []}],
 			[{"name": "Config", "kind": "struct", "size": 4, "fields": []}, {"name": "Config", "kind": "struct", "size": 8, "fields": []}],
 			[{"name": "0Config", "kind": "struct", "size": 4, "fields": []}],
-			[{"name": "Config", "kind": "union", "size": 4, "fields": []}],
+			[{"name": "Config", "kind": "enum", "size": 4, "fields": []}],
+			# A union member that does not start at the beginning of the union.
+			[{"name": "Config", "kind": "union", "size": 8, "fields": [{"offset": 4, "name": "tail", "type": "uint32_t"}]}],
 			[{"name": "Config", "kind": "struct", "size": 0, "fields": []}],
 			[{"name": "Config", "kind": "struct", "size": 2 * 1024 * 1024, "fields": []}],
 			[{"name": "Config", "kind": "struct", "size": 24, "fields": one_field * 2}],
@@ -209,6 +211,48 @@ class ProtocolTests(unittest.TestCase):
 			params = {"semantics": {"schemaVersion": 2, "composites": composites, "dataTypes": [], "functionPrototypes": []}}
 			with self.subTest(composites=composites[:2]), self.assertRaises(WorkerError):
 				required_semantics(params)
+
+	def test_a_union_lays_every_member_at_the_start(self) -> None:
+		# Two members at offset 0 is the whole point of a union, and is exactly
+		# what the struct rule refuses. The offset stays in the payload and is
+		# required to be 0 rather than ignored, so a sender that believes a
+		# member sits elsewhere is told, not silently corrected.
+		params = {"semantics": {"schemaVersion": 2, "composites": [{
+			"name": "Overlay",
+			"kind": "union",
+			"size": 8,
+			"fields": [
+				{"offset": 0, "name": "as_bytes", "type": "char[8]"},
+				{"offset": 0, "name": "as_handle", "type": "void *"},
+			],
+		}], "dataTypes": [], "functionPrototypes": []}}
+
+		composites = required_semantics(params)["composites"]
+
+		self.assertEqual(composites, [{
+			"name": "Overlay",
+			"kind": "union",
+			"size": 8,
+			"fields": [
+				{"offset": 0, "name": "as_bytes", "type": "char[8]"},
+				{"offset": 0, "name": "as_handle", "type": "void *"},
+			],
+		}])
+
+	def test_a_struct_still_refuses_two_fields_at_one_offset(self) -> None:
+		# The union rule must not have loosened the struct rule with it.
+		params = {"semantics": {"schemaVersion": 2, "composites": [{
+			"name": "Config",
+			"kind": "struct",
+			"size": 8,
+			"fields": [
+				{"offset": 0, "name": "flags", "type": "uint32_t"},
+				{"offset": 0, "name": "count", "type": "uint32_t"},
+			],
+		}], "dataTypes": [], "functionPrototypes": []}}
+
+		with self.assertRaises(WorkerError):
+			required_semantics(params)
 
 	def test_server_writes_versioned_success_and_structured_error(self) -> None:
 		input_stream = io.StringIO(

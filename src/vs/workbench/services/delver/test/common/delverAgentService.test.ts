@@ -3574,6 +3574,74 @@ suite('DelverAgentService', () => {
 		});
 	});
 
+	test('a proposed union is stored as a union and refuses a member that is not at the start', async () => {
+		const { service, session, interpretation } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		session.functionsResult = { functions: [...FUNCTIONS] };
+		const caller = { kind: 'model' as const, id: 'semantic-agent' };
+		const union = (offset: number) => ({
+			target: 'composite', composite: 'union', name: 'Overlay', size: 8,
+			fields: [
+				{ offset: 0, name: 'as_bytes', type: 'char[8]' },
+				{ offset, name: 'as_handle', type: 'void *' },
+			],
+		});
+
+		await service.invoke({ capability: 'delver_propose_type', caller, args: { proposals: [union(0)] } }, CancellationToken.None);
+
+		assert.deepStrictEqual({
+			stored: interpretation.proposals.map(edit => edit.value),
+			// A second member at offset 4 is a struct, whatever it is called.
+			misplacedMember: await errorCode(service, {
+				capability: 'delver_propose_type', caller, args: { proposals: [union(4)] },
+			}),
+			// A kind this build does not implement must not fall back to struct.
+			unknownKind: await errorCode(service, {
+				capability: 'delver_propose_type', caller,
+				args: { proposals: [{ target: 'composite', composite: 'enum', name: 'Flags', size: 4, fields: [] }] },
+			}),
+		}, {
+			stored: [JSON.stringify({
+				kind: 'union',
+				size: 8,
+				fields: [
+					{ offset: 0, name: 'as_bytes', type: 'char[8]' },
+					{ offset: 0, name: 'as_handle', type: 'void *' },
+				],
+			})],
+			misplacedMember: 'INVALID_ARGUMENT',
+			unknownKind: 'INVALID_ARGUMENT',
+		});
+	});
+
+	test('a composite with no kind is still a struct, and still refuses two fields at one offset', async () => {
+		// Every caller written before unions existed omits `composite`, and must
+		// keep meaning exactly what it meant.
+		const { service, session, interpretation } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		session.functionsResult = { functions: [...FUNCTIONS] };
+		const caller = { kind: 'model' as const, id: 'semantic-agent' };
+
+		await service.invoke({
+			capability: 'delver_propose_type', caller,
+			args: { proposals: [{ target: 'composite', name: 'Config', size: 8, fields: [{ offset: 4, name: 'flags', type: 'uint32_t' }] }] },
+		}, CancellationToken.None);
+
+		assert.deepStrictEqual({
+			stored: interpretation.proposals.map(edit => edit.value),
+			collision: await errorCode(service, {
+				capability: 'delver_propose_type', caller,
+				args: { proposals: [{ target: 'composite', name: 'Clash', size: 8, fields: [
+					{ offset: 0, name: 'a', type: 'uint32_t' },
+					{ offset: 0, name: 'b', type: 'uint32_t' },
+				] }] },
+			}),
+		}, {
+			stored: [JSON.stringify({ kind: 'struct', size: 8, fields: [{ offset: 4, name: 'flags', type: 'uint32_t' }] })],
+			collision: 'INVALID_ARGUMENT',
+		});
+	});
+
 	test('appends distinct data-type and function-prototype proposals without applying them', async () => {
 		const { service, session, interpretation } = createService(store);
 		session.activeSession = LIVE_SESSION;

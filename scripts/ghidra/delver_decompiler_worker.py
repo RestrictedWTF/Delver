@@ -37,7 +37,7 @@ MAX_DECLARATION_CHARACTERS = 2048
 MAX_SEMANTIC_COMPOSITES = 1000
 MAX_COMPOSITE_FIELDS = 1000
 MAX_COMPOSITE_SIZE_BYTES = 1024 * 1024
-COMPOSITE_KINDS = ("struct",)
+COMPOSITE_KINDS = ("struct", "union")
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Each accepted schema version pins its own key set. A sender whose payload does
 # not match the version it claims is out of step with this worker, and guessing
@@ -103,6 +103,7 @@ class PyGhidraDriver:
 		self._data_type_parser_type: Any = None
 		self._allowed_data_types: Any = None
 		self._structure_data_type_type: Any = None
+		self._union_data_type_type: Any = None
 		self._data_type_conflict_handler: Any = None
 		self._targets: dict[str, Target] = {}
 		self._active_monitors: dict[str, Any] = {}
@@ -128,7 +129,7 @@ class PyGhidraDriver:
 				from ghidra.app.cmd.function import ApplyFunctionSignatureCmd
 				from ghidra.app.util.parser import FunctionSignatureParser
 				from ghidra.framework import Application
-				from ghidra.program.model.data import DataTypeConflictHandler, StructureDataType
+				from ghidra.program.model.data import DataTypeConflictHandler, StructureDataType, UnionDataType
 				from ghidra.program.model.symbol import SourceType
 				from ghidra.util.data import DataTypeParser
 		except Exception as error:
@@ -145,6 +146,7 @@ class PyGhidraDriver:
 		self._data_type_parser_type = DataTypeParser
 		self._allowed_data_types = DataTypeParser.AllowedDataTypes
 		self._structure_data_type_type = StructureDataType
+		self._union_data_type_type = UnionDataType
 		self._data_type_conflict_handler = DataTypeConflictHandler
 		self._backend_version = str(Application.getApplicationVersion())
 		self._started = True
@@ -521,13 +523,18 @@ def apply_composites(driver: PyGhidraDriver, data_type_manager: Any, data_type_p
 	registered: dict[str, Any] = {}
 	for composite in composites:
 		try:
-			structure = driver._structure_data_type_type(composite["name"], composite["size"], data_type_manager)
+			if composite["kind"] == "union":
+				# A union has no offsets to preserve and Ghidra sizes it from its
+				# largest member, so it takes the name alone.
+				empty = driver._union_data_type_type(composite["name"], data_type_manager)
+			else:
+				empty = driver._structure_data_type_type(composite["name"], composite["size"], data_type_manager)
 			# Padding in a real binary is something the analyst measured, not a
 			# flaw to tidy up. Packing off means Ghidra keeps the declared size
 			# and every field stays at the offset it was given.
-			structure.setPackingEnabled(False)
+			empty.setPackingEnabled(False)
 			registered[composite["name"]] = data_type_manager.addDataType(
-				structure,
+				empty,
 				driver._data_type_conflict_handler.REPLACE_HANDLER,
 			)
 		except Exception as error:
@@ -548,8 +555,14 @@ def apply_composites(driver: PyGhidraDriver, data_type_manager: Any, data_type_p
 			) from error
 
 
-def populate_composite(data_type_parser: Any, structure: Any, composite: dict[str, Any]) -> None:
-	"""Places each field at the offset it was authored with, never one Ghidra inferred."""
+def populate_composite(data_type_parser: Any, composite_type: Any, composite: dict[str, Any]) -> None:
+	"""Places each field where the analyst put it, never where Ghidra inferred.
+
+	A struct's field goes at its authored offset. A union's members all overlay
+	the start, so each is appended and the offset — already required to be 0 —
+	is not an address to place it at.
+	"""
+	is_union = composite["kind"] == "union"
 	for field in composite["fields"]:
 		field_type = data_type_parser.parse(field["type"])
 		length = int(field_type.getLength())
@@ -558,12 +571,18 @@ def populate_composite(data_type_parser: Any, structure: Any, composite: dict[st
 				"semantic_application_failed",
 				f"Field '{field['name']}' of composite '{composite['name']}' has no fixed storage length.",
 			)
+		# For a union this bounds the member against the declared size, which is
+		# the same claim as for a struct: nothing the analyst described may run
+		# past what they said the type occupies.
 		if field["offset"] + length > composite["size"]:
 			raise WorkerError(
 				"semantic_application_failed",
 				f"Field '{field['name']}' of composite '{composite['name']}' runs past its declared size of {composite['size']} bytes.",
 			)
-		structure.replaceAtOffset(field["offset"], field_type, length, field["name"], None)
+		if is_union:
+			composite_type.add(field_type, length, field["name"], None)
+		else:
+			composite_type.replaceAtOffset(field["offset"], field_type, length, field["name"], None)
 
 
 class WorkerServer:
@@ -818,13 +837,20 @@ def required_semantic_composites(value: Any, path: str) -> list[dict[str, Any]]:
 			"name": name,
 			"kind": kind,
 			"size": size,
-			"fields": required_composite_fields(entry.get("fields"), f"{entry_path}.fields", size),
+			"fields": required_composite_fields(entry.get("fields"), f"{entry_path}.fields", size, kind),
 		})
 		previous_name = name
 	return result
 
 
-def required_composite_fields(value: Any, path: str, size: int) -> list[dict[str, Any]]:
+def required_composite_fields(value: Any, path: str, size: int, kind: str) -> list[dict[str, Any]]:
+	"""Validates one composite's fields against the layout rule for its kind.
+
+	A struct's fields occupy distinct ascending offsets. A union's all begin at
+	zero — that is what a union *is*. The offset stays in the payload for a union
+	rather than being dropped, and is required to be 0, so a sender that believes
+	a member sits at offset 8 is refused rather than silently relocated to 0.
+	"""
 	if not isinstance(value, list) or len(value) > MAX_COMPOSITE_FIELDS:
 		raise WorkerError("invalid_params", f"{path} must be an array with at most {MAX_COMPOSITE_FIELDS} entries.")
 	result: list[dict[str, Any]] = []
@@ -840,7 +866,13 @@ def required_composite_fields(value: Any, path: str, size: int) -> list[dict[str
 				"invalid_params",
 				f"{entry_path}.offset must be a non-negative integer below the composite size of {size} bytes.",
 			)
-		if offset <= previous_offset:
+		if kind == "union":
+			if offset != 0:
+				raise WorkerError(
+					"invalid_params",
+					f"{entry_path}.offset must be 0: every member of a union begins at the start of it.",
+				)
+		elif offset <= previous_offset:
 			raise WorkerError("invalid_params", f"{path} must contain unique fields in ascending offset order.")
 		name = required_identifier(entry, "name", entry_path)
 		if name in names:

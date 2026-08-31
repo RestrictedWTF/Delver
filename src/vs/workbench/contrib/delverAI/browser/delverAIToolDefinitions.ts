@@ -601,7 +601,7 @@ const PRESENTATIONS = new Map<string, IDelverToolPresentation>([
 		icon: Codicon.symbolClass,
 		displayName: localize('delverTool.proposeType.displayName', "Delver Propose Type"),
 		userDescription: localize('delverTool.proposeType.userDescription', "Propose data types or function prototypes for review"),
-		usage: 'Use only after retrieving byte, access, call, or decompiler evidence. `target: "data"` attaches a declaration to the exact supplied address; `target: "function"` attaches only to a detected function entry; `target: "composite"` defines a named structure layout, which belongs to the image rather than to any address and takes `name`, `size`, and `fields` instead of `address` and `declaration`. Define a composite in one call and reference it by name from a data or function declaration in the next, once it has been accepted. Give every field an explicit `offset`: a real binary carries padding, and offsets are never inferred, because a layout packed for you is a different structure wearing the name you gave this one. `size` is the total including trailing padding. Declarations are retained verbatim as authored semantic interpretation and remain provisional until a human accepts them. On the next decompilation, PyGhidra defines the accepted composites and then applies the complete accepted semantic snapshot transactionally; saved pseudocode from a different snapshot is never reused. An empty declaration explicitly proposes clearing that semantic field.',
+		usage: 'Use only after retrieving byte, access, call, or decompiler evidence. `target: "data"` attaches a declaration to the exact supplied address; `target: "function"` attaches only to a detected function entry; `target: "composite"` defines a named layout, which belongs to the image rather than to any address and takes `name`, `size`, and `fields` instead of `address` and `declaration`; add `composite: "union"` when the same bytes are read as more than one type, and then every `offset` must be 0. Define a composite in one call and reference it by name from a data or function declaration in the next, once it has been accepted. Give every field an explicit `offset`: a real binary carries padding, and offsets are never inferred, because a layout packed for you is a different structure wearing the name you gave this one. `size` is the total including trailing padding. Declarations are retained verbatim as authored semantic interpretation and remain provisional until a human accepts them. On the next decompilation, PyGhidra defines the accepted composites and then applies the complete accepted semantic snapshot transactionally; saved pseudocode from a different snapshot is never reused. An empty declaration explicitly proposes clearing that semantic field.',
 		inputSchema: objectSchema({
 			proposals: {
 				type: 'array',
@@ -638,10 +638,15 @@ const PRESENTATIONS = new Map<string, IDelverToolPresentation>([
 								enum: ['composite'],
 								description: 'Defines a named structure layout for this image rather than declaring a type at an address.',
 							},
+							composite: {
+								type: 'string',
+								enum: ['struct', 'union'],
+								description: 'What the layout is. Omitted means "struct". A union overlays every member at offset 0 instead of giving each its own; use it when the same bytes are read as more than one type, which is how tagged messages and overlapping headers are written.',
+							},
 							name: {
 								type: 'string',
 								maxLength: DELVER_AGENT_LIMITS.proposals.renameCharacters,
-								description: 'C identifier naming the structure. Reference it by this name from later declarations.',
+								description: 'C identifier naming the composite. Reference it by this name from later declarations.',
 							},
 							size: {
 								type: 'integer',
@@ -660,7 +665,7 @@ const PRESENTATIONS = new Map<string, IDelverToolPresentation>([
 										offset: {
 											type: 'integer',
 											minimum: 0,
-											description: 'Byte offset from the start of the structure. Never inferred.',
+											description: 'Byte offset from the start of the composite. Never inferred. Must be 0 in a union, where every member begins at the start.',
 										},
 										name: {
 											type: 'string',

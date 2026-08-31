@@ -3895,9 +3895,17 @@ function parseTypeProposals(value: unknown): readonly IParsedTypeProposal[] {
  * different structure wearing the name they gave this one.
  */
 function parseCompositeProposal(item: Readonly<Record<string, unknown>>, index: number): IParsedTypeProposal {
-	const unknownKeys = Object.keys(item).filter(key => key !== 'target' && key !== 'name' && key !== 'size' && key !== 'fields');
+	const unknownKeys = Object.keys(item).filter(key => key !== 'target' && key !== 'name' && key !== 'size' && key !== 'fields' && key !== 'composite');
 	if (unknownKeys.length > 0) {
 		throw proposalArgument(`proposals[${index}] has unknown field "${unknownKeys[0]}".`);
+	}
+	// Absent means struct, because that is what every caller written before
+	// unions existed meant. An unrecognized value is refused rather than
+	// defaulted: laying a union out as a struct would give the analyst storage
+	// they never described.
+	const composite = item.composite === undefined ? 'struct' : item.composite;
+	if (composite !== 'struct' && composite !== 'union') {
+		throw proposalArgument(`proposals[${index}].composite must be "struct" or "union".`);
 	}
 	const name = typeof item.name === 'string' ? item.name.trim() : '';
 	if (!TYPE_NAME_PATTERN.test(name) || name.length > DELVER_AGENT_LIMITS.proposals.renameCharacters) {
@@ -3923,6 +3931,9 @@ function parseCompositeProposal(item: Readonly<Record<string, unknown>>, index: 
 		if (typeof field.offset !== 'number' || !Number.isSafeInteger(field.offset) || field.offset < 0 || field.offset >= size) {
 			throw proposalArgument(`${path}.offset must be a byte offset inside the composite.`);
 		}
+		if (composite === 'union' && field.offset !== 0) {
+			throw proposalArgument(`${path}.offset must be 0: every member of a union begins at the start of it.`);
+		}
 		const fieldName = typeof field.name === 'string' ? field.name.trim() : '';
 		if (!TYPE_NAME_PATTERN.test(fieldName) || fieldName.length > DELVER_AGENT_LIMITS.proposals.renameCharacters) {
 			throw proposalArgument(`${path}.name must be a C identifier.`);
@@ -3938,9 +3949,13 @@ function parseCompositeProposal(item: Readonly<Record<string, unknown>>, index: 
 	// would be pedantry. Two fields at one offset is a real contradiction and
 	// is refused.
 	fields.sort((left, right) => left.offset - right.offset);
-	for (let field = 1; field < fields.length; field++) {
-		if (fields[field - 1].offset === fields[field].offset) {
-			throw proposalArgument(`proposals[${index}].fields declares two fields at offset ${fields[field].offset}.`);
+	// Two struct fields at one offset is a contradiction; in a union it is the
+	// entire point, and every offset is already required to be 0 above.
+	if (composite === 'struct') {
+		for (let field = 1; field < fields.length; field++) {
+			if (fields[field - 1].offset === fields[field].offset) {
+				throw proposalArgument(`proposals[${index}].fields declares two fields at offset ${fields[field].offset}.`);
+			}
 		}
 	}
 	if (new Set(fields.map(field => field.name)).size !== fields.length) {
@@ -3949,7 +3964,7 @@ function parseCompositeProposal(item: Readonly<Record<string, unknown>>, index: 
 	return {
 		op: EditOp.CompositeType,
 		name,
-		declaration: JSON.stringify({ kind: 'struct', size, fields }),
+		declaration: JSON.stringify({ kind: composite, size, fields }),
 	};
 }
 

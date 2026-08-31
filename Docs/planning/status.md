@@ -2342,3 +2342,41 @@ that backend's numbers.
 
 Verified: Rust workspace green, corpus 7/7, client typecheck clean, 406 Delver
 TS tests, worker 13/13.
+
+## Unions
+
+Picking the type system back up — the P3d row whose remaining work reads
+"Unions and enums, local variables and stack frames, type propagation…". Unions
+are the half that needs no new shape: a composite already carries `kind`, and the
+worker's own comment said "Unions and the rest are not implemented yet."
+
+`composite: "union"` on `delver_propose_type` now travels the whole path an
+accepted struct already travels — type anchor, review, `schemaVersion: 2`
+snapshot, transactional application — and PyGhidra defines it as a
+`UnionDataType` rather than a structure.
+
+Three choices worth naming:
+
+**The offset stays, and must be 0.** A union member could carry no offset at
+all, but then a caller that believes a member sits at offset 8 gets silently
+relocated to 0. Requiring it makes that caller wrong out loud. The struct rule
+(distinct ascending offsets) and the union rule (all zero) are the same claim
+about the bytes, made in opposite directions, and one must not loosen the other
+— a test pins that a struct still refuses two fields at one offset.
+
+**No schema version bump.** `kind` is a value, not a key, so the snapshot's
+pinned key set is unchanged and a v2 payload stays a v2 payload. An older worker
+meeting a union refuses it by name, which is the failure this fails toward on
+purpose: refusing tells the sender their worker is too old, laying it out as a
+struct would give the analyst storage nobody described.
+
+**An unknown kind is dropped, not guessed.** `parseCompositeLayout` already
+declined layouts it could not read; it now declines an `enum` from a future
+build the same way, and decompiles without that one type instead of applying a
+layout it invented.
+
+Verified: Rust workspace green, corpus 7/7, client typecheck clean, 410 Delver
+TS tests (up 4), worker 15/15 (up 2).
+
+Next in that row: enums, which do need a new member shape and therefore a
+snapshot version.

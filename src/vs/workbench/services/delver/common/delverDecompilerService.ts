@@ -95,16 +95,29 @@ export interface IDecompilationSemanticField {
 }
 
 /**
+ * What a composite lays out.
+ *
+ * A struct gives every field a distinct offset; a union overlays them all at the
+ * start. The distinction is the analyst's claim about the bytes, so it travels
+ * with the layout rather than being inferred from whether the offsets happen to
+ * collide.
+ */
+export type DelverCompositeKind = 'struct' | 'union';
+
+/**
  * One authored composite type, which belongs to the image rather than to an
  * address.
  *
  * Offsets are explicit and the size includes trailing padding, because a real
  * binary's layout is something the analyst knows and the backend must not
- * re-pack into something tidier and wrong.
+ * re-pack into something tidier and wrong. A union's fields all sit at offset 0
+ * — that is what makes it a union — and the offset is still carried and still
+ * required to be 0, so a layout that means something else is refused rather
+ * than quietly flattened.
  */
 export interface IDecompilationSemanticComposite {
 	readonly name: string;
-	readonly kind: 'struct';
+	readonly kind: DelverCompositeKind;
 	readonly size: number;
 	readonly fields: readonly IDecompilationSemanticField[];
 }
@@ -842,12 +855,12 @@ export function semanticDependenciesFor(interpretationService: IDelverInterpreta
 function parseCompositeLayout(name: string, layout: string): IDecompilationSemanticComposite | undefined {
 	try {
 		const parsed = JSON.parse(layout) as Omit<IDecompilationSemanticComposite, 'name'>;
-		if (parsed.kind !== 'struct' || typeof parsed.size !== 'number' || !Array.isArray(parsed.fields)) {
+		if ((parsed.kind !== 'struct' && parsed.kind !== 'union') || typeof parsed.size !== 'number' || !Array.isArray(parsed.fields)) {
 			return undefined;
 		}
 		return {
 			name,
-			kind: 'struct',
+			kind: parsed.kind,
 			size: parsed.size,
 			fields: parsed.fields.map(field => ({ offset: field.offset, name: field.name, type: field.type })),
 		};

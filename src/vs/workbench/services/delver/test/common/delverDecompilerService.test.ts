@@ -500,6 +500,51 @@ suite('DelverDecompilerService', () => {
 		});
 	});
 
+	test('a union reaches the snapshot as a union, with its members overlaid', () => {
+		// The kind is the analyst's claim about the bytes. Losing it on the way
+		// to the backend would lay the same members out end to end and hand back
+		// a struct wearing the union's name.
+		const overlay = JSON.stringify({
+			kind: 'union',
+			size: 8,
+			fields: [
+				{ offset: 0, name: 'as_bytes', type: 'char[8]' },
+				{ offset: 0, name: 'as_handle', type: 'void *' },
+			],
+		});
+		const interpretation = new FakeSemanticInterpretation([
+			{ anchor: { kind: 'type', contentHash: request.contentHash, name: 'Overlay' }, op: EditOp.CompositeType, value: overlay },
+		]);
+
+		assert.deepStrictEqual(
+			semanticDependenciesFor(interpretation as unknown as IDelverInterpretationService, request.contentHash).composites,
+			[{
+				name: 'Overlay',
+				kind: 'union',
+				size: 8,
+				fields: [
+					{ offset: 0, name: 'as_bytes', type: 'char[8]' },
+					{ offset: 0, name: 'as_handle', type: 'void *' },
+				],
+			}],
+		);
+	});
+
+	test('a layout whose kind this build does not know is dropped, not guessed at', () => {
+		// A newer build may author an enum. Decompiling as though it were a
+		// struct would apply a layout nobody described; dropping it decompiles
+		// without that one type, which is the honest half-answer.
+		const interpretation = new FakeSemanticInterpretation([
+			{ anchor: { kind: 'type', contentHash: request.contentHash, name: 'Flags' }, op: EditOp.CompositeType, value: JSON.stringify({ kind: 'enum', size: 4, fields: [] }) },
+			{ anchor: { kind: 'type', contentHash: request.contentHash, name: 'Known' }, op: EditOp.CompositeType, value: JSON.stringify({ kind: 'union', size: 4, fields: [] }) },
+		]);
+
+		assert.deepStrictEqual(
+			semanticDependenciesFor(interpretation as unknown as IDelverInterpretationService, request.contentHash).composites,
+			[{ name: 'Known', kind: 'union', size: 4, fields: [] }],
+		);
+	});
+
 	test('refuses a snapshot past its bounds rather than truncating it', async () => {
 		// A truncated snapshot would decompile against *some* of the analyst's
 		// accepted types and present the result as though all of them applied,

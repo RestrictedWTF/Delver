@@ -66,7 +66,7 @@ export interface IDelverDecompilationSemanticFieldWire {
 /** One authored composite type, which belongs to the image, not to an address. */
 export interface IDelverDecompilationSemanticCompositeWire {
 	readonly name: string;
-	readonly kind: 'struct';
+	readonly kind: 'struct' | 'union';
 	readonly size: number;
 	readonly fields: readonly IDelverDecompilationSemanticFieldWire[];
 }

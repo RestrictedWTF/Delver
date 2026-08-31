@@ -111,7 +111,7 @@ function readSemanticComposites(value: unknown, path: string): readonly IDecompi
 		// Fail closed on a kind this build does not know. A union decoded as a
 		// struct would lay every field out at its own offset, which is a
 		// different type wearing the analyst's name for this one.
-		if (object.kind !== 'struct') {
+		if (object.kind !== 'struct' && object.kind !== 'union') {
 			invalidOutput(`${entryPath}.kind must be "struct"`);
 		}
 		const size = readPositiveInteger(object.size, `${entryPath}.size`);
@@ -137,7 +137,7 @@ function readSemanticComposites(value: unknown, path: string): readonly IDecompi
 				invalidOutput(`${entryPath}.fields must be in ascending offset order`);
 			}
 		}
-		return { name, kind: 'struct' as const, size, fields };
+		return { name, kind: object.kind as 'struct' | 'union', size, fields };
 	});
 	for (let index = 1; index < composites.length; index++) {
 		if (composites[index - 1].name >= composites[index].name) {
