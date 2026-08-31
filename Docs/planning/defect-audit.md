@@ -404,6 +404,62 @@ would fix it properly and is a design decision, not a patch.
 
 ---
 
+## Fixed 2026-08-31 — cancelling a decompilation did not cancel anything
+
+### P1 — the worker cancelled through a monitor that ignores cancellation
+
+`PyGhidraDriver.cancel` looked up the monitor it stored for a request and called
+`monitor.cancel()`, and the server then answered `cancelled`. The monitor came
+from `pyghidra.task_monitor()`, which returns a **`StubTaskMonitor`**: calling
+`cancel()` on it leaves `isCancelled()` false.
+
+Probed directly, outside the worker:
+
+```
+stub class: ghidra.util.task.StubTaskMonitor
+stub isCancelled after cancel(): False
+```
+
+So every layer above reported a cancellation that did not happen. The caller's
+promise rejected, the UI cleared, and Ghidra carried on holding the worker —
+which also blocks the next request, because backend work is serialized. A
+`decompile_function` that checked `monitor.isCancelled()` could never see true.
+
+**Fixed** by taking the monitor from `TaskMonitorAdapter(True)`, which honours
+cancellation — the property every caller here was already assuming. Measured on
+`Auto-updater.exe`, cancelling a full analysis four seconds in:
+
+| | before | after |
+| --- | --- | --- |
+| `analyzeTarget` returns after | 24s (ignored) | **4.1s** |
+| result | `analysisComplete: true` | `cancelled` |
+
+The second row was a second defect, found by fixing the first: a cancelled
+analysis stopped part-way and still reported complete, and `analyze_target` had
+no `isCancelled` check where `decompile_function` did. A caller would then have
+compared its function set against a partially analyzed program believing it
+whole — the exact failure `analysisComplete` was added to prevent. It now
+refuses rather than marking the program analyzed.
+
+### Not fixed — no backend reports analysis progress
+
+The route that found the above was an attempt to show Ghidra's analysis phases
+during the half-minute `analyzeTarget` blocks for. The protocol, the host
+routing and the worker's watcher are built and tested, and **nothing feeds
+them**: `StubTaskMonitor` reports no message and no maximum, and
+`TaskMonitorAdapter` — which fixes cancellation — records neither either.
+
+```
+adapter reports: None 0 -1
+```
+
+Capturing phases needs a `TaskMonitor` implemented in Python through JPype so
+`setMessage`/`setProgress` can be observed, which is a larger and more
+version-fragile piece than it looked. The plumbing is kept because it is the
+shape a backend that can report needs, and because a caller that receives
+nothing behaves exactly like one that never asked. It is documented as unfed
+rather than presented as working.
+
 ## Raised, not decided — should decompilation analyze once per image?
 
 The original report that started this thread was pseudocode containing

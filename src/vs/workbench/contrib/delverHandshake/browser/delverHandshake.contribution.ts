@@ -132,13 +132,20 @@ class DelverHandshakeViewContribution extends Disposable {
 					// rather than refuse: refusing is honest but leaves the
 					// comparison permanently unavailable, and the cost is the
 					// analyst's to accept once per image.
-					treeView.message = localize('delverHandshakeAnalyzing', "Waiting for the decompiler backend to finish analyzing…");
+					const analyzing = localize('delverHandshakeAnalyzing', "Waiting for the decompiler backend to finish analyzing…");
+					treeView.message = analyzing;
 					treeView.refresh().catch(onUnexpectedError);
 					const analyzed = await decompilerService.analyzeBackendTarget({
 						contentHash: session.contentHash,
 						sessionId: session.sessionId,
 						targetPath: session.targetPath,
-					}, CancellationToken.None);
+					}, CancellationToken.None, report => {
+						if (token !== generation || !report.message) {
+							return;
+						}
+						treeView.message = localize('delverHandshakeAnalyzingPhase', "Analyzing in the decompiler backend: {0}", report.message);
+						treeView.refresh().catch(onUnexpectedError);
+					});
 					if (token !== generation) {
 						return;
 					}
@@ -262,8 +269,13 @@ class AnalyzeBackendTargetAction extends Action2 {
 					title: localize('delverAnalyzeBackendProgress', "Analyzing in the decompiler backend…"),
 					cancellable: true,
 				},
-				async () => {
-					const result = await decompilerService.analyzeBackendTarget(request, cancellation.token);
+				async progress => {
+					// A backend that reports its phases gets them shown; PyGhidra
+					// reports none, so this stays a spinner there rather than
+					// inventing a percentage for a run that takes half a minute.
+					const result = await decompilerService.analyzeBackendTarget(request, cancellation.token, report => {
+						progress.report({ message: report.message });
+					});
 					if (!result) {
 						notificationService.warn(localize('delverAnalyzeBackendUnsupported', "The configured decompiler backend cannot be asked to analyze a target."));
 						return;

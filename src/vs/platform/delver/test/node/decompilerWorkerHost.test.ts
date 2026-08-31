@@ -51,6 +51,50 @@ suite('DecompilerWorkerHost', () => {
 		host.dispose();
 	});
 
+	test('reports progress without completing the request it belongs to', async () => {
+		// A progress line and a result line are answers to the same request. If
+		// the first were taken as the answer, the caller would be handed a
+		// partial state and the real result would arrive for a request nothing
+		// is waiting on.
+		const process = createFakeProcess(request => request.method === 'hello'
+			? { protocolVersion: 1, id: request.id, result: { protocolVersion: 1, backend: { id: 'fake', label: 'Fake', version: '1' }, capabilities: { decompileFunction: true, cancel: true, persistentTargets: true, addressMappings: true, variables: true, intermediateRepresentations: [] } } }
+			: [
+				{ protocolVersion: 1, id: request.id, progress: { message: 'Function Start Search', fraction: 0.25 } },
+				// Malformed enough to be dropped rather than reported: a
+				// fraction outside 0..1 is not a fraction.
+				{ protocolVersion: 1, id: request.id, progress: { message: 'Stack', fraction: 12 } },
+				{ protocolVersion: 1, id: request.id, result: { analysisComplete: true } },
+			]);
+		const host = new DecompilerWorkerHost({ command: 'python', args: ['worker.py'], options: {} }, () => process.child);
+		await host.start();
+
+		const reported: unknown[] = [];
+		const result = await host.request('analyzeTarget', { targetId: 't' }, CancellationToken.None, progress => reported.push(progress));
+
+		assert.deepStrictEqual({ result, reported }, {
+			result: { analysisComplete: true },
+			reported: [
+				{ message: 'Function Start Search', fraction: 0.25 },
+				{ message: 'Stack', fraction: undefined },
+			],
+		});
+		host.dispose();
+	});
+
+	test('a caller that asked for no progress still gets its result', async () => {
+		const process = createFakeProcess(request => request.method === 'hello'
+			? { protocolVersion: 1, id: request.id, result: { protocolVersion: 1, backend: { id: 'fake', label: 'Fake', version: '1' }, capabilities: { decompileFunction: true, cancel: true, persistentTargets: true, addressMappings: true, variables: true, intermediateRepresentations: [] } } }
+			: [
+				{ protocolVersion: 1, id: request.id, progress: { message: 'ignored' } },
+				{ protocolVersion: 1, id: request.id, result: { done: true } },
+			]);
+		const host = new DecompilerWorkerHost({ command: 'python', args: ['worker.py'], options: {} }, () => process.child);
+		await host.start();
+
+		assert.deepStrictEqual(await host.request('analyzeTarget', {}, CancellationToken.None), { done: true });
+		host.dispose();
+	});
+
 	test('uses a Windows-compatible persistent pipe delimiter', async () => {
 		const fakeProcess = createFakeProcess(request => ({
 			protocolVersion: 1,
@@ -220,10 +264,12 @@ interface IFakeRequest {
 interface IFakeResponse {
 	readonly protocolVersion: number;
 	readonly id: string;
-	readonly result: object;
+	readonly result?: object;
+	readonly progress?: { readonly message?: string; readonly fraction?: number };
 }
 
-function createFakeProcess(respond: (request: IFakeRequest) => IFakeResponse | undefined): { readonly child: ChildProcessWithoutNullStreams; readonly stderr: PassThrough } {
+/** Several lines may answer one request: progress reports, then the result. */
+function createFakeProcess(respond: (request: IFakeRequest) => IFakeResponse | readonly IFakeResponse[] | undefined): { readonly child: ChildProcessWithoutNullStreams; readonly stderr: PassThrough } {
 	const stdin = new PassThrough();
 	const stdout = new PassThrough();
 	const stderr = new PassThrough();
@@ -239,8 +285,9 @@ function createFakeProcess(respond: (request: IFakeRequest) => IFakeResponse | u
 			const request = JSON.parse(input.slice(0, newline)) as IFakeRequest;
 			input = input.slice(newline + 1);
 			const response = respond(request);
-			if (response) {
-				stdout.write(`${JSON.stringify(response)}\n`);
+			const lines = response === undefined ? [] : (Array.isArray(response) ? response : [response as IFakeResponse]);
+			for (const emitted of lines) {
+				stdout.write(`${JSON.stringify(emitted)}\n`);
 			}
 		}
 	});

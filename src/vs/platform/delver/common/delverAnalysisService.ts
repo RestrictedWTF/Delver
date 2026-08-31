@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { Event } from '../../../base/common/event.js';
 import { createDecorator } from '../../instantiation/common/instantiation.js';
 import { IBasicBlocksResult, ICallGraphResult, ICallPathsResult, IDataRangeCorrectionWire,
 	IFunctionCorrectionWire, IFunctionProfileResult, IFunctionsResult, IGetExportsResult, IGetImageInfoResult, IGetImportsResult, IGlobalAccessesResult, IGlobalsResult, IListingWindowResult, IMomentWire, IOpenImageResult, IRangeWire, IScanStringsResult, ISetCorrectionsResult, IStringsResult, IXrefIndexResult, IXrefsResult } from './protocol.generated.js';
@@ -120,6 +121,20 @@ export interface IDelverBackendFunctionsWire {
 	readonly analysisComplete: boolean;
 }
 
+/**
+ * How far a backend has got through one long operation.
+ *
+ * Carries the `operationId` it belongs to rather than being scoped to a call,
+ * because it crosses the shared-process boundary as an event and a renderer may
+ * have more than one operation in flight.
+ */
+export interface IDelverBackendProgressWire {
+	readonly operationId: string;
+	readonly message?: string;
+	/** Completed fraction, 0 to 1, when the backend knows one. */
+	readonly fraction?: number;
+}
+
 /** Outcome of asking a backend to finish analyzing a target. */
 export interface IDelverBackendAnalysisWire {
 	readonly analysisComplete: boolean;
@@ -165,6 +180,17 @@ export interface IDelverReadMemoryWire {
  */
 export interface IDelverAnalysisService {
 	readonly _serviceBrand: undefined;
+
+	/**
+	 * Interim progress for a long backend operation, keyed by `operationId`.
+	 *
+	 * An event rather than a callback because this interface is a proxy across
+	 * the shared-process boundary, where a function argument does not survive
+	 * the crossing. Nothing is guaranteed to arrive: a backend that reports
+	 * nothing is silent here, and a caller must show the operation running
+	 * regardless.
+	 */
+	readonly onDidReportBackendProgress: Event<IDelverBackendProgressWire>;
 
 	/**
 	 * Starts a session and analyses the target. Resolves once the image is

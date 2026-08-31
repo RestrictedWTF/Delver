@@ -14,7 +14,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from delver_decompiler_worker import MAX_COMPOSITE_FIELDS, MAX_SEMANTIC_COMPOSITES, PROTOCOL_VERSION, WorkerError, WorkerServer, normalize_generated_function_names, parse_request, print_decompiled, required_rva, required_semantics, resolve_function
+from delver_decompiler_worker import MAX_COMPOSITE_FIELDS, watch_analysis_progress, MAX_SEMANTIC_COMPOSITES, PROTOCOL_VERSION, WorkerError, WorkerServer, normalize_generated_function_names, parse_request, print_decompiled, required_rva, required_semantics, resolve_function
 
 
 class FakeDriver:
@@ -311,6 +311,48 @@ class ProtocolTests(unittest.TestCase):
 		for composite in invalid:
 			with self.subTest(composite=composite), self.assertRaises(WorkerError):
 				required_semantics(snapshot(composite))
+
+	def test_analysis_progress_reports_changes_and_never_invents_a_fraction(self) -> None:
+		import threading
+
+		class Monitor:
+			"""One tick per getMessage call; the other reads describe that tick."""
+
+			def __init__(self, ticks):
+				self._ticks = list(ticks)
+				self._current = self._ticks[0]
+
+			def getMessage(self):
+				if self._ticks:
+					self._current = self._ticks.pop(0)
+				return self._current[0]
+
+			def getMaximum(self):
+				return self._current[1]
+
+			def getProgress(self):
+				return self._current[2]
+
+		monitor = Monitor([
+			("Function Start Search", 200, 50),
+			# Unchanged: must not be reported twice.
+			("Function Start Search", 200, 50),
+			# A monitor with no maximum cannot say where it got to, and a
+			# fabricated fraction would be worse than none. The message is still
+			# worth relaying.
+			("Stack", 0, 0),
+		])
+		finished = threading.Event()
+		reported: list[tuple] = []
+
+		def report(message, fraction):
+			reported.append((message, fraction))
+			if len(reported) == 2:
+				finished.set()
+
+		watch_analysis_progress(monitor, finished, report, interval=0.001)
+
+		self.assertEqual(reported, [("Function Start Search", 0.25), ("Stack", None)])
 
 	def test_server_writes_versioned_success_and_structured_error(self) -> None:
 		input_stream = io.StringIO(

@@ -110,6 +110,8 @@ class PyGhidraDriver:
 		self._structure_data_type_type: Any = None
 		self._union_data_type_type: Any = None
 		self._enum_data_type_type: Any = None
+		self._auto_analysis_manager_type: Any = None
+		self._task_monitor_type: Any = None
 		self._data_type_conflict_handler: Any = None
 		self._targets: dict[str, Target] = {}
 		self._active_monitors: dict[str, Any] = {}
@@ -134,6 +136,8 @@ class PyGhidraDriver:
 				from ghidra.app.decompiler import DecompInterface, DecompileOptions, PrettyPrinter
 				from ghidra.app.cmd.function import ApplyFunctionSignatureCmd
 				from ghidra.app.util.parser import FunctionSignatureParser
+				from ghidra.app.plugin.core.analysis import AutoAnalysisManager
+				from ghidra.util.task import TaskMonitorAdapter
 				from ghidra.framework import Application
 				from ghidra.program.model.data import DataTypeConflictHandler, EnumDataType, StructureDataType, UnionDataType
 				from ghidra.program.model.symbol import SourceType
@@ -154,9 +158,22 @@ class PyGhidraDriver:
 		self._structure_data_type_type = StructureDataType
 		self._union_data_type_type = UnionDataType
 		self._enum_data_type_type = EnumDataType
+		self._auto_analysis_manager_type = AutoAnalysisManager
+		self._task_monitor_type = TaskMonitorAdapter
 		self._data_type_conflict_handler = DataTypeConflictHandler
 		self._backend_version = str(Application.getApplicationVersion())
 		self._started = True
+
+	def _new_monitor(self) -> Any:
+		"""A monitor whose `cancel()` actually cancels.
+
+		`pyghidra.task_monitor()` returns a `StubTaskMonitor`: calling `cancel()`
+		on it leaves `isCancelled()` false, so cancelling a decompilation told
+		the caller it had stopped while Ghidra carried on holding the worker.
+		`TaskMonitorAdapter(true)` honours cancellation, which is the property
+		every caller here was already assuming.
+		"""
+		return self._task_monitor_type(True)
 
 	def hello(self) -> dict[str, Any]:
 		self.start()
@@ -271,7 +288,7 @@ class PyGhidraDriver:
 		if target is None:
 			raise WorkerError("target_not_open", f"Target '{target_id}' is not open.")
 
-		monitor = self._pyghidra.task_monitor()
+		monitor = self._new_monitor()
 		with self._monitor_lock:
 			self._active_monitors[request_id] = monitor
 		transaction_id: int | None = None
@@ -323,7 +340,7 @@ class PyGhidraDriver:
 			with self._monitor_lock:
 				self._active_monitors.pop(request_id, None)
 
-	def analyze_target(self, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
+	def analyze_target(self, request_id: str, params: dict[str, Any], report_progress: Any = None) -> dict[str, Any]:
 		"""Runs Ghidra's auto-analysis to completion on one open target.
 
 		`open_target` deliberately imports with `analyze=False`, because full
@@ -350,16 +367,45 @@ class PyGhidraDriver:
 				"timings": {"analyzeMs": elapsed_ms(started)},
 			}
 
-		monitor = self._pyghidra.task_monitor()
+		monitor = self._new_monitor()
 		with self._monitor_lock:
 			self._active_monitors[request_id] = monitor
+		# Ghidra reports through the monitor while `analyzeAll` blocks this
+		# thread, so the only way to relay it is to watch from another one. The
+		# watcher is a daemon and stops on the same event the analysis clears, so
+		# it cannot outlive the request it describes.
+		finished = threading.Event()
+		watcher = None
+		if report_progress is not None:
+			watcher = threading.Thread(
+				target=watch_analysis_progress,
+				args=(monitor, finished, report_progress),
+				daemon=True,
+			)
+			watcher.start()
 		transaction_id: int | None = None
 		try:
 			transaction_id = target.program.startTransaction("Delver full analysis")
 			with contextlib.redirect_stdout(sys.stderr):
-				target.flat_api.analyzeAll(target.program)
+				# Driven through the analysis manager rather than
+				# `flat_api.analyzeAll`, because only this form takes the monitor
+				# — `analyzeAll` reports into one of its own, which is why an
+				# earlier attempt produced a silent half-minute.
+				manager = self._auto_analysis_manager_type.getAnalysisManager(target.program)
+				manager.initializeOptions()
+				manager.reAnalyzeAll(None)
+				manager.startAnalysis(monitor)
+				# A cancelled analysis stopped part-way, and the program is
+				# exactly as incomplete as it was before. Marking it analyzed
+				# would make every later caller trust a partial function set,
+				# which is the failure `analysisComplete` exists to prevent.
+				if monitor.isCancelled():
+					raise WorkerError("cancelled", "The analysis was cancelled.")
 				mark_program_analyzed(target.program)
 		finally:
+			finished.set()
+			if watcher is not None:
+				watcher.join(timeout=2)
 			if transaction_id is not None:
 				# Committed, unlike the semantic snapshot a decompilation applies.
 				# Analysis is a fact the backend derived from the bytes, not
@@ -686,7 +732,7 @@ class WorkerServer:
 		if method == "decompileFunction":
 			return self._driver.decompile_function(request_id, params)
 		if method == "analyzeTarget":
-			return self._driver.analyze_target(request_id, params)
+			return self._driver.analyze_target(request_id, params, self._progress_reporter(request_id))
 		if method == "listFunctions":
 			return self._driver.list_functions(params)
 		if method == "closeTarget":
@@ -711,6 +757,25 @@ class WorkerServer:
 		if error.data is not None:
 			encoded["data"] = error.data
 		self._write({"protocolVersion": PROTOCOL_VERSION, "id": request_id, "error": encoded})
+
+	def _progress_reporter(self, request_id: str):
+		"""A callable one long operation uses to say where it has got to.
+
+		Progress lines carry the id of the request they belong to and no result,
+		so a reader correlates them without a second channel and can never
+		mistake one for an answer.
+		"""
+		def report(message: str | None, fraction: float | None) -> None:
+			progress: dict[str, Any] = {}
+			if message:
+				progress["message"] = message
+			if fraction is not None:
+				progress["fraction"] = fraction
+			if not progress:
+				return
+			self._write({"protocolVersion": PROTOCOL_VERSION, "id": request_id, "progress": progress})
+
+		return report
 
 	def _write(self, response: dict[str, Any]) -> None:
 		with self._output_lock:
@@ -983,6 +1048,47 @@ def program_is_analyzed(program: Any) -> bool:
 		# reported as analyzed produces confident nonsense; the reverse only
 		# declines to answer.
 		return False
+
+
+ANALYSIS_PROGRESS_INTERVAL_SECONDS = 0.5
+
+
+def watch_analysis_progress(
+	monitor: Any,
+	finished: threading.Event,
+	report: Any,
+	interval: float = ANALYSIS_PROGRESS_INTERVAL_SECONDS,
+) -> None:
+	"""Relays a task monitor's state until the work it describes is done.
+
+	Every read is guarded: a monitor that raises, or reports a maximum of zero,
+	is a monitor that cannot say where it has got to, and reporting a fabricated
+	fraction for it would be worse than reporting none. The message alone is
+	still worth sending — "Function Start Search" tells an analyst more than a
+	spinner does.
+	"""
+	last: tuple[str | None, float | None] | None = None
+	while not finished.wait(interval):
+		try:
+			message = str(monitor.getMessage()) if monitor.getMessage() is not None else None
+		except Exception:
+			message = None
+		fraction = None
+		try:
+			maximum = float(monitor.getMaximum())
+			if maximum > 0:
+				fraction = min(1.0, max(0.0, float(monitor.getProgress()) / maximum))
+		except Exception:
+			fraction = None
+		current = (message, None if fraction is None else round(fraction, 3))
+		# Only when something changed: a line per half second that says exactly
+		# what the last one said is noise on a pipe that also carries results.
+		if current != last and (current[0] or current[1] is not None):
+			last = current
+			try:
+				report(current[0], current[1])
+			except Exception:
+				return
 
 
 def mark_program_analyzed(program: Any) -> None:

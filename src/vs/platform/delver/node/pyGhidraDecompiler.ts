@@ -9,7 +9,7 @@ import { CancellationToken } from '../../../base/common/cancellation.js';
 import { Disposable } from '../../../base/common/lifecycle.js';
 import * as path from '../../../base/common/path.js';
 import { IDelverDecompilationSemanticsWire } from '../common/delverAnalysisService.js';
-import { DecompilerWorkerHost, IDecompilerWorkerInvocation } from './decompilerWorkerHost.js';
+import { DecompilerWorkerHost, IDecompilerWorkerInvocation, IWorkerProgress } from './decompilerWorkerHost.js';
 
 const WORKER_SCRIPT_NAME = 'delver_decompiler_worker.py';
 const ANALYSIS_PROFILE_VERSION = 'analysis-v1';
@@ -163,7 +163,7 @@ export class PyGhidraDecompiler extends Disposable {
 	 *
 	 * `undefined` when the backend does not advertise the capability.
 	 */
-	async analyzeTarget(targetId: string, targetPath: string, contentHash: string, token: CancellationToken): Promise<{ readonly analysisComplete: boolean; readonly alreadyAnalyzed: boolean } | undefined> {
+	async analyzeTarget(targetId: string, targetPath: string, contentHash: string, token: CancellationToken, onProgress?: (progress: IWorkerProgress) => void): Promise<{ readonly analysisComplete: boolean; readonly alreadyAnalyzed: boolean } | undefined> {
 		const hello = await this.worker.start();
 		if (hello.capabilities?.analyzeTarget !== true) {
 			return undefined;
@@ -173,7 +173,7 @@ export class PyGhidraDecompiler extends Disposable {
 		if (!workerTargetId) {
 			throw new Error(`Target '${targetId}' was not retained after preparation.`);
 		}
-		const result = await this.worker.request('analyzeTarget', { targetId: workerTargetId }, token);
+		const result = await this.worker.request('analyzeTarget', { targetId: workerTargetId }, token, onProgress);
 		const record = result as { analysisComplete?: unknown; alreadyAnalyzed?: unknown };
 		return {
 			analysisComplete: record.analysisComplete === true,

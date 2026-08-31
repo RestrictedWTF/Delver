@@ -5,6 +5,7 @@
 
 import { Dirent, promises as fs } from 'fs';
 import { CancellationToken, CancellationTokenSource } from '../../../base/common/cancellation.js';
+import { Emitter } from '../../../base/common/event.js';
 import { CancellationError, isCancellationError } from '../../../base/common/errors.js';
 import { Disposable, MutableDisposable } from '../../../base/common/lifecycle.js';
 import { basename, dirname, isAbsolute, join, normalize } from '../../../base/common/path.js';
@@ -16,7 +17,7 @@ import {
 	IDelverDecompilerCacheInfoWire,
 	IDelverDecompilerTargetPreparationWire,
 	IDelverDecompilationSemanticsWire,
-	IDelverBackendAnalysisWire, IDelverBackendFunctionsWire, IDelverDecompilationWire,
+	IDelverBackendAnalysisWire, IDelverBackendFunctionsWire, IDelverBackendProgressWire, IDelverDecompilationWire,
 	IDelverAnalysisService,
 	IDelverReadMemoryWire,
 } from '../common/delverAnalysisService.js';
@@ -193,6 +194,9 @@ export class DelverAnalysisService extends Disposable implements IDelverAnalysis
 		return previous;
 	}
 
+	private readonly _onDidReportBackendProgress = this._register(new Emitter<IDelverBackendProgressWire>());
+	readonly onDidReportBackendProgress = this._onDidReportBackendProgress.event;
+
 	async analyzeBackendTarget(sessionId: AnalysisSessionId, contentHash: string, ghidraHome: string, pythonPath: string, backend: 'pyghidra' | 'headless', operationId: string): Promise<IDelverBackendAnalysisWire | undefined> {
 		if (backend !== 'pyghidra') {
 			return undefined;
@@ -216,6 +220,7 @@ export class DelverAnalysisService extends Disposable implements IDelverAnalysis
 				this.session(sessionId).targetPath,
 				contentHash,
 				source.token,
+				progress => this._onDidReportBackendProgress.fire({ operationId, message: progress.message, fraction: progress.fraction }),
 			);
 		} finally {
 			this.decompilations.delete(operationId);

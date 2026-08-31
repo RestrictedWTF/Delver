@@ -2418,3 +2418,39 @@ reads all three kinds back through it — the test that would have caught it.
 
 Verified: Rust workspace green, corpus 7/7, client typecheck clean, 411 Delver TS
 tests, worker 17/17.
+
+## Cancelling a decompilation now cancels it
+
+Went after the ledger's "background full-analysis progress remains" and found
+something worse on the way in.
+
+`PyGhidraDriver.cancel` called `monitor.cancel()` and the server answered
+`cancelled`. The monitor came from `pyghidra.task_monitor()`, which returns a
+`StubTaskMonitor` — calling `cancel()` on it leaves `isCancelled()` false. Every
+layer above reported a cancellation that never happened: the promise rejected,
+the UI cleared, and Ghidra carried on holding the worker, which also blocks the
+next request because backend work is serialized.
+
+Taking the monitor from `TaskMonitorAdapter(True)` fixes it. Measured, cancelling
+a full analysis four seconds in: `analyzeTarget` returned after **4.1s** instead
+of running the full 24.
+
+Fixing that exposed a second one. The cancelled run still answered
+`analysisComplete: true` — `analyze_target` had no `isCancelled` check where
+`decompile_function` did — so a caller would have compared against a partially
+analyzed program believing it whole, which is precisely what `analysisComplete`
+was added to prevent. It refuses now instead of marking the program analyzed.
+
+**The progress feature itself does not work, and is documented as such.** The
+protocol carries progress lines correlated by request id, the host routes them
+without ever mistaking one for a result, and the worker watches a monitor for
+changes — all tested. Nothing feeds them: `StubTaskMonitor` reports no message
+and no maximum, and `TaskMonitorAdapter` records neither either. Capturing
+phases needs a `TaskMonitor` implemented in Python through JPype, which is
+larger and more version-fragile than it looked. The plumbing is kept because it
+is the shape a reporting backend needs and costs a caller nothing when unfed,
+but it is not presented as working.
+
+Verified: client typecheck clean, 411 Delver TS tests, 10 worker-host tests,
+worker 18/18, plus live probes against real Ghidra for cancellation timing, the
+uncancelled path, and decompilation.

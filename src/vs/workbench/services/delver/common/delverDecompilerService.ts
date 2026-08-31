@@ -10,7 +10,7 @@ import { IDisposable } from '../../../../base/common/lifecycle.js';
 import { stringHash } from '../../../../base/common/hash.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { localize } from '../../../../nls.js';
-import { AnalysisSessionId, DelverDecompilerStatusWire, IDelverAnalysisService, IDelverBackendAnalysisWire, IDelverBackendFunctionsWire, IDelverDecompilationTimingsWire, IDelverDecompilerCacheInfoWire } from '../../../../platform/delver/common/delverAnalysisService.js';
+import { AnalysisSessionId, DelverDecompilerStatusWire, IDelverAnalysisService, IDelverBackendAnalysisWire, IDelverBackendFunctionsWire, IDelverBackendProgressWire, IDelverDecompilationTimingsWire, IDelverDecompilerCacheInfoWire } from '../../../../platform/delver/common/delverAnalysisService.js';
 import { IDelverProjectSnapshot } from '../../../../platform/delver/common/delverProjectStoreService.js';
 import { EditOp } from '../../../../platform/delver/common/interpretation.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
@@ -226,7 +226,7 @@ export interface IDelverDecompilerBackend {
 	prepareTarget?(request: Omit<IDecompileFunctionRequest, 'functionRva'>): Promise<void>;
 	decompileFunction(request: IDecompileFunctionRequest, token: CancellationToken): Promise<IDecompiledFunction>;
 	listBackendFunctions?(request: Omit<IDecompileFunctionRequest, 'functionRva'>): Promise<IDelverBackendFunctionsWire | undefined>;
-	analyzeBackendTarget?(request: Omit<IDecompileFunctionRequest, 'functionRva'>, token: CancellationToken): Promise<IDelverBackendAnalysisWire | undefined>;
+	analyzeBackendTarget?(request: Omit<IDecompileFunctionRequest, 'functionRva'>, token: CancellationToken, onProgress?: (progress: IDelverBackendProgressWire) => void): Promise<IDelverBackendAnalysisWire | undefined>;
 }
 
 /** Decompiles functions through the configured replaceable backend. */
@@ -258,7 +258,7 @@ export interface IDelverDecompilerService {
 	 * Finishes the backend's analysis of one target, so its whole function set
 	 * means something. Minutes on a large image, and cancellable.
 	 */
-	analyzeBackendTarget(request: Omit<IDecompileFunctionRequest, 'functionRva'>, token: CancellationToken): Promise<IDelverBackendAnalysisWire | undefined>;
+	analyzeBackendTarget(request: Omit<IDecompileFunctionRequest, 'functionRva'>, token: CancellationToken, onProgress?: (progress: IDelverBackendProgressWire) => void): Promise<IDelverBackendAnalysisWire | undefined>;
 }
 
 /** Raised when pseudocode is requested before a backend is available. */
@@ -358,7 +358,7 @@ export class SharedProcessDecompilerBackend implements IDelverDecompilerBackend 
 		this.logService?.info(`[Delver decompiler] prepared target generation ${prepared.processGeneration}: spawn=${prepared.spawnMs}ms handshake=${prepared.handshakeMs}ms open=${prepared.targetOpenMs}ms`);
 	}
 
-	async analyzeBackendTarget(request: Omit<IDecompileFunctionRequest, 'functionRva'>, token: CancellationToken): Promise<IDelverBackendAnalysisWire | undefined> {
+	async analyzeBackendTarget(request: Omit<IDecompileFunctionRequest, 'functionRva'>, token: CancellationToken, onProgress?: (progress: IDelverBackendProgressWire) => void): Promise<IDelverBackendAnalysisWire | undefined> {
 		const ghidraHome = this.ghidraHome;
 		const status = this.status.state === 'ready' ? this.status : await this.prepare();
 		if (!ghidraHome || status.state !== 'ready') {
@@ -371,6 +371,17 @@ export class SharedProcessDecompilerBackend implements IDelverDecompilerBackend 
 		const cancellationListener = token.onCancellationRequested(() => {
 			void this.analysisService.cancelDecompile(operationId);
 		});
+		// Filtered by operation here rather than by the caller: the event is
+		// shared across every operation crossing the boundary, and a caller
+		// given another operation's progress would report the wrong thing
+		// confidently.
+		const progressListener = onProgress
+			? this.analysisService.onDidReportBackendProgress(progress => {
+				if (progress.operationId === operationId) {
+					onProgress(progress);
+				}
+			})
+			: undefined;
 		try {
 			return await this.analysisService.analyzeBackendTarget(
 				request.sessionId,
@@ -381,6 +392,7 @@ export class SharedProcessDecompilerBackend implements IDelverDecompilerBackend 
 				operationId,
 			);
 		} finally {
+			progressListener?.dispose();
 			cancellationListener.dispose();
 		}
 	}
@@ -563,8 +575,8 @@ export class DelverDecompilerService implements IDelverDecompilerService {
 		return this.backend.listBackendFunctions?.(request) ?? Promise.resolve(undefined);
 	}
 
-	analyzeBackendTarget(request: Omit<IDecompileFunctionRequest, 'functionRva'>, token: CancellationToken): Promise<IDelverBackendAnalysisWire | undefined> {
-		return this.backend.analyzeBackendTarget?.(request, token) ?? Promise.resolve(undefined);
+	analyzeBackendTarget(request: Omit<IDecompileFunctionRequest, 'functionRva'>, token: CancellationToken, onProgress?: (progress: IDelverBackendProgressWire) => void): Promise<IDelverBackendAnalysisWire | undefined> {
+		return this.backend.analyzeBackendTarget?.(request, token, onProgress) ?? Promise.resolve(undefined);
 	}
 
 	decompileFunction(request: IDecompileFunctionRequest, token: CancellationToken): Promise<IDecompiledFunction> {

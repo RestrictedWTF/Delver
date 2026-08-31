@@ -27,11 +27,34 @@ interface IWorkerResponse {
 	readonly id: string;
 	readonly result?: object;
 	readonly error?: IWorkerError;
+	readonly progress?: IWorkerProgress;
+}
+
+/**
+ * An interim report on a request that is still running.
+ *
+ * Carries the id of the request it belongs to, so it needs no separate
+ * correlation and cannot be mistaken for a result: a message with `progress` is
+ * never the end of a request, and a request is never finished by one.
+ *
+ * **Nothing is guaranteed to send these.** PyGhidra hands out a
+ * `StubTaskMonitor`, which reports no message and no maximum, so that backend
+ * emits none today and a caller must render the operation as running without
+ * them. The route exists because it is the shape a backend that *can* report
+ * needs, and because a caller that never receives one behaves identically to a
+ * caller that does not ask.
+ */
+export interface IWorkerProgress {
+	/** What the backend says it is doing, in its own words. */
+	readonly message?: string;
+	/** Completed fraction, 0 to 1, when the backend knows one. */
+	readonly fraction?: number;
 }
 
 interface IPendingRequest {
 	readonly resolve: (result: object) => void;
 	readonly reject: (error: Error) => void;
+	readonly onProgress?: (progress: IWorkerProgress) => void;
 }
 
 export interface IDecompilerWorkerInvocation {
@@ -135,7 +158,7 @@ export class DecompilerWorkerHost extends Disposable {
 		return { hello, generation: this.generation, spawnMs: this.spawnMs, handshakeMs: this.handshakeMs, diagnostic: this.diagnostic };
 	}
 
-	async request(method: string, params: object, token: CancellationToken): Promise<object> {
+	async request(method: string, params: object, token: CancellationToken, onProgress?: (progress: IWorkerProgress) => void): Promise<object> {
 		if (this.stopping) {
 			throw new Error('Decompiler worker is shutting down.');
 		}
@@ -143,7 +166,7 @@ export class DecompilerWorkerHost extends Disposable {
 			throw new CancellationError();
 		}
 		await this.start();
-		return this.sendRequest(method, params, token);
+		return this.sendRequest(method, params, token, onProgress);
 	}
 
 	/** Closes the worker input and waits for the backend to release persistent project locks. */
@@ -209,7 +232,7 @@ export class DecompilerWorkerHost extends Disposable {
 		}
 	}
 
-	private sendRequest(method: string, params: object, token: CancellationToken): Promise<object> {
+	private sendRequest(method: string, params: object, token: CancellationToken, onProgress?: (progress: IWorkerProgress) => void): Promise<object> {
 		if (token.isCancellationRequested) {
 			return Promise.reject(new CancellationError());
 		}
@@ -231,6 +254,7 @@ export class DecompilerWorkerHost extends Disposable {
 					cancellationListener.dispose();
 					reject(error);
 				},
+				onProgress,
 			});
 			cancellationListener = token.onCancellationRequested(() => {
 				if (!this.pending.delete(id)) {
@@ -321,6 +345,19 @@ export class DecompilerWorkerHost extends Disposable {
 		}
 		const pending = this.pending.get(response.id);
 		if (!pending) {
+			return;
+		}
+		// Reported and dropped, never resolved: a progress line says the request
+		// is still running, so consuming it as a result would answer a caller
+		// with a partial state and leave the real answer arriving for a request
+		// nothing is waiting on.
+		if (response.progress && typeof response.progress === 'object') {
+			pending.onProgress?.({
+				message: typeof response.progress.message === 'string' ? response.progress.message : undefined,
+				fraction: typeof response.progress.fraction === 'number' && response.progress.fraction >= 0 && response.progress.fraction <= 1
+					? response.progress.fraction
+					: undefined,
+			});
 			return;
 		}
 		this.pending.delete(response.id);
