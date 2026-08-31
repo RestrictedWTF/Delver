@@ -1,6 +1,6 @@
 # 0017 — One reference frame for function boundaries, and honest placeholders
 
-**Status:** accepted
+**Status:** accepted, amended 2026-08-31 (repair declined on measurement)
 **Date:** 2026-08-30
 **Affects:** `CLAUDE.md` invariants 3, 4, 6 ·
 [0001](0001-wire-protocol-framing-and-encoding.md) ·
@@ -112,11 +112,35 @@ can decide what authored boundaries mean without re-deriving them. This is the
 one place the design touches invariant 3, and it is why this ADR exists.
 
 Repairing the disagreement — feeding Delver's vouched boundaries to a backend so
-`UNDEF_` becomes `SUB_` — is deliberately **not** decided here. It ports onto
-[0013](0013-accepted-semantics-as-decompilation-input.md)'s snapshot machinery
-when it happens, and it stays gated until the reconciliation has been read on
-real samples. Pushing an unvalidated function set makes a decompiler emit
-confident wrong C.
+`UNDEF_` becomes `SUB_` — was gated here until the reconciliation had been read
+on real samples. **It has been, and the answer is that there is nothing to
+repair.**
+
+Measured against a *fully analyzed* Ghidra program:
+
+| | Delver | backend | backend coverage gaps | of which vouched |
+| --- | --- | --- | --- | --- |
+| `Auto-updater.exe` | 1765 | 1550 | 82 | **0** |
+| `appinfo.dll` | 1274 | 1269 | 8 | **0** |
+
+Every boundary the backend lacks is one Delver reached by linear sweep — its own
+unvouched guess, and on `Auto-updater.exe` twelve of them are entries in a jump
+table. Pushing the vouched set would push an empty set; pushing the rest would
+ask the backend to create functions at addresses nothing vouches for, which is
+the confident-wrong outcome the gate existed to prevent, arrived at from the
+opposite direction.
+
+The gap repair was designed to close turns out to have been an artifact of
+*when* the backend was asked. `openTarget` imports with `analyze=False`, so the
+first answer is a partial program: 1265 functions rather than 1550, and 26
+`UNDEF_` placeholders in one function rather than none. Finishing the analysis
+closes the gap that repair would have papered over, and costs 22–30s once per
+content hash.
+
+Repair is therefore **not built**, and should not be built on this evidence. If
+a backend appears that genuinely misses vouched boundaries after full analysis,
+the decision is worth reopening with that backend's numbers — the reconciliation
+is what would show it.
 
 ## Alternatives
 

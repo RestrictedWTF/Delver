@@ -2313,3 +2313,32 @@ rules cost more than they save: 225 of the sample's 244 swept functions have no
 incoming reference at all, which is exactly the code the sweep exists to find.
 
 Verified: client typecheck clean, 406 Delver TS tests, worker 13/13.
+
+## Repair is declined, and ADR 0017 is closed
+
+The last unbuilt piece of the handshake was repair: push Delver's vouched
+boundaries into the backend so a call with no recovered function gets a real
+name. It was gated on reading the reconciliation against real samples first. It
+has been read, and the answer is that there is nothing to push.
+
+Against a *fully analyzed* Ghidra program:
+
+| | Delver | backend | backend coverage gaps | of which vouched |
+| --- | --- | --- | --- | --- |
+| `Auto-updater.exe` | 1765 | 1550 | 82 | **0** |
+| `appinfo.dll` | 1274 | 1269 | 8 | **0** |
+
+Every boundary the backend lacks is one Delver reached by linear sweep — its own
+guess, twelve of them jump-table entries. The vouched set to push is empty, and
+pushing the rest would ask a decompiler to create functions at addresses nothing
+vouches for, which is exactly the outcome the gate existed to prevent.
+
+The gap repair was designed to close was an artifact of *when* the backend was
+asked, not of what it can find. ADR 0017 is amended with the numbers and the
+feature is marked done with repair recorded as deliberately skipped — if a
+backend ever does miss vouched boundaries after full analysis, the
+reconciliation is what will show it, and the decision is worth reopening with
+that backend's numbers.
+
+Verified: Rust workspace green, corpus 7/7, client typecheck clean, 406 Delver
+TS tests, worker 13/13.
