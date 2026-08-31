@@ -475,7 +475,7 @@ Analyzing in the decompiler backend: Create Address Tables
 Analyzing in the decompiler backend: Decompiler Parameter ID - decompile FUN_14002b7b0
 ```
 
-## Open — declared-but-unreachable surfaces, 2026-08-31 sweep
+## Declared-but-unreachable surfaces — 2026-08-31 sweep
 
 A read-only sweep for surfaces that look finished from the inside but that
 nothing can invoke. The pattern has bitten twice already: `DelverTargetService`
@@ -483,27 +483,21 @@ has had no consumer since 2026-08-07, and a progress route was built end to end
 before anyone checked whether the backend could feed it. Ordered by what each
 costs to discover the hard way.
 
-### P1 — two `initialize` responders disagree about the protocol version
+### Fixed — the protocol version is negotiated, from one constant
 
-`provider-file/src/lib.rs:78` reports `protocol_version: "0"`.
-`server-analysis/src/main.rs:653` reports `"1"`. **Nothing reads either.** The
-consequence is not today's behaviour, it is that the first person to add the
-check — the obvious, correct thing to do — breaks one of the two processes, and
-the failure will look like a transport bug rather than a constant that was never
-reconciled. `ErrorKind::ProtocolVersionMismatch` exists for exactly this and is
-produced by nothing.
+`provider-file` reported `"0"` and `server-analysis` `"1"`, and nothing read
+either. The consequence was never today's behaviour: it was that the first
+person to add the check — the obvious, correct thing to do — would have broken
+one of the two processes, and the failure would have looked like a transport bug
+rather than a constant nobody reconciled.
 
-Decide: negotiate on `initialize` and make the constants agree, or delete the
-field and the error kind. Leaving two disagreeing literals in place is the one
-option with a trap in it.
-
-**Fixed 2026-08-31 — negotiated.** `delver_protocol::PROTOCOL_VERSION` (`"1"`)
-is the single source; both responders declare it, and it reaches TypeScript as
-the generated `DELVER_PROTOCOL_VERSION` so the client checks the handshake
-against the same literal. `readInitializeResult` in
-`platform/delver/common/protocolVersion.ts` refuses a mismatch — and a missing
-or non-string version, which fails closed — at all three `initialize` call
-sites.
+`delver-protocol` now owns `PROTOCOL_VERSION` as the single source, both
+responders declare it, and all three `initialize` call sites check it — two of
+which previously discarded the result entirely. A missing or non-string version
+is a mismatch, not a pass, and the refusal names both versions in the same
+register as the decompiler worker's `unsupported_protocol`. The constant reaches
+TypeScript through the generator rather than a hand-edited file (invariant 12),
+and `ErrorKind::ProtocolVersionMismatch` finally has a producer.
 
 ### Fixed — `ReadMemoryParams.moment` is required, and the provider honours it
 
