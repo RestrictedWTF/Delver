@@ -1,6 +1,6 @@
 # 0013 — Accepted interpretation is an input to decompilation, not backend state
 
-**Status:** accepted
+**Status:** accepted, amended 2026-08-31 (what a composite is, and how kinds are added)
 **Date:** 2026-08-28
 **Affects:** `CLAUDE.md` invariant 3 · [0005](0005-portable-project-database.md) ·
 [0006](0006-proposal-resolution-in-the-edit-log.md) ·
@@ -44,7 +44,7 @@ decompilation's identity. It is never written into the backend's own state.**
   `IDecompilationSemanticDependencies`: `schemaVersion: 2` plus the accepted
   `composite`, `dataType` and `functionPrototype` declarations for that content
   hash. A declaration is a canonical `0x…` RVA and a declaration string, unique
-  and ascending by RVA; a composite is a named layout, unique and ascending by
+  and ascending by RVA; a composite is a named *type*, unique and ascending by
   name, and the `composites` array is applied **before** the other two so a
   declaration can reference a struct the same snapshot introduced. The envelope
   is read from the materialized interpretation view, so only accepted edits are
@@ -54,6 +54,20 @@ decompilation's identity. It is never written into the backend's own state.**
   in is what keeps pseudocode saved before composites existed from comparing as
   stale. The key set is pinned per version, so a payload confused about its own
   shape is refused rather than guessed at.
+- **A composite's `kind` is a value, not a key, and that is what lets kinds be
+  added without a version bump** (amended 2026-08-31). Written first with a
+  single kind, `struct`; `union` and `enum` followed. A version pins the
+  *envelope's* keys — `schemaVersion`, `composites`, `dataTypes`,
+  `functionPrototypes` — and no kind changes those, so a snapshot carrying a
+  union is still a v2 snapshot. What a kind may change is the *entry* shape: a
+  struct and a union carry `fields` at offsets, an enum carries `members` of
+  name and value, because members are constants and have no storage to place.
+  That shape is therefore checked per entry, and the kind is read **before** it,
+  so a kind a build does not implement is refused by name rather than by a
+  key-set complaint about fields when the real problem is that the reader is
+  older than the writer. Every decoder fails closed on an unknown kind: reading
+  a union as a struct would lay every member out at its own offset, which is a
+  different type wearing the analyst's name for this one.
 - PyGhidra applies the snapshot inside a transaction opened for that one
   request and **rolled back unconditionally** — `endTransaction(id, False)` in
   the `finally` of `decompile_function`, on success exactly as on failure and

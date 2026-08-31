@@ -7,6 +7,7 @@ folder gets rewritten to match current reality — that's the entire point of it
 | --- | --- |
 | [original-vision.md](original-vision.md) | The product vision as originally written, before any implementation review. Preserved verbatim. |
 | [critique-and-direction.md](critique-and-direction.md) | The review of that vision: what to keep (B-items), what breaks, what was missing (G-items). The standing decisions it produced have been folded into [`../architecture/`](../architecture/). |
+| [development-log-2026-08.md](development-log-2026-08.md) | The working notes that accumulated in [`../planning/status.md`](../planning/status.md) through August 2026, oldest first. Moved here when that file was returned to its one-page contract. Point-in-time reasoning and measurements, including ones a later entry corrected. |
 | [adr/](adr/) | Architecture Decision Records — one page per expensive-to-reverse decision |
 | [plans/](plans/) | Executed phase plans, with a record of where execution diverged from intention |
 

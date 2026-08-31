@@ -100,10 +100,11 @@ P2 is built on exactly what P1 produces.
 
 ## Can slide out of P1 if you want P2 sooner
 
-- **Hex view** (M) — genuinely useful, but nothing in P2 needs it. Slide to P4
-  where it pairs with live memory. A smaller post-P2 read-only data-section
-  viewer may land first: double-clicking a Strings row should open `.rdata` or
-  `.data` at that string's RVA, with address history and focus-bus integration.
+- **Hex view** (M) — **deferred to P4.** Genuinely useful, but nothing in P2
+  needs it, and at P4 it pairs with live memory. A smaller post-P2 read-only
+  data-section viewer may land first: double-clicking a Strings row should open
+  `.rdata` or `.data` at that string's RVA, with address history and focus-bus
+  integration.
 - Resource and TLS parsing — entry points and code matter first.
 
 ## Explicitly not in P1
@@ -211,7 +212,11 @@ Primary references: [IDALib](https://docs.hex-rays.com/user-guide/idalib),
 [IDALib lifecycle and threading](https://cpp.docs.hex-rays.com/idalib_8hpp.html),
 and [Hex-Rays IDAPython API](https://python.docs.hex-rays.com/ida_hexrays/index.html).
 
-## p-code
+## p-code — **deferred**
+
+Backend-specific IR has no consumer, and the common result schema deliberately
+refuses a lossy common IR. Revive when a surface actually needs a
+backend-specific capability.
 
 | Item | Size | Notes |
 | --- | --- | --- |
@@ -234,6 +239,16 @@ until late — and a one-implementation abstraction is always wrong. Minidump is
 the cheapest fix: it exercises threads, registers, modules, and multiple address
 spaces, and "open a crash dump" is a real static workflow on its own.
 
+**Considered for deferral on 2026-08-31 and kept.** The argument for parking it
+was that nothing in P1–P3 consumes a crash dump, which is true and is the wrong
+test: this row's job is not to serve a consumer but to prove the provider
+abstraction, and `DelverTargetService` is already built with no consumer for
+exactly that reason. Deferring the only planned second provider would leave
+`ITargetProvider` and `TargetCapability` — invariant 6 — with one implementation
+through P3 and into P4, which is the risk this row exists to buy off. "No
+consumer yet" will be true right up until the abstraction is expensive to
+change.
+
 **Exit of P2:** decompiled C for an arbitrary function, synced to the listing,
 with renames flowing both ways and repeated requests served by a persistent,
 discoverable backend. Adding IDA/Hex-Rays changes an adapter, not the workbench.
@@ -255,7 +270,7 @@ the [P3 AI integration plan](ai-integration-plan.md).
 | Evidence chain UI — click a claim, see tool calls and byte ranges | M |
 | Local DTP endpoint + `DELVER_SESSION` handoff, token-authed | M |
 | **Python client** (`delver` package) | M |
-| Investigation notebooks (`.delvernb`) | L |
+| Investigation notebooks (`.delvernb`) — **deferred** | L |
 | UI ops over the protocol (`report_finding`, `focus`, `annotate`) | S |
 | Findings readable back (`delver_list_findings`, status filter, undecided count) | S |
 | Data/code classification corrections (`kind: "data"` ranges excluded from the derivation) | M |
@@ -263,6 +278,9 @@ the [P3 AI integration plan](ai-integration-plan.md).
 | Report export with evidence links (`delver_export_report`, offline-capable Markdown) | S |
 | Untrusted-content handling + injection detection | M |
 | Eval harness on the golden corpus, in CI | M |
+
+Investigation notebooks are large and unproven: deferred until P3f evidence
+shows agents need durable multi-session artifacts.
 
 **Exit:** the model reads decompiled output for an unfamiliar routine, proposes
 30 renames and a finding, the analyst reviews them in one pass, and every
