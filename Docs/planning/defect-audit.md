@@ -526,30 +526,27 @@ place, and it would leave the invariant resting on every future caller
 remembering. Required means the compiler asks. The provider's own test lost its
 "omitted" case because that case no longer compiles, which is the point.
 
-### P1 — the design doc and the code disagree about what a Moment is
+### Fixed — one Moment taxonomy, settled by ADR
 
-Found while fixing the Moment-on-the-wire defect above, and worse than that one,
-because it is the vocabulary rather than a field.
+`data-model.md` said `Live | Frozen | Snapshot | Replay`; `delver-core` said
+`Static | Snapshot | Live`. `Static`, the only kind anything produces, was
+missing from the design doc, and `Frozen` and `Replay` were missing from the
+code while three documents committed to them — the P4 row "Real `Moment`
+handling: Live vs. Frozen", `debugger-provider.md`'s rule that a frozen read may
+be cached aggressively and a live one may not, and the P7 exit claim that
+"`MomentKind.Replay` activates for time travel with no data-model change — it
+was designed in at P0", which was false as written.
 
-`Docs/architecture/data-model.md:70` defines the taxonomy as
-`Live | Frozen | Snapshot | Replay`. `delver-core/src/lib.rs:78` defines it as
-`Static | Snapshot | Live`.
+[ADR 0018](../history/adr/0018-one-moment-taxonomy.md) settles it at five kinds,
+`Static | Frozen | Snapshot | Live | Replay`, in both definitions, with the
+shape left at `kind` + `epoch`: `tick` is what `epoch` already is, and
+`snapshotId` duplicates target identity. Adding two optional fields no provider
+populates would have repeated the defect immediately above this one.
 
-`Static` — the only kind anything actually sends — appears nowhere in the design
-doc. `Frozen` (a halted target, where reads within an epoch are coherent) and
-`Replay` (a position in a recorded trace) appear nowhere in the code, and both
-carry real meaning for P4: the doc's own rules lean on the distinction between a
-`Live` read that may tear and a `Frozen` one that may not.
-
-This is not a defect to patch. Adding or removing a `MomentKind` variant changes
-the axis every read and every cache key is keyed on, which is invariant 1's
-subject and needs its own ADR. What it means today is that the file provider is
-the only provider, `Static` is the only value, and nothing has yet had to
-distinguish the cases the doc anticipated — so the divergence has cost nothing
-and will cost a great deal at the first non-file provider, which is exactly when
-someone will pick one taxonomy at speed.
-
-Settle it before P4, not during it.
+The `momentKindToWire` switch has no default arm on purpose, so a sixth kind
+fails to compile rather than falling through to a plausible neighbour — a moment
+mapped to a neighbouring kind is a read cached under the wrong rules. A
+round-trip test covers all five through serialisation and both conversions.
 
 ### P2 — `getFunctionSeeds` is a whole provider route with no caller
 

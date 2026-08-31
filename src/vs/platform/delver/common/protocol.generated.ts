@@ -1457,17 +1457,27 @@ export type IListingWindowRowWire =
  */
 export const enum MomentKindWire {
 	/**
-	 * Unchanging content.
+	 * Unchanging content. Cacheable forever.
 	 */
 	Static = 'static',
 	/**
-	 * Captured snapshot.
+	 * A live target, halted. Reads within the epoch are coherent.
+	 */
+	Frozen = 'frozen',
+	/**
+	 * A captured, immutable state of a live target.
 	 */
 	Snapshot = 'snapshot',
 	/**
-	 * Live target.
+	 * Running. Reads may observe change between calls, and may tear.
 	 */
 	Live = 'live',
+	/**
+	 * A position within a recorded execution trace. `epoch` carries the position; see [ADR 0018].
+	 *
+	 * [ADR 0018]: ../../../Docs/history/adr/0018-one-moment-taxonomy.md
+	 */
+	Replay = 'replay',
 }
 
 /**

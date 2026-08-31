@@ -68,30 +68,39 @@ address" a model operation rather than a special case, and it's how the same
 // src/vs/platform/delver/common/moment.ts
 
 export const enum MomentKind {
-	/** Follows the target. Reads may observe change between calls. */
-	Live,
-	/** Target is halted; reads within this epoch are coherent. */
-	Frozen,
-	/** A captured, immutable state. */
-	Snapshot,
-	/** A position within a recorded execution trace. */
-	Replay
+	/** Content cannot change. A file on disk. Cacheable forever. */
+	Static = 'static',
+	/** A live target, halted. Reads within the epoch are coherent. */
+	Frozen = 'frozen',
+	/** A captured, immutable state of a live target. */
+	Snapshot = 'snapshot',
+	/** Running. Reads may observe change between calls, and may tear. */
+	Live = 'live',
+	/** A position within a recorded execution trace. `epoch` carries it. */
+	Replay = 'replay'
 }
 
 export interface IMoment {
 	readonly kind: MomentKind;
 	/** Monotonic per target. Bumped whenever observable state may have changed. */
-	readonly epoch: number;
-	readonly snapshotId?: string;
-	/** Trace position for MomentKind.Replay. */
-	readonly tick?: bigint;
+	readonly epoch: bigint;
 }
 ```
 
 Rules:
 
 - Every read API takes an `IMoment`. No exceptions, including the file provider
-  (where it's a constant).
+  (where it's a constant). The wire field is **required**, not optional: it was
+  optional once, every caller sent nothing, and the provider dropped what did
+  arrive — the invariant held in the type and in no byte
+  ([ADR 0018](../history/adr/0018-one-moment-taxonomy.md)).
+- `Static` and `Snapshot` are both immutable and still distinct: a snapshot can
+  be stale relative to the process it was captured from, and a file has nothing
+  to be stale against.
+- `epoch` is the only positional field. A trace position is a monotonic
+  per-target counter, which is what `epoch` already is, so `Replay` needs no
+  second one — and a provider that has no position stamps zero rather than
+  carrying a null.
 - Every cache key includes the moment's identity.
 - A view showing data from a stale epoch must say so visibly rather than
   silently displaying it. A greyed-out "stale — target advanced" strip is the

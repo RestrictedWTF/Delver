@@ -2072,23 +2072,37 @@
       "description": "Moment kind on the wire.",
       "oneOf": [
         {
-          "description": "Unchanging content.",
+          "description": "Unchanging content. Cacheable forever.",
           "enum": [
             "static"
           ],
           "type": "string"
         },
         {
-          "description": "Captured snapshot.",
+          "description": "A live target, halted. Reads within the epoch are coherent.",
+          "enum": [
+            "frozen"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A captured, immutable state of a live target.",
           "enum": [
             "snapshot"
           ],
           "type": "string"
         },
         {
-          "description": "Live target.",
+          "description": "Running. Reads may observe change between calls, and may tear.",
           "enum": [
             "live"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A position within a recorded execution trace. `epoch` carries the position; see [ADR 0018].\n\n[ADR 0018]: ../../../Docs/history/adr/0018-one-moment-taxonomy.md",
+          "enum": [
+            "replay"
           ],
           "type": "string"
         }

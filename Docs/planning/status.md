@@ -18,36 +18,6 @@ Everything older than the entries below is in
 working notes, verbatim and unmaintained. Read it only when you need the
 reasoning behind something, not to find out where things stand.
 
-## Just landed
-
-**Two questions were answered without shipping anything.** Naming a local
-variable is blocked on identity, not plumbing: the only anchor the backend
-offers is `storage`, and decompiling `SUB_E2A0` reports both `_Src` and `piVar1`
-at `unique:00023e00:8` — a Ghidra SSA temporary, not a place in the binary. A
-rename anchored there would attach to two variables at once and be lost on the
-next decompilation. Recorded in the ledger; a durable identity has to be
-designed before the rest of that slice is worth building.
-
-Compiler-metadata recovery got its bounded read-only spike instead of a
-schedule slot: 69 System32 PE32+ images, 38 of them carrying validated MSVC RTTI
-that names 4,130 distinct classes, and the images with none are C code. The
-number that decides it is the funnel — 211,686 candidates match `signature == 1`
-and 4,824 survive the check that the locator's `pSelf` points at its own RVA, so
-one comparison removes 97.7% of them. The spike covered only the locator →
-type-descriptor edge, so the zero-false-match bar is unmet and this stays P5.
-The recommendation in
-[the idea](ideas/compiler-metadata-semantic-recovery.md) is *schedule, do not
-start*.
-
-**Cancelling a decompilation now cancels it.** `StubTaskMonitor.cancel()` is a
-no-op, so every layer above reported a cancellation that never happened while
-Ghidra kept the worker — and backend work is serialized, so it blocked the next
-request too. `TaskMonitorAdapter(True)` fixes it; a full analysis cancelled four
-seconds in now returns in 4.1s rather than running the full 24. A cancelled run
-also stopped claiming `analysisComplete: true`. Analysis progress reporting
-works on `TaskMonitorComponent` — phase name only, never a fraction, because
-each analyzer resets the maximum for its own step.
-
 ## Just landed — structured constant search
 
 `delver_search_immediates` closes a gap the dispatcher row named and the old
@@ -108,17 +78,30 @@ including a handshake with no version, which fails closed — refuses the attach
 with a message naming both versions, in the same register as the decompiler
 worker's `unsupported_protocol`.
 
-**The request Moment reaches the wire.** Every `readMemory` construction site
-sends an explicit Moment instead of `None`, and the file provider reads it:
-static is served, absent means the current moment (which for a file is the
-static one), and a snapshot or live request is refused with
-`UnsupportedCapability` rather than answered with file bytes.
+**The request Moment reaches the wire, and the field is required.** Every
+`readMemory` site sends an explicit Moment, and the file provider reads it:
+`Static` is served, a snapshot or live request is refused with
+`UnsupportedCapability` rather than answered with file bytes. It was first
+written optional with absent meaning "the current moment", which is defensible
+for a provider that has only one — and optional is exactly how the field became
+write-only in the first place. Required means the compiler asks rather than
+every future caller remembering; the provider test lost its "omitted" case
+because that case no longer compiles.
 
-Open behind it: `MomentKind` in the code (`Static | Snapshot | Live`) and in
-`data-model.md` (`Live | Frozen | Snapshot | Replay`) are still different
-taxonomies. The refusal path was written not to depend on which one wins — it
-serves `Static` and refuses everything else by catch-all — but reconciling the
-two needs its own ADR.
+**One Moment taxonomy** ([ADR 0018](../history/adr/0018-one-moment-taxonomy.md)).
+The code said `Static | Snapshot | Live` and `data-model.md` said
+`Live | Frozen | Snapshot | Replay`. Both are now
+`Static | Frozen | Snapshot | Live | Replay`, because three documents already
+committed to the missing kinds — the P4 row "Live vs. Frozen", the debugger
+doc's rule that a frozen read may be cached aggressively and a live one may not,
+and the P7 exit claim that Replay activates "with no data-model change", which
+was false while the variant did not exist.
+
+The shape stays `kind` + `epoch`. `tick` is what `epoch` already is, and
+`snapshotId` duplicates target identity — adding two optional fields no provider
+populates would have repeated the defect directly above it. `momentKindToWire`
+has no default arm, so a sixth kind fails to compile rather than falling through
+to a neighbour, which would be a read cached under the wrong rules.
 
 ## Where to pick up
 

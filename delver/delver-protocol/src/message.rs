@@ -1839,12 +1839,19 @@ pub enum AddressSpaceKindWire {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum MomentKindWire {
-	/// Unchanging content.
+	/// Unchanging content. Cacheable forever.
 	Static,
-	/// Captured snapshot.
+	/// A live target, halted. Reads within the epoch are coherent.
+	Frozen,
+	/// A captured, immutable state of a live target.
 	Snapshot,
-	/// Live target.
+	/// Running. Reads may observe change between calls, and may tear.
 	Live,
+	/// A position within a recorded execution trace. `epoch` carries the
+	/// position; see [ADR 0018].
+	///
+	/// [ADR 0018]: ../../../Docs/history/adr/0018-one-moment-taxonomy.md
+	Replay,
 }
 
 /// Target capability on the wire.
@@ -1955,8 +1962,10 @@ impl From<MomentKindWire> for MomentKind {
 	fn from(w: MomentKindWire) -> Self {
 		match w {
 			MomentKindWire::Static => MomentKind::Static,
+			MomentKindWire::Frozen => MomentKind::Frozen,
 			MomentKindWire::Snapshot => MomentKind::Snapshot,
 			MomentKindWire::Live => MomentKind::Live,
+			MomentKindWire::Replay => MomentKind::Replay,
 		}
 	}
 }
@@ -1965,8 +1974,10 @@ impl From<MomentKind> for MomentKindWire {
 	fn from(k: MomentKind) -> Self {
 		match k {
 			MomentKind::Static => MomentKindWire::Static,
+			MomentKind::Frozen => MomentKindWire::Frozen,
 			MomentKind::Snapshot => MomentKindWire::Snapshot,
 			MomentKind::Live => MomentKindWire::Live,
+			MomentKind::Replay => MomentKindWire::Replay,
 		}
 	}
 }
@@ -2044,6 +2055,38 @@ impl From<delver_core::AddressSpace> for AddressSpaceWire {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn every_moment_kind_survives_the_wire_and_both_conversions() {
+		// The two enums drifted apart once and nothing noticed, because only
+		// `Static` is ever produced. This fails the moment one gains a variant
+		// the other lacks, or a conversion arm is wired to the wrong neighbour —
+		// a moment mapped to a neighbouring kind is a read cached under the
+		// wrong rules (ADR 0018).
+		let kinds = [
+			MomentKind::Static,
+			MomentKind::Frozen,
+			MomentKind::Snapshot,
+			MomentKind::Live,
+			MomentKind::Replay,
+		];
+
+		let round_tripped: Vec<MomentKind> = kinds
+			.iter()
+			.map(|kind| {
+				let wire = MomentWire {
+					kind: MomentKindWire::from(*kind),
+					epoch: u64::MAX,
+				};
+				let json = serde_json::to_string(&wire).expect("serialise");
+				let back: MomentWire = serde_json::from_str(&json).expect("deserialise");
+				assert_eq!(back.epoch, u64::MAX, "epoch must survive as a full u64");
+				MomentKind::from(back.kind)
+			})
+			.collect();
+
+		assert_eq!(round_tripped, kinds);
+	}
 
 	#[test]
 	fn max_u64_round_trips_through_json() {

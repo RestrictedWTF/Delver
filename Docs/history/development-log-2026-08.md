@@ -2517,3 +2517,31 @@ Against fully analyzed programs the backend's coverage gaps are 82 and 8
 boundaries, of which **zero** are vouched — every one is a Delver linear-sweep
 guess. There is nothing to push, and pushing the rest would ask a decompiler to
 create functions where nothing vouches for them.
+
+**Two questions were answered without shipping anything.** Naming a local
+variable is blocked on identity, not plumbing: the only anchor the backend
+offers is `storage`, and decompiling `SUB_E2A0` reports both `_Src` and `piVar1`
+at `unique:00023e00:8` — a Ghidra SSA temporary, not a place in the binary. A
+rename anchored there would attach to two variables at once and be lost on the
+next decompilation. Recorded in the ledger; a durable identity has to be
+designed before the rest of that slice is worth building.
+
+Compiler-metadata recovery got its bounded read-only spike instead of a
+schedule slot: 69 System32 PE32+ images, 38 of them carrying validated MSVC RTTI
+that names 4,130 distinct classes, and the images with none are C code. The
+number that decides it is the funnel — 211,686 candidates match `signature == 1`
+and 4,824 survive the check that the locator's `pSelf` points at its own RVA, so
+one comparison removes 97.7% of them. The spike covered only the locator →
+type-descriptor edge, so the zero-false-match bar is unmet and this stays P5.
+The recommendation in
+[the idea](ideas/compiler-metadata-semantic-recovery.md) is *schedule, do not
+start*.
+
+**Cancelling a decompilation now cancels it.** `StubTaskMonitor.cancel()` is a
+no-op, so every layer above reported a cancellation that never happened while
+Ghidra kept the worker — and backend work is serialized, so it blocked the next
+request too. `TaskMonitorAdapter(True)` fixes it; a full analysis cancelled four
+seconds in now returns in 4.1s rather than running the full 24. A cancelled run
+also stopped claiming `analysisComplete: true`. Analysis progress reporting
+works on `TaskMonitorComponent` — phase name only, never a fraction, because
+each analyzer resets the maximum for its own step.

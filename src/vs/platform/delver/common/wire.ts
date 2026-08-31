@@ -40,11 +40,22 @@ export function momentToWire(moment: IMoment): IMomentWire {
 	};
 }
 
+/**
+ * Maps every kind, with no default arm.
+ *
+ * The exhaustiveness is the feature: adding a kind to {@link MomentKind} must
+ * fail to compile here rather than fall through to a plausible neighbour. A
+ * moment mapped to the wrong kind is a read cached under the wrong rules —
+ * `Live` bytes kept as though they were `Frozen`, or a halted target's coherent
+ * reads thrown away as though they might tear.
+ */
 function momentKindToWire(kind: MomentKind): MomentKindWire {
 	switch (kind) {
 		case MomentKind.Static: return MomentKindWire.Static;
+		case MomentKind.Frozen: return MomentKindWire.Frozen;
 		case MomentKind.Snapshot: return MomentKindWire.Snapshot;
 		case MomentKind.Live: return MomentKindWire.Live;
+		case MomentKind.Replay: return MomentKindWire.Replay;
 	}
 }
 

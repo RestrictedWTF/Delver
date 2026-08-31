@@ -76,19 +76,37 @@ impl AddressSpace {
 /// The kind of moment represented by a target read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MomentKind {
-	/// Unchanging content, such as a file on disk.
+	/// Unchanging content, such as a file on disk. Cacheable forever.
 	Static,
-	/// A captured snapshot of a live target.
+	/// A live target, halted. Reads within the epoch are coherent.
 	///
-	/// Nothing emits this yet — the file provider is the only provider and it is
-	/// always [`Self::Static`]. Reserved so that a caller matching on this enum
-	/// today already handles the shape a dump or live provider will arrive in,
-	/// and so P4 does not have to widen a type every consumer switches on. Do
-	/// not delete it as dead.
+	/// Nothing emits this yet; the debugger provider does, at P4. Reserved
+	/// rather than added later because the distinction from [`Self::Live`] is
+	/// what decides whether a read may be cached aggressively or must be
+	/// labelled best-effort — see `Docs/architecture/debugger-provider.md` — and
+	/// widening this enum once P4 is under way changes every `match` over a
+	/// moment and every cache key derived from one ([ADR 0018]). Do not delete
+	/// it as dead.
+	///
+	/// [ADR 0018]: ../../../Docs/history/adr/0018-one-moment-taxonomy.md
+	Frozen,
+	/// A captured, immutable state of a live target.
+	///
+	/// Distinct from [`Self::Static`]: a snapshot can be stale relative to the
+	/// process it came from, and a file has nothing to be stale against.
+	/// Reserved on the same terms as [`Self::Frozen`].
 	Snapshot,
-	/// A live, possibly changing target. Reserved on the same terms as
-	/// [`Self::Snapshot`].
+	/// Running. Reads may observe change between calls, and may tear.
+	/// Reserved on the same terms as [`Self::Frozen`].
 	Live,
+	/// A position within a recorded execution trace.
+	///
+	/// [`Moment::epoch`] carries the position: it is already a `u64` a provider
+	/// may stamp with a tick count, and a second monotonic counter would be null
+	/// for every provider but this one. Reserved so time travel activates by
+	/// producing a kind that exists rather than by a data-model change, which is
+	/// what the P7 exit criterion has always claimed.
+	Replay,
 }
 
 /// A point in time at which target data was observed.
