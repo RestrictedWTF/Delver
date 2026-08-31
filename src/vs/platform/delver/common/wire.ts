@@ -5,10 +5,13 @@
 
 import { AddressSpaceKind, IAddressSpace } from './address.js';
 import { TargetCapability } from './capabilities.js';
+import { IMoment, MomentKind } from './moment.js';
 import {
 	AddressSpaceKindWire,
 	IAddressSpaceWire,
+	IMomentWire,
 	ITargetDescriptorWire,
+	MomentKindWire,
 	TargetCapabilityWire,
 } from './protocol.generated.js';
 import { ITargetDescriptor } from './target.js';
@@ -22,6 +25,28 @@ import { ITargetDescriptor } from './target.js';
  * the same reason it does over DTP (see {@link IDelverTargetSnapshot}). Both
  * sides need the same conversion, so it cannot live in `node/`.
  */
+
+/**
+ * Puts a Moment on the wire.
+ *
+ * Every read of target data names one (CLAUDE.md invariant 1), and the epoch
+ * is a `u64`, so it crosses as a `"0x..."` string like every other 64-bit
+ * value (ADR 0001) — a JSON number would truncate a live provider's clock.
+ */
+export function momentToWire(moment: IMoment): IMomentWire {
+	return {
+		kind: momentKindToWire(moment.kind),
+		epoch: `0x${moment.epoch.toString(16).toUpperCase()}`,
+	};
+}
+
+function momentKindToWire(kind: MomentKind): MomentKindWire {
+	switch (kind) {
+		case MomentKind.Static: return MomentKindWire.Static;
+		case MomentKind.Snapshot: return MomentKindWire.Snapshot;
+		case MomentKind.Live: return MomentKindWire.Live;
+	}
+}
 
 export function descriptorFromWire(wire: ITargetDescriptorWire): ITargetDescriptor {
 	return { name: wire.name, kind: wire.kind };

@@ -376,7 +376,10 @@ fn cmd_read(session: &mut Session, space: &str, address: &str, length: &str) -> 
 		space: space.to_string(),
 		address,
 		len: length,
-		moment: None,
+		// Invariant 1: a read names its moment. Everything reachable
+		// today is a static target, so this is the static moment
+		// rather than an omission the provider has to interpret.
+		moment: delver_core::Moment::STATIC.into(),
 	};
 	let resp = session.call("readMemory", serde_json::to_value(params)?)?;
 	let read_result: delver_protocol::ReadMemoryResult = serde_json::from_value(resp)?;

@@ -448,12 +448,13 @@ suite('DelverSessionService', () => {
 		// Panes, the workspace editor input and the agent all read the path off
 		// the session. Recording a Save As on the entry alone leaves every one
 		// of them naming the project the analyst just moved away from.
-		const { service } = createService(store);
-		await service.openTarget('C:\\samples\\a.exe');
+		const { service, projectLifecycle } = createService(store);
+		const session = await service.openTarget('C:\\samples\\a.exe');
+		projectLifecycle.projectPaths.set(session.contentHash, 'C:\\projects\\a.delverdb');
 		const seen: (string | undefined)[] = [];
 		store.add(service.onDidChangeActiveSession(session => seen.push(session?.projectPath)));
 
-		service.markProjectSaved('C:\\projects\\a.delverdb');
+		await service.saveProject();
 
 		assert.deepStrictEqual(
 			{ session: service.activeSession?.projectPath, path: service.projectPath, dirty: service.isProjectDirty, seen },
@@ -807,7 +808,7 @@ suite('DelverSessionService', () => {
 		const { service, analysis, projectLifecycle, dialog } = createService(store);
 		const first = await service.openTarget('C:\\samples\\a.exe');
 		projectLifecycle.projectPaths.set(first.contentHash, 'C:\\projects\\a.delverdb');
-		service.markProjectSaved('C:\\projects\\a.delverdb');
+		await service.saveProject();
 		analysis.contentHash = 'b'.repeat(64);
 		dialog.decision = 'cancel';
 
@@ -823,7 +824,7 @@ suite('DelverSessionService', () => {
 		const { service, analysis, projectLifecycle, dialog } = createService(store);
 		const first = await service.openTarget('C:\\samples\\a.exe');
 		projectLifecycle.projectPaths.set(first.contentHash, 'C:\\projects\\a.delverdb');
-		service.markProjectSaved('C:\\projects\\a.delverdb');
+		await service.saveProject();
 		analysis.contentHash = 'b'.repeat(64);
 		dialog.decision = 'addRevision';
 
@@ -853,7 +854,7 @@ suite('DelverSessionService', () => {
 		const { service, analysis, projectLifecycle, dialog } = createService(store);
 		const first = await service.openTarget('C:\\samples\\a.exe');
 		projectLifecycle.projectPaths.set(first.contentHash, 'C:\\projects\\a.delverdb');
-		service.markProjectSaved('C:\\projects\\a.delverdb');
+		await service.saveProject();
 		analysis.contentHash = 'b'.repeat(64);
 		dialog.decision = 'createProject';
 
@@ -870,7 +871,7 @@ suite('DelverSessionService', () => {
 		const first = await service.openTarget('C:\\samples\\a.exe');
 		projectLifecycle.projectPaths.set(first.contentHash, 'C:\\projects\\a.delverdb');
 		projectLifecycle.createProjectResult = false;
-		service.markProjectSaved('C:\\projects\\a.delverdb');
+		await service.saveProject();
 		analysis.contentHash = 'b'.repeat(64);
 		dialog.decision = 'createProject';
 
@@ -932,9 +933,10 @@ suite('DelverSessionService', () => {
 	});
 
 	test('saved projects close without repeatedly prompting', async () => {
-		const { service, dialog } = createService(store);
-		await service.openTarget('C:\\samples\\a.exe');
-		service.markProjectSaved('C:\\projects\\a.delver');
+		const { service, dialog, projectLifecycle } = createService(store);
+		const session = await service.openTarget('C:\\samples\\a.exe');
+		projectLifecycle.projectPaths.set(session.contentHash, 'C:\\projects\\a.delver');
+		await service.saveProject();
 
 		const closed = await service.closeTarget();
 

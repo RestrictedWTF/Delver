@@ -72,7 +72,18 @@ export function isImageAnchor(anchor: Anchor): anchor is IImageAnchor {
 	return anchor.kind === 'image';
 }
 
-/** Narrows to an anchor that names a type rather than a location. */
+/**
+ * Narrows to an anchor that names a type rather than a location.
+ *
+ * Nothing calls this today — every existing type-kind site is a two-way branch
+ * that produces a value for both kinds, and the sites that *guard* a `.rva`
+ * read reject with `!isImageAnchor` instead. It is kept because being unused is
+ * the point: [ADR 0014](../../../../../Docs/history/adr/0014-type-anchors-for-authored-composites.md)
+ * records that the pair exists "so every *new* consumer has to make the same
+ * choice deliberately, and the compiler is what asks". Deleting the half nobody
+ * has needed yet leaves the next consumer with only the rejecting guard, which
+ * is how a type anchor ends up silently skipped rather than handled.
+ */
 export function isTypeAnchor(anchor: Anchor): anchor is ITypeAnchor {
 	return anchor.kind === 'type';
 }

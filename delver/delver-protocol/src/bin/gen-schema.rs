@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use schemars::gen::SchemaGenerator;
 
+use delver_protocol::PROTOCOL_VERSION;
 use delver_protocol::{
 	AddressForRowParams, AddressForRowResult, AddressSpaceKindWire, AddressSpaceWire,
 	BasicBlockEdgeKindWire, BasicBlockEdgeWire, BasicBlockWire, BasicBlocksParams,
@@ -149,7 +150,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 	let combined = serde_json::json!({
 		"$schema": "http://json-schema.org/draft-07/schema#",
-		"title": "Delver Protocol v0",
+		"title": "Delver Protocol",
+		// Carried in the schema so the TypeScript side gets the version from the
+		// crate rather than repeating the literal (CLAUDE.md invariant 12).
+		"protocolVersion": PROTOCOL_VERSION,
 		"description": "Request, response, and payload types for the Delver provider protocol.",
 		"definitions": definitions,
 	});

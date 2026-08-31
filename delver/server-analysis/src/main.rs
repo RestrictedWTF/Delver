@@ -650,7 +650,7 @@ fn resolved_import_wire(import: &delver_analysis::ResolvedImport) -> ResolvedImp
 
 fn initialize() -> InitializeResult {
 	InitializeResult {
-		protocol_version: "1".to_string(),
+		protocol_version: delver_protocol::PROTOCOL_VERSION.to_string(),
 		capabilities: vec![TargetCapabilityWire::Analyze],
 		spaces: Vec::new(),
 		target: TargetDescriptorWire {

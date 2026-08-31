@@ -36,8 +36,11 @@ interface ISchemaNode {
 
 type DefinitionKind = 'interface' | 'enum' | 'union';
 
-const schema: { definitions: Record<string, ISchemaNode> } = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
+const schema: { protocolVersion?: string; definitions: Record<string, ISchemaNode> } = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
 const definitions = schema.definitions;
+if (typeof schema.protocolVersion !== 'string') {
+	throw new Error('Schema is missing protocolVersion; regenerate it from the delver-protocol crate.');
+}
 
 /** Enums are emitted bare; objects get the `I` prefix, per VS Code convention. */
 function kindOf(node: ISchemaNode): DefinitionKind {
@@ -186,6 +189,18 @@ const header = `/*--------------------------------------------------------------
 // to bigint before use — never to number.
 `;
 
+/**
+ * The version constant, carried across from the crate.
+ *
+ * Emitted rather than hand-written on the TypeScript side so the client checks
+ * the handshake against the same literal the providers declare.
+ */
+const versionBlock = `/**
+ * DTP protocol version declared by every Delver process in this build.
+ */
+export const DELVER_PROTOCOL_VERSION = '${schema.protocolVersion}';
+`;
+
 const blocks = Object.keys(definitions)
 	.sort()
 	.map(name => {
@@ -197,5 +212,5 @@ const blocks = Object.keys(definitions)
 		}
 	});
 
-fs.writeFileSync(outPath, `${header}\n${blocks.join('\n')}`, 'utf8');
+fs.writeFileSync(outPath, `${header}\n${versionBlock}\n${blocks.join('\n')}`, 'utf8');
 console.log(`Wrote ${outPath} (${blocks.length} types)`);

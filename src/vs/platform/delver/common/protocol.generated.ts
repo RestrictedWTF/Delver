@@ -12,6 +12,11 @@
 // to bigint before use — never to number.
 
 /**
+ * DTP protocol version declared by every Delver process in this build.
+ */
+export const DELVER_PROTOCOL_VERSION = '1';
+
+/**
  * Parameters for `analysis/addressForRow`.
  */
 export interface IAddressForRowParams {
@@ -1596,9 +1601,11 @@ export interface IReadMemoryParams {
 	 */
 	len: number;
 	/**
-	 * Optional moment; omit for the current moment.
+	 * When the read is observed.
+	 *
+	 * Required, not optional. Invariant 1 says every read of target data takes a location **and** a moment, "no exceptions, including the file provider where the Moment is constant" — and an optional field is how that invariant was satisfied in the type and in no byte on the wire for as long as this existed: every caller sent `None` and the provider dropped it. Making it required means the compiler asks, rather than each caller remembering.
 	 */
-	moment?: IMomentWire;
+	moment: IMomentWire;
 	/**
 	 * Address space id.
 	 */

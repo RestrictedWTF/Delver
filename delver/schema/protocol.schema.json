@@ -2250,15 +2250,8 @@
           "type": "integer"
         },
         "moment": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/MomentWire"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Optional moment; omit for the current moment."
+          "$ref": "#/definitions/MomentWire",
+          "description": "When the read is observed.\n\nRequired, not optional. Invariant 1 says every read of target data takes a location **and** a moment, \"no exceptions, including the file provider where the Moment is constant\" — and an optional field is how that invariant was satisfied in the type and in no byte on the wire for as long as this existed: every caller sent `None` and the provider dropped it. Making it required means the compiler asks, rather than each caller remembering."
         },
         "space": {
           "description": "Address space id.",
@@ -2268,6 +2261,7 @@
       "required": [
         "address",
         "len",
+        "moment",
         "space"
       ],
       "type": "object"
@@ -3278,5 +3272,6 @@
     }
   },
   "description": "Request, response, and payload types for the Delver provider protocol.",
-  "title": "Delver Protocol v0"
+  "protocolVersion": "1",
+  "title": "Delver Protocol"
 }

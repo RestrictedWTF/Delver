@@ -123,6 +123,17 @@ export interface IDelverProjectStoreService {
 	saveSnapshot(projectId: string, snapshot: IDelverProjectSnapshotUpdate, revisionId?: string): Promise<void>;
 	loadSnapshot(projectId: string, revisionId?: string): Promise<IDelverProjectSnapshot>;
 	storeFunctionMigrationMappings(projectId: string, mappings: readonly IDelverFunctionMigrationMapping[]): Promise<void>;
+	/**
+	 * Reads back what one revision's functions were matched to in another.
+	 *
+	 * Nothing consumes this yet; the matches are written on every revision so
+	 * that the evidence exists when something does. The consumer is automatic
+	 * interpretation transfer — carrying names and comments across a rebuild —
+	 * which the ledger records as deliberately unimplemented. Writing the
+	 * mappings only once a reader exists would leave every project created
+	 * before that day with no history to transfer from, which is why the write
+	 * runs ahead of the read rather than beside it. Do not delete it as dead.
+	 */
 	loadFunctionMigrationMappings(projectId: string, sourceRevisionId: string, targetRevisionId: string): Promise<readonly IDelverFunctionMigrationMapping[]>;
 	appendInterpretations(projectId: string, edits: readonly IInterpretationEditWire[]): Promise<void>;
 	appendFindings(projectId: string, findings: readonly IDelverFindingWire[]): Promise<void>;
@@ -173,6 +184,17 @@ export interface IDelverProjectStoreService {
 	 * `total: 0`, distinguished only by `complete`.
 	 */
 	hasRetainedXrefs(projectId: string, revisionId?: string): Promise<boolean>;
+	/**
+	 * Merges one project's authored edits into another over the same bytes.
+	 *
+	 * Nothing calls this yet. It is the migration step from the legacy JSONL
+	 * store and the merge half of "two analysts, one sample, two `.delverdb`
+	 * files" — neither of which has a surface. Kept because the conflict rule it
+	 * encodes is the load-bearing part: same sequence and same identity is a
+	 * no-op, same sequence and different content refuses rather than
+	 * overwriting, and a destination over different bytes refuses outright. That
+	 * rule is far easier to keep proven by its tests than to rediscover later.
+	 */
 	copyInterpretations(sourceProjectId: string, destinationProjectId: string): Promise<number>;
 	close(projectId: string): Promise<void>;
 }

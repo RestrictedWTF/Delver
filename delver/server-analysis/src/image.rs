@@ -180,7 +180,10 @@ impl ProviderConnection {
 				space: space.to_string(),
 				address: offset,
 				len: want,
-				moment: None,
+				// Invariant 1: a read names its moment. Everything reachable
+				// today is a static target, so this is the static moment
+				// rather than an omission the provider has to interpret.
+				moment: delver_core::Moment::STATIC.into(),
 			};
 			let response = self.call("readMemory", serde_json::to_value(params)?)?;
 			let result: ReadMemoryResult =

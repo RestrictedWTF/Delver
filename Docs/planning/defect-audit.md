@@ -497,19 +497,59 @@ Decide: negotiate on `initialize` and make the constants agree, or delete the
 field and the error kind. Leaving two disagreeing literals in place is the one
 option with a trap in it.
 
-### P1 — `ReadMemoryParams.moment` is write-only, and it is invariant 1's field
+**Fixed 2026-08-31 — negotiated.** `delver_protocol::PROTOCOL_VERSION` (`"1"`)
+is the single source; both responders declare it, and it reaches TypeScript as
+the generated `DELVER_PROTOCOL_VERSION` so the client checks the handshake
+against the same literal. `readInitializeResult` in
+`platform/delver/common/protocolVersion.ts` refuses a mismatch — and a missing
+or non-string version, which fails closed — at all three `initialize` call
+sites.
+
+### Fixed — `ReadMemoryParams.moment` is required, and the provider honours it
 
 Invariant 1 says every read of target data takes an `ILocation` **and** an
 `IMoment`, "no exceptions, including the file provider where the Moment is
-constant". On the wire that is not happening: every construction site sends
-`moment: None` (`delverctl/src/main.rs:379`, `server-analysis/src/image.rs:183`,
-`provider-file/src/lib.rs:463`), and `FileProvider::read_memory` destructures
-only `space`, `address` and `len`, so a Moment that did arrive would be dropped.
+constant". It held in the type and in no byte on the wire: every construction
+site sent `None` and `FileProvider::read_memory` destructured only `space`,
+`address` and `len`, so a Moment that did arrive was dropped.
 
-The invariant holds in the type and not in any byte. The response side is
-honest — the provider returns `served_moment` — so this is the request half
-only. Populate it at the real call sites, or record in the data-model doc that
-the request Moment is reserved until a provider has more than one.
+Every caller now sends `Moment::STATIC`, and `read_memory` resolves the request
+before serving it: a `Snapshot` or `Live` moment is refused with
+`UnsupportedCapability`, because a file has no way to observe either and
+answering it with file bytes would be a confident wrong answer rather than a
+missing one.
+
+**The field is required, not optional.** It was first made optional with absent
+meaning "the current moment", which is defensible for a provider that has only
+one — but an optional field is precisely how this became write-only in the first
+place, and it would leave the invariant resting on every future caller
+remembering. Required means the compiler asks. The provider's own test lost its
+"omitted" case because that case no longer compiles, which is the point.
+
+### P1 — the design doc and the code disagree about what a Moment is
+
+Found while fixing the Moment-on-the-wire defect above, and worse than that one,
+because it is the vocabulary rather than a field.
+
+`Docs/architecture/data-model.md:70` defines the taxonomy as
+`Live | Frozen | Snapshot | Replay`. `delver-core/src/lib.rs:78` defines it as
+`Static | Snapshot | Live`.
+
+`Static` — the only kind anything actually sends — appears nowhere in the design
+doc. `Frozen` (a halted target, where reads within an epoch are coherent) and
+`Replay` (a position in a recorded trace) appear nowhere in the code, and both
+carry real meaning for P4: the doc's own rules lean on the distinction between a
+`Live` read that may tear and a `Frozen` one that may not.
+
+This is not a defect to patch. Adding or removing a `MomentKind` variant changes
+the axis every read and every cache key is keyed on, which is invariant 1's
+subject and needs its own ADR. What it means today is that the file provider is
+the only provider, `Static` is the only value, and nothing has yet had to
+distinguish the cases the doc anticipated — so the divergence has cost nothing
+and will cost a great deal at the first non-file provider, which is exactly when
+someone will pick one taxonomy at speed.
+
+Settle it before P4, not during it.
 
 ### P2 — `getFunctionSeeds` is a whole provider route with no caller
 
@@ -520,26 +560,27 @@ because the analysis server takes seeds straight from `delver-format`. It is a
 duplicate path, not a missing feature. Delete it, or say in one line that it
 exists for P4 live targets where no PE parse is available.
 
-### P2 — a second way to clear the dirty flag, and a write with no reader
-
-`IDelverSessionService.markProjectSaved` has no production caller;
-`saveProject()` clears the flag inline instead. The dirty-flag lifecycle is
-already spread across three sites and this is a fourth way in.
-
-`storeFunctionMigrationMappings` is used; `loadFunctionMigrationMappings` is
-called only by its own test. Mappings are written on every revision and never
-read back — either the handshake should consume them or writing them is waste.
-`copyInterpretations` is likewise test-only.
-
-### P3 — an unused narrowing helper for an invariant about narrowing
-
-`isTypeAnchor` (`interpretation.ts:76`) has **zero** references anywhere,
-including tests. Invariant 4 says to narrow before reading `.rva`, and the
-narrowing helper the codebase wrote for that is unused while call sites
-discriminate by hand. Use it or delete it; keeping an unused helper for a rule
-everyone hand-rolls is the worst of both.
-
 ### Fixed in this pass
+
+`markProjectSaved` is gone: it could only ever clear the *active* entry's flag,
+while both inline clears act on a named entry — one after a successful save, one
+on "Don't Save" — so it was never the single writer it looked like. Tests that
+used it as a shortcut now save through `saveProject()`, which is the path a user
+has.
+
+`isTypeAnchor` was deleted on the evidence that nothing calls it, and then restored: [ADR 0014](../history/adr/0014-type-anchors-for-authored-composites.md) records that the pair exists "so every *new* consumer has to make the same choice deliberately, and the compiler is what asks". Unused is what it is for. It now carries a comment saying so, which is what it was missing — the asymmetry with `isImageAnchor` is real (five callers, every one a rejecting guard) and is the reason the reservation was invisible.
+`isImageAnchor` has five callers, all *rejecting* a non-place anchor before
+reading `.rva`. Not one site selects type anchors and discards the rest: every
+`kind === 'type'` in the tree is one arm of a two-way branch that handles both
+kinds, and most of them narrow a wire record or a `Record<string, unknown>`
+rather than an `Anchor` at all. There was no site shaped like the helper.
+
+`loadFunctionMigrationMappings` and `copyInterpretations` stay, now saying what
+they wait for. Neither is reachable by a method-name string either — the store
+crosses `ProxyChannel.fromService`, so its callers are the typed interface and
+the grep is complete. The mappings are written ahead of their reader on purpose:
+automatic interpretation transfer is the consumer, and gating the write on it
+would leave every project made before that day with no history to transfer from.
 
 Three "reserved for later" shapes carried no note saying so, which is what
 separates a reservation from dead code: `MomentKind::Snapshot`/`Live`,

@@ -129,15 +129,15 @@ fn handle_request(provider: &FileProvider, request: &Request) -> HandledRequest 
 					let frame_id = result.data.frame_id;
 					(serde_json::to_value(result), Some((frame_id, bytes)))
 				}
-				Err(e) => {
+				// The provider chose the error kind: a bad space and a moment it
+				// cannot serve are different refusals and must not be flattened
+				// into one.
+				Err(error) => {
 					return HandledRequest {
 						response: Response {
 							id: request.id,
 							result: None,
-							error: Some(RpcError::domain(
-								delver_protocol::ErrorKind::InvalidAddress,
-								e.to_string(),
-							)),
+							error: Some(error),
 						},
 						frame: None,
 						shutdown: false,

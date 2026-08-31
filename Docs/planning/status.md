@@ -96,6 +96,30 @@ deliberately the value 1 — the same field value as its `add rax,1` — so a le
 of displacements into the immediate facts shows up as a second hit for the
 number 1 rather than as nothing at all.
 
+## Also landed — the DTP request contract is no longer nominal
+
+Two declared-but-unreachable surfaces from the 2026-08-31 sweep are closed.
+
+**The protocol version is negotiated.** `delver-protocol` now owns one
+`PROTOCOL_VERSION` constant; `provider-file` and `server-analysis` both declare
+it, the schema carries it across, and the generated `DELVER_PROTOCOL_VERSION`
+is what the client checks on `initialize` at all three call sites. A mismatch —
+including a handshake with no version, which fails closed — refuses the attach
+with a message naming both versions, in the same register as the decompiler
+worker's `unsupported_protocol`.
+
+**The request Moment reaches the wire.** Every `readMemory` construction site
+sends an explicit Moment instead of `None`, and the file provider reads it:
+static is served, absent means the current moment (which for a file is the
+static one), and a snapshot or live request is refused with
+`UnsupportedCapability` rather than answered with file bytes.
+
+Open behind it: `MomentKind` in the code (`Static | Snapshot | Live`) and in
+`data-model.md` (`Live | Frozen | Snapshot | Replay`) are still different
+taxonomies. The refusal path was written not to depend on which one wins — it
+serves `Static` and refuses everything else by catch-all — but reconciling the
+two needs its own ADR.
+
 ## Where to pick up
 
 - **Local variable naming needs a durable identity design** before any of its

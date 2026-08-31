@@ -14,6 +14,9 @@ import {
 import { IAddressForRowResult, IBasicBlocksResult, ICallGraphResult, ICallPathsResult, IDataRangeCorrectionWire,
 	IFunctionCorrectionWire, IFunctionProfileResult, IFunctionsResult, IGetExportsResult, IGetImageInfoResult, IGetImportsResult, IGlobalAccessesResult, IGlobalsResult, IListingWindowResult, IOpenImageResult, IReadMemoryResult, IRowForAddressResult, IScanStringsResult,
 	ISearchImmediatesResult, ISetCorrectionsResult, IStringsResult, IXrefIndexResult, IXrefsResult } from '../common/protocol.generated.js';
+import { IMoment, STATIC_MOMENT } from '../common/moment.js';
+import { readInitializeResult } from '../common/protocolVersion.js';
+import { momentToWire } from '../common/wire.js';
 import { TargetConfig } from '../common/target.js';
 
 /**
@@ -86,7 +89,7 @@ export class DelverAnalysisSession extends Disposable {
 			await waitForListening(analysis, 'server-analysis');
 
 			const rpc = await DelverRpcClient.connect(analysisEndpoint);
-			await rpc.call('initialize', null);
+			readInitializeResult((await rpc.call('initialize', null)).json.result, 'server-analysis');
 			const { json } = await rpc.call('analysis/openImage', null);
 
 			// A second client on the provider, alongside the analysis server's.
@@ -95,7 +98,7 @@ export class DelverAnalysisSession extends Disposable {
 			// wrong process. Providers accept multiple clients precisely so this
 			// works (P1 decision E1).
 			const providerRpc = await DelverRpcClient.connect(providerEndpoint);
-			await providerRpc.call('initialize', null);
+			readInitializeResult((await providerRpc.call('initialize', null)).json.result, 'provider-file');
 
 			return new DelverAnalysisSession(
 				provider,
@@ -151,12 +154,20 @@ export class DelverAnalysisSession extends Disposable {
 		return rva === undefined ? undefined : BigInt(rva);
 	}
 
-	/** Reads one binary frame from the provider and verifies its JSON reference. */
-	async readMemory(space: 'Image' | 'File', address: bigint, count: number): Promise<IDelverReadMemoryWire> {
+	/**
+	 * Reads one binary frame from the provider and verifies its JSON reference.
+	 *
+	 * The Moment is sent, not left out: a read names when it observed the target
+	 * (CLAUDE.md invariant 1), and the provider decides whether it can serve
+	 * that. The only target behind this session is a file, so the default is the
+	 * static moment.
+	 */
+	async readMemory(space: 'Image' | 'File', address: bigint, count: number, moment: IMoment = STATIC_MOMENT): Promise<IDelverReadMemoryWire> {
 		const { json, frames } = await this.providerRpc.call('readMemory', {
 			space,
 			address: `0x${address.toString(16).toUpperCase()}`,
 			len: count,
+			moment: momentToWire(moment),
 		}, 1);
 		const result = json.result as IReadMemoryResult;
 		const frame = frames?.[0];

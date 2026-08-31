@@ -149,9 +149,6 @@ export interface IDelverSessionService {
 	/** Marks newly produced or edited analysis as requiring persistence. */
 	markProjectDirty(): void;
 
-	/** Marks the current project as persisted, optionally remembering its path. */
-	markProjectSaved(projectPath?: string): void;
-
 	/** Saves the active analysis to its current project or prompts for a project path. */
 	saveProject(): Promise<boolean>;
 
@@ -622,16 +619,6 @@ export class DelverSessionService extends Disposable implements IDelverSessionSe
 		const entry = this.activeEntry;
 		if (entry) {
 			entry.isProjectDirty = true;
-		}
-	}
-
-	markProjectSaved(projectPath?: string): void {
-		const entry = this.activeEntry;
-		if (entry) {
-			entry.isProjectDirty = false;
-			if (projectPath !== undefined) {
-				this.adoptProjectPath(entry, projectPath);
-			}
 		}
 	}
 

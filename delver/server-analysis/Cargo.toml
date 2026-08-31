@@ -12,6 +12,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 delver-analysis = { workspace = true }
+delver-core = { workspace = true }
 delver-disasm = { workspace = true }
 delver-format = { workspace = true }
 delver-protocol = { workspace = true }

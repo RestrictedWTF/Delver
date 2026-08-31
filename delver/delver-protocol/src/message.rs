@@ -1764,9 +1764,16 @@ pub struct ReadMemoryParams {
 	pub address: u64,
 	/// Number of bytes to read.
 	pub len: u64,
-	/// Optional moment; omit for the current moment.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub moment: Option<MomentWire>,
+	/// When the read is observed.
+	///
+	/// Required, not optional. Invariant 1 says every read of target data takes
+	/// a location **and** a moment, "no exceptions, including the file provider
+	/// where the Moment is constant" — and an optional field is how that
+	/// invariant was satisfied in the type and in no byte on the wire for as
+	/// long as this existed: every caller sent `None` and the provider dropped
+	/// it. Making it required means the compiler asks, rather than each caller
+	/// remembering.
+	pub moment: MomentWire,
 }
 
 /// Response payload for `readMemory`.
@@ -2041,7 +2048,7 @@ mod tests {
 	#[test]
 	fn max_u64_round_trips_through_json() {
 		let original = InitializeResult {
-			protocol_version: "0".to_string(),
+			protocol_version: crate::PROTOCOL_VERSION.to_string(),
 			capabilities: vec![TargetCapabilityWire::ReadMemory],
 			spaces: vec![AddressSpaceWire {
 				id: "Image".to_string(),

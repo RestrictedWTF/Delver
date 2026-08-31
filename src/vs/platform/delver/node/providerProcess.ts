@@ -15,7 +15,9 @@ import {
 	IInitializeResult,
 	IListSpacesResult,
 } from '../common/protocol.generated.js';
-import { addressSpaceFromWire, capabilitiesFromWire, descriptorFromWire } from '../common/wire.js';
+import { IMoment, STATIC_MOMENT } from '../common/moment.js';
+import { readInitializeResult } from '../common/protocolVersion.js';
+import { addressSpaceFromWire, capabilitiesFromWire, descriptorFromWire, momentToWire } from '../common/wire.js';
 import { resolveBinary } from './delverBinaries.js';
 
 /** How long a provider gets to honour `shutdown` before it is signalled. */
@@ -171,7 +173,7 @@ export class DelverProviderProcess implements IDelverTarget {
 			return new DelverProviderProcess(
 				child,
 				rpc,
-				json.result as IInitializeResult,
+				readInitializeResult(json.result, binaryName),
 				options.shutdownTimeoutMs,
 				options.forcedExitTimeoutMs,
 			);
@@ -201,9 +203,14 @@ export class DelverProviderProcess implements IDelverTarget {
 	/**
 	 * Calls `readMemory` on the provider and returns the response plus the
 	 * binary frame.
+	 *
+	 * A read carries a Moment as well as a location (CLAUDE.md invariant 1).
+	 * The caller may name one; omitting it means the static moment, which is
+	 * the only one a file target has.
 	 */
-	async readMemory(params: { space: string; address: string; len: number }) {
-		const { json, frames } = await this.rpc.call('readMemory', params, 1);
+	async readMemory(params: { space: string; address: string; len: number; moment?: IMoment }) {
+		const { space, address, len, moment = STATIC_MOMENT } = params;
+		const { json, frames } = await this.rpc.call('readMemory', { space, address, len, moment: momentToWire(moment) }, 1);
 		return { response: json.result, frame: frames?.[0] };
 	}
 

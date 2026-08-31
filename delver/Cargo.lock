@@ -500,6 +500,7 @@ dependencies = [
  "anyhow",
  "clap",
  "delver-analysis",
+ "delver-core",
  "delver-disasm",
  "delver-format",
  "delver-protocol",

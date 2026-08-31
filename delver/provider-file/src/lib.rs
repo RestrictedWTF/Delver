@@ -20,13 +20,14 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
+use delver_core::{Moment, MomentKind};
 use delver_format::{parse_pe, ParsedImage, SeedSource, Subsystem};
 use delver_protocol::{
-	AddressSpaceKindWire, AddressSpaceWire, ExportWire, FrameRef, FunctionSeedWire,
+	AddressSpaceKindWire, AddressSpaceWire, ErrorKind, ExportWire, FrameRef, FunctionSeedWire,
 	GetExportsResult, GetFunctionSeedsResult, GetImageInfoResult, GetImportsResult,
-	ImportedModuleWire, ImportedSymbolWire, InitializeResult, MomentKindWire, MomentWire,
-	RangeWire, ReadMemoryParams, ReadMemoryResult, SectionWire, SeedSourceWire, SubsystemWire,
+	ImportedModuleWire, ImportedSymbolWire, InitializeResult, MomentWire, RangeWire,
+	ReadMemoryParams, ReadMemoryResult, RpcError, SectionWire, SeedSourceWire, SubsystemWire,
 	TargetCapabilityWire, TargetDescriptorWire, TlsWire,
 };
 use memmap2::Mmap;
@@ -75,7 +76,7 @@ impl FileProvider {
 	/// Returns the initialize response payload.
 	pub fn initialize(&self) -> InitializeResult {
 		InitializeResult {
-			protocol_version: "0".to_string(),
+			protocol_version: delver_protocol::PROTOCOL_VERSION.to_string(),
 			capabilities: vec![
 				TargetCapabilityWire::ListSpaces,
 				TargetCapabilityWire::GetImageInfo,
@@ -206,7 +207,24 @@ impl FileProvider {
 
 	/// Reads memory from the requested space and returns the response payload
 	/// plus the binary bytes to send.
-	pub fn read_memory(&self, params: ReadMemoryParams) -> Result<(ReadMemoryResult, Vec<u8>)> {
+	///
+	/// The Moment is part of the request, not decoration (CLAUDE.md invariant
+	/// 1). A file on disk has exactly one moment — [`Moment::STATIC`] — so this
+	/// provider can serve that and nothing else. A request naming a snapshot or
+	/// a live target is a request for data this provider does not have, and
+	/// answering it with file bytes would hand back the wrong observation under
+	/// the right shape. It is refused as `UnsupportedCapability` instead.
+	///
+	/// An *absent* moment means "the current moment", which for a static target
+	/// is the static moment: there is no other, and a client that omits the
+	/// field is not asking for something this provider cannot do. Refusing it
+	/// would only force every caller to spell out the single possible answer.
+	/// The response still names the moment served, so nothing has to infer it.
+	pub fn read_memory(
+		&self,
+		params: ReadMemoryParams,
+	) -> Result<(ReadMemoryResult, Vec<u8>), RpcError> {
+		let served_moment = self.resolve_moment(params.moment)?;
 		let space = params.space.as_str();
 		let address = params.address;
 		let len = params.len;
@@ -214,7 +232,12 @@ impl FileProvider {
 		let (bytes, valid) = match space {
 			"File" => self.read_file(address, len),
 			"Image" => self.read_image(address, len),
-			_ => bail!("unknown address space: {space}"),
+			_ => {
+				return Err(RpcError::domain(
+					ErrorKind::InvalidAddress,
+					format!("unknown address space: {space}"),
+				))
+			}
 		};
 
 		let frame_id = self.alloc_frame_id();
@@ -224,12 +247,20 @@ impl FileProvider {
 				len: bytes.len() as u64,
 			},
 			valid,
-			served_moment: MomentWire {
-				kind: MomentKindWire::Static,
-				epoch: 0,
-			},
+			served_moment,
 		};
 		Ok((result, bytes))
+	}
+
+	/// Resolves a requested moment to the one this provider can serve.
+	fn resolve_moment(&self, requested: MomentWire) -> Result<MomentWire, RpcError> {
+		match Moment::from(requested).kind {
+			MomentKind::Static => Ok(Moment::STATIC.into()),
+			kind => Err(RpcError::domain(
+				ErrorKind::UnsupportedCapability,
+				format!("file provider serves only the static moment; {kind:?} was requested"),
+			)),
+		}
 	}
 
 	fn read_file(&self, offset: u64, len: u64) -> (Vec<u8>, Vec<RangeWire>) {
@@ -422,7 +453,7 @@ mod tests {
 
 	use delver_core::{AddressSpace, AddressSpaceKind};
 	use delver_format::{ImportedModule, ParseCompleteness};
-	use delver_protocol::ReadMemoryParams;
+	use delver_protocol::{MomentKindWire, ReadMemoryParams};
 
 	use super::*;
 
@@ -460,7 +491,7 @@ mod tests {
 					space: "Image".to_string(),
 					address,
 					len: 16,
-					moment: None,
+					moment: Moment::STATIC.into(),
 				};
 				let (result, bytes) = provider.read_memory(params).expect("read memory");
 				assert_eq!(bytes.len(), 16);
@@ -471,6 +502,68 @@ mod tests {
 		for handle in handles {
 			handle.join().expect("thread join");
 		}
+	}
+
+	#[test]
+	fn a_moment_the_file_cannot_be_read_at_is_refused() {
+		let exe = std::env::current_exe().expect("current exe");
+		let provider = FileProvider::open(&exe).expect("open current exe");
+		let address = provider
+			.get_image_info()
+			.sections
+			.first()
+			.expect("test binary has at least one section")
+			.virtual_address;
+
+		let read_at = |moment: MomentWire| {
+			provider
+				.read_memory(ReadMemoryParams {
+					space: "Image".to_string(),
+					address,
+					len: 16,
+					moment,
+				})
+				.map(|(result, bytes)| (result.served_moment.kind, bytes.len()))
+				.map_err(|error| error.data.expect("domain error").kind)
+		};
+
+		let live = MomentWire {
+			kind: MomentKindWire::Live,
+			epoch: 7,
+		};
+		let snapshot = MomentWire {
+			kind: MomentKindWire::Snapshot,
+			epoch: 7,
+		};
+
+		// There is no "omitted" case to test: the field is required, so a read
+		// with no moment does not compile. That is the point of it being
+		// required — the invariant is enforced by the type rather than by every
+		// caller remembering.
+		assert_eq!(
+			(
+				read_at(Moment::STATIC.into()),
+				read_at(live),
+				read_at(snapshot),
+			),
+			(
+				Ok((MomentKindWire::Static, 16)),
+				Err(ErrorKind::UnsupportedCapability),
+				Err(ErrorKind::UnsupportedCapability),
+			),
+			"a moment a file has no way to observe is refused rather than answered with file bytes"
+		);
+	}
+
+	#[test]
+	fn both_responders_declare_the_same_protocol_version() {
+		let exe = std::env::current_exe().expect("current exe");
+		let provider = FileProvider::open(&exe).expect("open current exe");
+		assert_eq!(
+			provider.initialize().protocol_version,
+			delver_protocol::PROTOCOL_VERSION,
+			"the provider declares the shared constant, not a literal of its own"
+		);
 	}
 
 	#[test]
