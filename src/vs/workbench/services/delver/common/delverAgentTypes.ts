@@ -44,6 +44,15 @@ export const enum DelverAgentErrorCode {
 	StaleRevision = 'STALE_REVISION',
 	InvalidArgument = 'INVALID_ARGUMENT',
 	Cancelled = 'CANCELLED',
+	/**
+	 * A write needs a human to confirm it before it can proceed.
+	 *
+	 * Nothing throws this yet: every write capability today appends a
+	 * *proposal*, which needs no confirmation because it changes nothing until
+	 * a reviewer accepts it. Reserved for the first capability that acts
+	 * directly — and advertised through `delver_capabilities` now so a client
+	 * handling the code is not surprised by it later.
+	 */
 	ConfirmationRequired = 'CONFIRMATION_REQUIRED',
 	InternalError = 'INTERNAL_ERROR',
 }

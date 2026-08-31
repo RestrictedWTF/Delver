@@ -49,6 +49,14 @@ export const enum FocusReason {
 	User = 'user',
 	Navigation = 'navigation',
 	TargetEvent = 'targetEvent',
+	/**
+	 * A scripted navigation, from the Python client over DTP.
+	 *
+	 * Nothing publishes this yet; the client that would is `planned`. Reserved
+	 * so a surface deciding whether to steal focus already distinguishes a
+	 * script from a person, rather than having that distinction added under it
+	 * later.
+	 */
 	Script = 'script',
 	Ai = 'ai',
 }

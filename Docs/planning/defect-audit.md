@@ -475,6 +475,87 @@ Analyzing in the decompiler backend: Create Address Tables
 Analyzing in the decompiler backend: Decompiler Parameter ID - decompile FUN_14002b7b0
 ```
 
+## Open — declared-but-unreachable surfaces, 2026-08-31 sweep
+
+A read-only sweep for surfaces that look finished from the inside but that
+nothing can invoke. The pattern has bitten twice already: `DelverTargetService`
+has had no consumer since 2026-08-07, and a progress route was built end to end
+before anyone checked whether the backend could feed it. Ordered by what each
+costs to discover the hard way.
+
+### P1 — two `initialize` responders disagree about the protocol version
+
+`provider-file/src/lib.rs:78` reports `protocol_version: "0"`.
+`server-analysis/src/main.rs:653` reports `"1"`. **Nothing reads either.** The
+consequence is not today's behaviour, it is that the first person to add the
+check — the obvious, correct thing to do — breaks one of the two processes, and
+the failure will look like a transport bug rather than a constant that was never
+reconciled. `ErrorKind::ProtocolVersionMismatch` exists for exactly this and is
+produced by nothing.
+
+Decide: negotiate on `initialize` and make the constants agree, or delete the
+field and the error kind. Leaving two disagreeing literals in place is the one
+option with a trap in it.
+
+### P1 — `ReadMemoryParams.moment` is write-only, and it is invariant 1's field
+
+Invariant 1 says every read of target data takes an `ILocation` **and** an
+`IMoment`, "no exceptions, including the file provider where the Moment is
+constant". On the wire that is not happening: every construction site sends
+`moment: None` (`delverctl/src/main.rs:379`, `server-analysis/src/image.rs:183`,
+`provider-file/src/lib.rs:463`), and `FileProvider::read_memory` destructures
+only `space`, `address` and `len`, so a Moment that did arrive would be dropped.
+
+The invariant holds in the type and not in any byte. The response side is
+honest — the provider returns `served_moment` — so this is the request half
+only. Populate it at the real call sites, or record in the data-model doc that
+the request Moment is reserved until a provider has more than one.
+
+### P2 — `getFunctionSeeds` is a whole provider route with no caller
+
+Served at `provider-file/src/main.rs:125`, typed, generated into TypeScript, and
+advertised as a capability in three places. Every other provider method has a
+caller in `analysisSession.ts` or `providerProcess.ts`; this one has none,
+because the analysis server takes seeds straight from `delver-format`. It is a
+duplicate path, not a missing feature. Delete it, or say in one line that it
+exists for P4 live targets where no PE parse is available.
+
+### P2 — a second way to clear the dirty flag, and a write with no reader
+
+`IDelverSessionService.markProjectSaved` has no production caller;
+`saveProject()` clears the flag inline instead. The dirty-flag lifecycle is
+already spread across three sites and this is a fourth way in.
+
+`storeFunctionMigrationMappings` is used; `loadFunctionMigrationMappings` is
+called only by its own test. Mappings are written on every revision and never
+read back — either the handshake should consume them or writing them is waste.
+`copyInterpretations` is likewise test-only.
+
+### P3 — an unused narrowing helper for an invariant about narrowing
+
+`isTypeAnchor` (`interpretation.ts:76`) has **zero** references anywhere,
+including tests. Invariant 4 says to narrow before reading `.rva`, and the
+narrowing helper the codebase wrote for that is unused while call sites
+discriminate by hand. Use it or delete it; keeping an unused helper for a rule
+everyone hand-rolls is the worst of both.
+
+### Fixed in this pass
+
+Three "reserved for later" shapes carried no note saying so, which is what
+separates a reservation from dead code: `MomentKind::Snapshot`/`Live`,
+`DelverAgentErrorCode.ConfirmationRequired`, and `FocusReason.Script` now each
+say what they are waiting for. `delver_core::TargetCapability`'s doc claimed
+"UI and analysis code branch on these" when nothing in Rust reads the enum at
+all — corrected, because that sentence would send a reader hunting for callers
+that do not exist.
+
+### Clean
+
+Agent capabilities against tool definitions: 40 ids, 40 handlers, 40
+presentations, all derived from one list. All 18 `analysis/*` RPC methods are
+both served and sent. All 40 `delver.*` commands reach a palette entry, menu or
+keybinding.
+
 ## Open — the Rust workspace had no CI, and still has no lint gate
 
 `delver/` is ~23,000 lines of Rust with 262 tests and a golden corpus, and until

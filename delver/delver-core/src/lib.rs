@@ -79,8 +79,15 @@ pub enum MomentKind {
 	/// Unchanging content, such as a file on disk.
 	Static,
 	/// A captured snapshot of a live target.
+	///
+	/// Nothing emits this yet — the file provider is the only provider and it is
+	/// always [`Self::Static`]. Reserved so that a caller matching on this enum
+	/// today already handles the shape a dump or live provider will arrive in,
+	/// and so P4 does not have to widen a type every consumer switches on. Do
+	/// not delete it as dead.
 	Snapshot,
-	/// A live, possibly changing target.
+	/// A live, possibly changing target. Reserved on the same terms as
+	/// [`Self::Snapshot`].
 	Live,
 }
 
@@ -142,8 +149,14 @@ impl Anchor {
 	}
 }
 
-/// Capabilities a target may expose. UI and analysis code branch on these,
-/// never on target kind.
+/// Capabilities a target may expose.
+///
+/// The rule is that consumers branch on a capability and never on target kind
+/// (`CLAUDE.md` invariant 6). Today that branching happens on the TypeScript
+/// side against `TargetCapabilityWire`; nothing in Rust reads this enum except
+/// the `From` impl that converts it, so it is the shared vocabulary rather than
+/// a live discriminator. Said plainly because the previous wording claimed the
+/// opposite and would send a reader looking for Rust callers that do not exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TargetCapability {
 	/// The target can list its address spaces.
