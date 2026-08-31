@@ -31,6 +31,9 @@
       "0x1000:EntryPoint"
     ],
     "xrefs": [],
-    "strings": []
+    "strings": [],
+    "immediates": [
+      "0x1003:8:0x1"
+    ]
   }
 }

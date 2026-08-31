@@ -51,6 +51,9 @@ pub struct AnalysisFact {
 	pub xrefs: Vec<String>,
 	/// Strings as `rva:encoding:text`.
 	pub strings: Vec<String>,
+	/// Immediate operands as `rva:width:value`, so a decoding change that
+	/// widens a field or starts reporting branch displacements fails the diff.
+	pub immediates: Vec<String>,
 }
 
 /// One section.
@@ -182,7 +185,55 @@ fn analysis_facts(image: &delver_format::ParsedImage, bytes: &[u8]) -> AnalysisF
 			.iter()
 			.map(|s| format!("{}:{:?}:{}", hex(s.rva), s.encoding, s.text))
 			.collect(),
+		immediates: immediate_facts(image, bytes, &analyzed.instructions),
 	}
+}
+
+/// Records the immediate encoded by each decoded instruction.
+///
+/// Walks the instruction index rather than the bytes: an immediate is only
+/// meaningful at a boundary the analysis established, and decoding from an
+/// arbitrary offset would invent fields.
+fn immediate_facts(
+	image: &delver_format::ParsedImage,
+	bytes: &[u8],
+	instructions: &delver_analysis::InstructionIndex,
+) -> Vec<String> {
+	let Some(bitness) = Bitness::from_arch(&image.arch) else {
+		return Vec::new();
+	};
+	let disasm = Disassembler::new(bitness);
+	let mut out = Vec::new();
+	for (_row, rva, _len) in instructions.rows(0, instructions.len()) {
+		let Some(window) = section_bytes_at(image, bytes, rva) else {
+			continue;
+		};
+		let Some(facts) = disasm.decode_facts_at(rva, window) else {
+			continue;
+		};
+		if let (Some(value), Some(width)) = (facts.immediate, facts.immediate_width) {
+			out.push(format!("{}:{}:{}", hex(rva), width, hex(value)));
+		}
+	}
+	out
+}
+
+/// Bytes beginning at `rva`, clipped to the raw data of the section holding it.
+fn section_bytes_at<'a>(
+	image: &delver_format::ParsedImage,
+	bytes: &'a [u8],
+	rva: u64,
+) -> Option<&'a [u8]> {
+	let section = image
+		.sections
+		.iter()
+		.find(|s| s.virtual_address <= rva && rva < s.virtual_end())?;
+	let start = section.raw_offset as usize + (rva - section.virtual_address) as usize;
+	let end = (section.raw_end() as usize).min(bytes.len());
+	if start >= end {
+		return None;
+	}
+	Some(&bytes[start..end])
 }
 
 /// Decodes the instructions at the entry point.

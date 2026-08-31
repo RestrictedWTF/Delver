@@ -16,11 +16,11 @@
 
 mod pe;
 
-use std::ops::Range;
 use object::pe::{
 	IMAGE_SUBSYSTEM_NATIVE, IMAGE_SUBSYSTEM_UNKNOWN, IMAGE_SUBSYSTEM_WINDOWS_CUI,
 	IMAGE_SUBSYSTEM_WINDOWS_GUI,
 };
+use std::ops::Range;
 
 pub use pe::parse_pe;
 

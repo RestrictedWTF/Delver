@@ -50,10 +50,10 @@ import { NullLogService } from '../../../../../platform/log/common/log.js';
 import { DELVER_REVIEW_MODE_SETTING } from '../../common/delverReviewPolicy.js';
 import { NullTelemetryServiceShape } from '../../../../../platform/telemetry/common/telemetryUtils.js';
 import {
-	DELVER_AGENT_CAPABILITIES,
 	DelverAgentService,
 	IDelverAgentService,
 } from '../../common/delverAgentService.js';
+import { DELVER_AGENT_CAPABILITIES } from '../../common/delverAgentCapabilities.js';
 import {
 	boundedCount,
 	DELVER_AGENT_ERROR_CODES,

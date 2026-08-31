@@ -932,8 +932,14 @@ mod tests {
 			source: SeedSource::ExceptionDirectory,
 		}];
 		image.exception_ranges = vec![
-			delver_format::ExceptionRange { range: 0x1000..0x1005, chained_to: None },
-			delver_format::ExceptionRange { range: 0x1005..0x100A, chained_to: Some(0x1000) },
+			delver_format::ExceptionRange {
+				range: 0x1000..0x1005,
+				chained_to: None,
+			},
+			delver_format::ExceptionRange {
+				range: 0x1005..0x100A,
+				chained_to: Some(0x1000),
+			},
 		];
 
 		let analysis = analyze(&image, &file);

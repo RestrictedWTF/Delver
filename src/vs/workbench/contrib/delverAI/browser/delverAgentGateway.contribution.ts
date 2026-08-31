@@ -15,7 +15,8 @@
 import { CancellationToken, CancellationTokenSource } from '../../../../base/common/cancellation.js';
 import { IJSONSchema } from '../../../../base/common/jsonSchema.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
-import { DelverAgentCapabilityId, IDelverAgentService } from '../../../services/delver/common/delverAgentService.js';
+import { IDelverAgentService } from '../../../services/delver/common/delverAgentService.js';
+import { DelverAgentCapabilityId } from '../../../services/delver/common/delverAgentCapabilities.js';
 import {
 	DELVER_AGENT_LIMITS,
 	DelverAgentError,

@@ -25,8 +25,8 @@ use object::LittleEndian as LE;
 use object::{Object, ObjectSection, ReadRef};
 
 use crate::{
-	BaseRelocation, Export, FunctionSeed, ImportedModule, ImportedSymbol, ParseCompleteness,
-	ExceptionRange, ParsedImage, Section, SeedSource, Subsystem, TlsInfo,
+	BaseRelocation, ExceptionRange, Export, FunctionSeed, ImportedModule, ImportedSymbol,
+	ParseCompleteness, ParsedImage, Section, SeedSource, Subsystem, TlsInfo,
 };
 
 /// Upper bounds applied to anything sized by a value read from the file.
@@ -114,7 +114,8 @@ where
 	let relocations = extract_relocations(file, limits, &mut completeness);
 	let tls = extract_tls(file, image_base, limits, &mut completeness);
 
-	let (mut function_seeds, exception_ranges) = extract_exception_seeds(file, limits, &mut completeness);
+	let (mut function_seeds, exception_ranges) =
+		extract_exception_seeds(file, limits, &mut completeness);
 	if entry != 0 {
 		function_seeds.push(FunctionSeed {
 			rva: entry,
@@ -547,7 +548,9 @@ where
 	let count = *record.get(2)? as usize;
 	let offset = 4 + 2 * count.div_ceil(2) * 2;
 	let chained = record.get(offset..offset + 12)?;
-	Some(u32::from_le_bytes([chained[0], chained[1], chained[2], chained[3]]))
+	Some(u32::from_le_bytes([
+		chained[0], chained[1], chained[2], chained[3],
+	]))
 }
 
 /// How many links of a chain to follow before giving up.
@@ -576,7 +579,9 @@ where
 		let Some(next_unwind) = primary_unwind_rva(file, unwind_rva) else {
 			return Some(begin);
 		};
-		if !unwind_info_flags(file, next_unwind).is_some_and(|flags| flags & UNW_FLAG_CHAININFO != 0) {
+		if !unwind_info_flags(file, next_unwind)
+			.is_some_and(|flags| flags & UNW_FLAG_CHAININFO != 0)
+		{
 			return Some(begin);
 		}
 		unwind_rva = next_unwind;
@@ -594,7 +599,12 @@ where
 	let count = *record.get(2)? as usize;
 	let offset = 4 + 2 * count.div_ceil(2) * 2;
 	let chained = record.get(offset..offset + 12)?;
-	Some(u32::from_le_bytes([chained[8], chained[9], chained[10], chained[11]]))
+	Some(u32::from_le_bytes([
+		chained[8],
+		chained[9],
+		chained[10],
+		chained[11],
+	]))
 }
 
 /// Splits `UNWIND_INFO`'s first byte into its flags.

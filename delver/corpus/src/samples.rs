@@ -52,6 +52,21 @@ const X64_RET_THEN_DATA: &[u8] = &[
 	0xC3, // 0x100E ret
 ];
 
+/// Immediates at three encoded widths, plus a branch whose displacement is not one.
+///
+/// The rel8 displacement is deliberately `0x01`, the same field value as the
+/// `add rax,1` above it: if displacements ever leaked into the immediate facts,
+/// a search for the number 1 would return this jump as well.
+const X64_IMMEDIATE_WIDTHS: &[u8] = &[
+	0xB0, 0x2A, // 0x1000 mov al,0x2A          imm8
+	0xB9, 0x78, 0x56, 0x34, 0x12, // 0x1002 mov ecx,0x12345678   imm32
+	0x48, 0x83, 0xC0, 0x01, // 0x1007 add rax,1            sign-extended imm8
+	0x83, 0xF8, 0xFF, // 0x100B cmp eax,-1           imm8, both readings
+	0xEB, 0x01, // 0x100E jmp 0x1011           displacement, not an immediate
+	0xCC, // 0x1010 padding
+	0xC3, // 0x1011 ret
+];
+
 /// Builds every sample in the corpus.
 pub fn all_samples() -> Vec<Sample> {
 	vec![
@@ -107,6 +122,14 @@ pub fn all_samples() -> Vec<Sample> {
 			covers: "recursive descent stops at a ret instead of decoding the bytes after it",
 			bytes: PeBuilder::new(Machine::Amd64)
 				.code(X64_RET_THEN_DATA)
+				.entry(0x1000)
+				.build(),
+		},
+		Sample {
+			name: "x64-immediate-widths",
+			covers: "immediates recorded at the width they were encoded at, and branch displacements excluded",
+			bytes: PeBuilder::new(Machine::Amd64)
+				.code(X64_IMMEDIATE_WIDTHS)
 				.entry(0x1000)
 				.build(),
 		},

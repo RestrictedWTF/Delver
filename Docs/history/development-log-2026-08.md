@@ -2502,3 +2502,18 @@ start.
 
 Verified: Rust workspace green, corpus 7/7, client typecheck clean, 411 Delver TS
 tests, worker 18/18.
+
+## Moved from status.md — settled entries
+
+**Unions and enums ship end to end** — proposal, type anchor, review,
+`schemaVersion: 2` snapshot, transactional application, and a `UnionDataType` or
+`EnumDataType` in PyGhidra. Neither bumps the snapshot version: a version pins
+the envelope's key set and `kind` is a value, so an older worker refuses an
+unknown kind by name, which is the direction to fail in.
+
+**The cross-backend function handshake is done, and repair was declined on
+measurement** ([ADR 0017](../history/adr/0017-cross-backend-function-handshake.md)).
+Against fully analyzed programs the backend's coverage gaps are 82 and 8
+boundaries, of which **zero** are vouched — every one is a Delver linear-sweep
+guess. There is nothing to push, and pushing the rest would ask a decompiler to
+create functions where nothing vouches for them.

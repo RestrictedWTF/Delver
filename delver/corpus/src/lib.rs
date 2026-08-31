@@ -151,6 +151,68 @@ mod tests {
 		);
 	}
 
+	/// Immediates are matched by the value the bytes encode, at the width they
+	/// were encoded at. Each query below is a way the search has been wrong
+	/// before, or would plausibly go wrong.
+	#[test]
+	fn an_immediate_is_found_at_its_encoded_width_and_a_displacement_is_not_one() {
+		let sample = all_samples()
+			.into_iter()
+			.find(|s| s.name == "x64-immediate-widths")
+			.expect("sample present");
+		let image = delver_format::parse_pe(&sample.bytes).expect("parse");
+		let coverage = [0..sample.bytes.len() as u64];
+		let analyzed = delver_analysis::analyze(&image, &sample.bytes, &coverage);
+		let disasm = delver_disasm::Disassembler::new(
+			delver_disasm::Bitness::from_arch(&image.arch).expect("x86-64 decodes"),
+		);
+
+		let find = |value: u64, width: Option<u32>| {
+			delver_analysis::immediates::search_immediates(
+				&image,
+				&sample.bytes,
+				&coverage,
+				&analyzed.instructions,
+				&disasm,
+				value,
+				width,
+				64,
+			)
+			.hits
+			.iter()
+			.map(|hit| (hit.rva, hit.width))
+			.collect::<Vec<_>>()
+		};
+
+		assert_eq!(
+			vec![
+				// `add rax,1` encodes 1 in a byte even though the operand is
+				// 64-bit, and the `jmp` two instructions later carries the same
+				// 0x01 as a displacement — which is not a constant and must not
+				// match.
+				find(1, None),
+				// So asking for the sign-extended reading finds nothing.
+				find(1, Some(32)),
+				// `mov ecx,0x12345678` is the only dword field here.
+				find(0x1234_5678, None),
+				// `mov al,0x2A` — a plain byte immediate.
+				find(0x2A, None),
+				// `cmp eax,-1` assembles to the byte 0xFF; both readings of that
+				// field name the same instruction.
+				find(0xFF, None),
+				find(u64::MAX, None),
+			],
+			vec![
+				vec![(0x1007, 8)],
+				vec![],
+				vec![(0x1002, 32)],
+				vec![(0x1000, 8)],
+				vec![(0x100B, 8)],
+				vec![(0x100B, 8)],
+			],
+		);
+	}
+
 	#[test]
 	fn x86_sample_yields_no_exception_seeds() {
 		let sample = all_samples()

@@ -26,11 +26,11 @@ use delver_protocol::{
 	ListingWindowRowWire, MomentKindWire, MomentWire, OpenImageParams, OpenImageResult, RangeWire,
 	ReadMemoryParams, ReadMemoryResult, Request, ResolutionConfidenceWire, ResolvedImportWire,
 	Response, RowForAddressParams, RowForAddressResult, RpcError, ScanStringsParams,
-	SearchImmediatesParams, SearchImmediatesResult,
-	ScanStringsResult, SectionWire, SeedSourceWire, SetCorrectionsParams, SetCorrectionsResult,
-	SignatureFieldReasonWire, SignatureFieldWire, StringEncodingWire, StringWire, StringsResult,
-	SubsystemWire, TargetCapabilityWire, TargetDescriptorWire, TlsWire, XrefIndexParams,
-	XrefIndexResult, XrefKindWire, XrefWire, XrefsParams, XrefsResult,
+	ScanStringsResult, SearchImmediatesParams, SearchImmediatesResult, SectionWire, SeedSourceWire,
+	SetCorrectionsParams, SetCorrectionsResult, SignatureFieldReasonWire, SignatureFieldWire,
+	StringEncodingWire, StringWire, StringsResult, SubsystemWire, TargetCapabilityWire,
+	TargetDescriptorWire, TlsWire, XrefIndexParams, XrefIndexResult, XrefKindWire, XrefWire,
+	XrefsParams, XrefsResult,
 };
 
 /// Registers every type that must appear in the schema.

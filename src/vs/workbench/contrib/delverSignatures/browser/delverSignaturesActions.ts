@@ -20,7 +20,8 @@ import { ServicesAccessor } from '../../../../platform/instantiation/common/inst
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IProgressService, ProgressLocation } from '../../../../platform/progress/common/progress.js';
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
-import { DelverAgentCapabilityId, IDelverAgentService } from '../../../services/delver/common/delverAgentService.js';
+import { IDelverAgentService } from '../../../services/delver/common/delverAgentService.js';
+import { DelverAgentCapabilityId } from '../../../services/delver/common/delverAgentCapabilities.js';
 import { DelverAgentError, DelverAgentErrorCode, IDelverAgentResult } from '../../../services/delver/common/delverAgentTypes.js';
 import { FocusReason, IDelverFocusService } from '../../../services/delver/common/delverFocusService.js';
 import { DELVER_TARGET_ATTACHED, DELVER_TARGET_OPEN, IDelverSessionService } from '../../../services/delver/common/delverSessionService.js';

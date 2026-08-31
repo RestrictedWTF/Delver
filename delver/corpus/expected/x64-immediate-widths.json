@@ -1,0 +1,46 @@
+{
+  "name": "x64-immediate-widths",
+  "covers": "immediates recorded at the width they were encoded at, and branch displacements excluded",
+  "arch": "X86_64",
+  "entry": "0x1000",
+  "image_base": "0x140000000",
+  "sections": [
+    {
+      "name": ".text",
+      "rva": "0x1000",
+      "virtual_size": 18
+    }
+  ],
+  "imports": [],
+  "exports": [],
+  "seeds": [
+    {
+      "rva": "0x1000",
+      "end": null,
+      "source": "EntryPoint"
+    }
+  ],
+  "entry_disassembly": [
+    "0x1000 mov al,2Ah",
+    "0x1002 mov ecx,12345678h",
+    "0x1007 add rax,1",
+    "0x100B cmp eax,0FFFFFFFFh",
+    "0x100E jmp short 0000000000001011h"
+  ],
+  "analysis": {
+    "instruction_count": 6,
+    "functions": [
+      "0x1000:EntryPoint"
+    ],
+    "xrefs": [
+      "0x100E->0x1011:Jump"
+    ],
+    "strings": [],
+    "immediates": [
+      "0x1000:8:0x2A",
+      "0x1002:32:0x12345678",
+      "0x1007:8:0x1",
+      "0x100B:8:0xFF"
+    ]
+  }
+}

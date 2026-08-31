@@ -48,19 +48,6 @@ also stopped claiming `analysisComplete: true`. Analysis progress reporting
 works on `TaskMonitorComponent` — phase name only, never a fraction, because
 each analyzer resets the maximum for its own step.
 
-**Unions and enums ship end to end** — proposal, type anchor, review,
-`schemaVersion: 2` snapshot, transactional application, and a `UnionDataType` or
-`EnumDataType` in PyGhidra. Neither bumps the snapshot version: a version pins
-the envelope's key set and `kind` is a value, so an older worker refuses an
-unknown kind by name, which is the direction to fail in.
-
-**The cross-backend function handshake is done, and repair was declined on
-measurement** ([ADR 0017](../history/adr/0017-cross-backend-function-handshake.md)).
-Against fully analyzed programs the backend's coverage gaps are 82 and 8
-boundaries, of which **zero** are vouched — every one is a Delver linear-sweep
-guess. There is nothing to push, and pushing the rest would ask a decompiler to
-create functions where nothing vouches for them.
-
 ## Just landed — structured constant search
 
 `delver_search_immediates` closes a gap the dispatcher row named and the old
@@ -84,6 +71,30 @@ stream (Stage D, F2).
 
 Working on the real sample: `0x5a4d` — `MZ` — returns exactly two hits, which is
 this binary checking PE magic in two places.
+
+## Also landed
+
+**`delverAgentService.ts` split, 5,150 → 4,403 lines.** The capability catalog
+and the proposal/finding parsers moved to siblings, importers updated rather
+than shimmed, 414 tests passing before and after with only import lines changed
+in tests. The byte-search and signature helpers stayed: they share
+`IResolvedFunction`, `IBytePattern` and the scan types with the class itself, so
+extracting one without the other would leave the dependency direction two-way.
+
+**The Rust workspace is in CI for the first time.** ~23,000 lines with 262 tests
+and a golden corpus had no job of any kind — the repo's only Rust CI builds VS
+Code's own `cli/`. `cargo fmt --check` was clean before this session's Rust work
+and reported 14 violations after it, all introduced here and none noticed,
+because nothing looked. Fixed, and `delver-rust.yml` now gates formatting, tests
+and the corpus check. Clippy is not gated: it reports 17 warnings today, mostly
+predating this session, and a gate that is red on its first run is a gate people
+learn to ignore.
+
+**Immediate search has corpus coverage.** `x64-immediate-widths` encodes an
+imm8, an imm32 and a sign-extended `0x83 /0` form, and its `jmp` displacement is
+deliberately the value 1 — the same field value as its `add rax,1` — so a leak
+of displacements into the immediate facts shows up as a second hit for the
+number 1 rather than as nothing at all.
 
 ## Where to pick up
 

@@ -5,7 +5,7 @@
 
 import * as assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { DELVER_AGENT_CAPABILITIES } from '../../../../services/delver/common/delverAgentService.js';
+import { DELVER_AGENT_CAPABILITIES } from '../../../../services/delver/common/delverAgentCapabilities.js';
 import { getDelverAgentToolData } from '../../browser/delverAIToolDefinitions.js';
 
 suite('Delver AI Tool Definitions', () => {

@@ -475,6 +475,69 @@ Analyzing in the decompiler backend: Create Address Tables
 Analyzing in the decompiler backend: Decompiler Parameter ID - decompile FUN_14002b7b0
 ```
 
+## Open — the Rust workspace had no CI, and still has no lint gate
+
+`delver/` is ~23,000 lines of Rust with 262 tests and a golden corpus, and until
+2026-08-31 **no CI ran any of it**. The only Rust job in the repo builds VS
+Code's own `cli/`, a different workspace. Nothing checked formatting, nothing ran
+the tests, and nothing recomputed the corpus.
+
+It was not theoretical. `cargo fmt --check` was clean before this session's Rust
+work and reported **14 violations** after it — all introduced here, across the
+fragment recovery, the union work and the immediate search, none noticed because
+nothing looked. They are fixed, and `.github/workflows/delver-rust.yml` now gates
+formatting, `cargo test --workspace`, and `delver-corpus check` on any change
+under `delver/`.
+
+**Clippy is not gated yet.** `cargo clippy --workspace --all-targets` reports 17
+warnings across eight files — `delver-format/src/pe.rs` (6),
+`delver-analysis/src/lib.rs` (4), `strings.rs` (2), and one each in `state.rs`,
+`immediates.rs`, `provider-file`, and two corpus files. Most predate this
+session. Gating on them now would land a pipeline red on its first run, which is
+how a lint gate teaches people to ignore it. Clearing them is a contained task —
+`sort_by_key`, a simplifiable boolean, and a run of hex-literal digit grouping —
+after which the step is one line.
+
+**Unverified as written.** The workflow's commands are each verified locally
+against this tree; the YAML wiring is not, because a workflow cannot run until
+it is on the branch. First push is its first real test.
+
+## Raised, not decided — does the headless backend stay, and if so does it get types?
+
+Two documents disagree about whether the headless Ghidra backend has a future.
+
+`scripts/ghidra/DelverDecompile.java`, line 6:
+
+> Delver's temporary P2a Ghidra 12.1 bridge. **This script must be deleted when
+> P2b ships.**
+
+P2b has shipped — the persistent PyGhidra worker is the default and works. But
+`roadmap.md` line 175, inside the P2b table itself, says:
+
+> Keep the headless Ghidra backend as a fallback · S · Recovery and
+> compatibility path, not the normal per-function path
+
+Both cannot be right, and the answer decides real work in both directions.
+
+**If headless stays,** it needs semantic application. Today it declares it cannot
+apply accepted composites, data types or prototypes, so every decompilation on
+that backend is produced against the *empty* snapshot and marked
+`semanticsIgnored`. That is honest — the alternative it replaced turned one
+accepted type into a total loss of pseudocode — but it means an analyst who
+selects headless never sees their accepted types take effect. Closing that means
+teaching the script to read a semantic snapshot and apply it in a rolled-back
+transaction, the way the worker does.
+
+**If headless goes,** roughly 18 references across four files go with it —
+`appliesSemantics`, the dropped-snapshot path in `delverDecompilerService.ts`,
+the `semanticsIgnored` flag, the warning the pseudocode pane renders for it, and
+their tests. That machinery exists only because one backend cannot apply types.
+
+Not decided here because it is a product call about which environments Delver
+must run in, not a correctness one. What should not happen is the third option
+by default: leaving a script whose own header says to delete it, and paying for
+its limitation in four other files, indefinitely.
+
 ## Raised, not decided — should decompilation analyze once per image?
 
 The original report that started this thread was pseudocode containing

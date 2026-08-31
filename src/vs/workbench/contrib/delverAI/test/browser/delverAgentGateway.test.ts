@@ -8,7 +8,8 @@ import { CancellationToken } from '../../../../../base/common/cancellation.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { CommandsRegistry } from '../../../../../platform/commands/common/commands.js';
 import { TestInstantiationService } from '../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
-import { DelverAgentCapabilityId, IDelverAgentService } from '../../../../services/delver/common/delverAgentService.js';
+import { IDelverAgentService } from '../../../../services/delver/common/delverAgentService.js';
+import { DelverAgentCapabilityId } from '../../../../services/delver/common/delverAgentCapabilities.js';
 import { DelverAgentError, DelverAgentErrorCode, IDelverAgentRequest, IDelverAgentResult } from '../../../../services/delver/common/delverAgentTypes.js';
 import {
 	DELVER_AGENT_CAPABILITIES_COMMAND_ID,

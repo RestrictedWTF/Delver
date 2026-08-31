@@ -435,7 +435,11 @@ impl PeBuilder {
 		let mut out = Vec::new();
 		for function in &self.runtime_functions {
 			let start = out.len();
-			let flags: u8 = if function.chained_to.is_some() { 0x4 } else { 0 };
+			let flags: u8 = if function.chained_to.is_some() {
+				0x4
+			} else {
+				0
+			};
 			out.push((flags << 3) | 1); // Flags | Version 1
 			out.push(0); // SizeOfProlog
 			out.push(0); // CountOfCodes

@@ -1,0 +1,66 @@
+name: Delver Rust
+
+# Gates the `delver/` Rust workspace: the providers, the analysis server, the
+# protocol crate, and the golden corpus. Nothing covered this before — the only
+# Rust job in this repo builds VS Code's own `cli/`, a different workspace — so
+# a formatting or test regression in ~23k lines reached `main` unremarked, and
+# one did.
+#
+# The corpus check is the load-bearing step. It recomputes facts for every
+# synthetic sample and diffs them against committed snapshots, so a change that
+# quietly alters what Delver believes about a binary fails here rather than
+# being noticed months later against a real one.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'delver/**'
+      - '.github/workflows/delver-rust.yml'
+  pull_request:
+    paths:
+      - 'delver/**'
+      - '.github/workflows/delver-rust.yml'
+  workflow_dispatch:
+
+jobs:
+  delver-rust:
+    name: Delver Rust
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: delver
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: |
+          set -e
+          rustup update stable
+          rustup default stable
+          rustup component add rustfmt
+
+      - name: Versions
+        run: |
+          set -e
+          rustc --version
+          cargo --version
+
+      # Formatting first: it is the cheapest failure and the least interesting
+      # to debug from a test log.
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      # Clippy is deliberately absent. `cargo clippy --workspace --all-targets`
+      # reports 17 warnings today, across eight files and mostly predating this
+      # workflow, so gating on it would land a pipeline that is red on its first
+      # run — which teaches everyone to ignore it. Adding the step is one line
+      # once those are cleared; see the defect audit.
+      - name: Tests
+        run: cargo test --workspace
+
+      # Runs last because a snapshot mismatch is the failure most worth reading
+      # in isolation: it means recomputed facts moved, and the diff is the
+      # message.
+      - name: Golden corpus
+        run: cargo run -p delver-corpus -- check

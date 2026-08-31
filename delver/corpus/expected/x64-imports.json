@@ -56,6 +56,9 @@
       "0x20AA:Ascii:GetLastError",
       "0x20B7:Ascii:USER32.dll",
       "0x20C4:Ascii:MessageBoxW"
+    ],
+    "immediates": [
+      "0x1003:8:0x1"
     ]
   }
 }

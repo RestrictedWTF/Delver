@@ -30,6 +30,7 @@
       "0x1004:LinearSweep"
     ],
     "xrefs": [],
-    "strings": []
+    "strings": [],
+    "immediates": []
   }
 }

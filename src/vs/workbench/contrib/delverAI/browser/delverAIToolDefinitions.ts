@@ -18,7 +18,7 @@ import { Codicon } from '../../../../base/common/codicons.js';
 import { IJSONSchema } from '../../../../base/common/jsonSchema.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { localize } from '../../../../nls.js';
-import { DELVER_AGENT_CAPABILITIES, DelverAgentCapabilityId } from '../../../services/delver/common/delverAgentService.js';
+import { DELVER_AGENT_CAPABILITIES, DelverAgentCapabilityId } from '../../../services/delver/common/delverAgentCapabilities.js';
 import { DELVER_AGENT_LIMITS } from '../../../services/delver/common/delverAgentTypes.js';
 import { DELVER_TARGET_OPEN } from '../../../services/delver/common/delverSessionService.js';
 import { IToolData, ToolDataSource } from '../../chat/common/tools/languageModelToolsService.js';
