@@ -51,3 +51,8 @@ for reconsideration, and let the ADR carry the *change*, not the history.
 | [0014](0014-type-anchors-for-authored-composites.md) | An anchor may name a type instead of a place | accepted | 2026-08-28 |
 | [0015](0015-authored-corrections-re-derive-facts.md) | An authored correction changes what analysis derives from, not what it derived | accepted | 2026-08-28 |
 | [0016](0016-review-modes-and-the-automatic-reviewer.md) | Automatic review is recorded, never simulated | accepted | 2026-08-29 |
+| [0017](0017-cross-backend-function-handshake.md) | One reference frame for function boundaries, and honest placeholders | accepted | 2026-08-30 |
+| [0018](0018-one-moment-taxonomy.md) | One Moment taxonomy, and the epoch carries the position | accepted | 2026-08-31 |
+| [0019](0019-vtable-slice-bounded-by-recovered-functions.md) | A vtable slot is a recovered function, not an executable address | accepted | 2026-08-31 |
+| [0020](0020-the-model-drives-the-workbench-to-verify-behaviour.md) | The model drives the workbench to verify behaviour; the human judges how it looks | accepted | 2026-09-01 |
+| [0021](0021-the-provider-issues-the-moment.md) | The provider issues the Moment, and every read carries it | proposed | 2026-09-01 |

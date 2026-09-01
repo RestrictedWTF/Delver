@@ -157,10 +157,24 @@ suites on write — they are slow and noisy, and they fire on half-finished stat
 where a failure means nothing. Verification belongs at the end of a change, run
 deliberately, by whoever finished it.
 
-What stays the human's is anything needing a workbench, a rendered DOM, or an
-eye: launching Code OSS, driving the UI, judging how something looks. Those are
-faster done by hand than described, and a model reporting that a pane "looks
+What stays the human's is **appearance**: spacing, hierarchy, weight, density,
+whether a surface reads as calm or noisy. A model reporting that a pane "looks
 right" is reporting nothing.
+
+**Behaviour is not appearance, and the model verifies it by driving the
+workbench** ([ADR 0020](../history/adr/0020-the-model-drives-the-workbench-to-verify-behaviour.md)).
+Whether a command is reachable, a click has an effect, a view populates, an
+error surfaces, a round-trip persists — each is falsifiable by observation, so
+observe it. The line is not "did you open a browser" but "is the claim
+falsifiable". This rule previously bundled the two, and the cost was four
+defects in which every file was individually correct and nothing reached a user:
+dead clicks, an unpackageable decompiler, types no analyst could author, and
+parser warnings nothing rendered.
+
+Driving is verification on the same terms as a test run: at the end of a change,
+against a specific claim, never on write. It does not replace a test that could
+assert the same thing — it proves the wiring reaches a user, which a test built
+on a fake service cannot.
 
 Two hooks *are* worth it, because they're instant and serve codebase cleanliness
 directly:
@@ -225,6 +239,28 @@ nobody wrote a test for. Cheap, batched, and yours.
 - **Point at the doc, don't re-explain it.** "Per `03-Target-Providers.md` §2,
   implement `provider-file`" beats a paragraph of restated context — and it keeps
   the doc authoritative instead of letting chat become a second source of truth.
+- **At most two `wip` ledger rows at a time.** A third may not open while two are
+  open; finish or explicitly `defer` one first. On 2026-09-01 the ledger carried
+  **twenty** simultaneous `wip` rows — every subsystem in the project open at
+  once, none closed — which is what "everything is half done" measures. The
+  ledger already defines `done` as *built and used*, so the limit is enforceable
+  against a bar that already exists: a row closes when something reaches a user,
+  not when the code compiles.
+
+  The ledger does not satisfy this today and will not for a while — nineteen rows
+  are open as this is written. The limit therefore binds on *opening*: no new
+  `wip` row until the count is under two. Draining the existing ones is ordinary
+  work, and several will close as `deferred` with a reviving condition rather
+  than as `done`, which is a legitimate way to close and the honest one for
+  anything nothing is waiting on.
+- **A slice is finished when a human can reach it.** The vertical slice above is
+  the right unit, but a slice that stops at the service boundary is not a slice —
+  it is the horizontal layer this section warns about, wearing a vertical name.
+  Four defects found on 2026-09-01 (dead clicks, an unpackageable decompiler,
+  types no analyst could author, parser warnings nothing rendered) were each
+  individually correct code that no user could reach. Invariant 15 now lets a
+  session verify that last step rather than deferring it
+  ([ADR 0020](../history/adr/0020-the-model-drives-the-workbench-to-verify-behaviour.md)).
 - **If a decision isn't in `Docs/`, it should get raised, not invented.** That's
   the one rule that prevents drift, and it's in the invariants list.
 

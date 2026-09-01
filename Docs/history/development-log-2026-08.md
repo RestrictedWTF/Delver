@@ -178,7 +178,7 @@ crate, and what should happen when the lowered `Define` collides with a
 correction already authored at that address, since the server refuses a
 conflicting set whole and the current push swallows that failure. Both are
 written up in the S5 section of
-[mcp-complete-session-plan.md](mcp-complete-session-plan.md).
+[mcp-complete-session-plan.md](../planning/mcp-complete-session-plan.md).
 
 **Two audits ran over this work, and both found real defects.** Every row below
 is fixed and pinned by a test that was verified to fail without the fix.
@@ -869,7 +869,7 @@ zone; Primary splits Listing | Pseudocode; pin appears in the zone chrome. No
 Delver console errors.
 
 **Three defects the launch found**, recorded in
-[workspace-plan.md](workspace-plan.md):
+[workspace-plan.md](../planning/workspace-plan.md):
 
 1. **Cross-target contamination, and it needs an ADR.** Two open workspaces show
    the same data: the workspace is per-target, but `IDelverSessionService`
@@ -1660,7 +1660,7 @@ Exact entries use the function name; addresses without a known containing range
 remain raw rather than being attributed to a guessed owner. Renames refresh the
 pane immediately.
 
-The inline-row decision is recorded in [p1-plan.md](p1-plan.md), and the listing
+The inline-row decision is recorded in [p1-plan.md](../planning/p1-plan.md), and the listing
 height constraint is updated in [ide-architecture.md](../architecture/ide-architecture.md).
 
 Function names on listing landmark lines are now the product accent instead of
@@ -1670,7 +1670,7 @@ declared in the theme files but never registered — a theme entry for an
 unregistered ID emits no CSS variable, so those four roles currently do nothing.
 The listing's mnemonic and branch-target colors still borrow
 `debugTokenExpression.*` and `textLink.foreground`. See
-[rebranding-plan.md](rebranding-plan.md) §2.1.
+[rebranding-plan.md](../planning/rebranding-plan.md) §2.1.
 
 Separately, the rebrand had replaced only the OS artwork under `resources/`, so
 every renderer-drawn surface still showed the VS Code logo — most visibly the
@@ -2503,6 +2503,94 @@ start.
 Verified: Rust workspace green, corpus 7/7, client typecheck clean, 411 Delver TS
 tests, worker 18/18.
 
+## The vtable slice, and what measuring it kept changing
+
+The RTTI item was recorded as *schedule, do not start*. A second read-only spike
+moved it: the vftable edge validates at 4,779 of 4,779 — every validated locator
+has a vftable above it — which makes the edge structural rather than heuristic,
+because the locator's `pSelf` check already did the discriminating. What did not
+validate is where a table ends. "Walk until a pointer that is not into
+executable memory" reported `std::bad_array_new_length`, a two-method class,
+with **3,166 slots**, in twenty images. So a bounded slice was lifted out of P5
+([ADR 0019](adr/0019-vtable-slice-bounded-by-recovered-functions.md)) on the
+strength of the half that measured well, with the hierarchy descriptors, virtual
+inheritance and demangling left where they were.
+
+The admission rule is the interesting part: a slot counts only when its target is
+a **recovered function entry**, not merely an address in an executable section.
+Delver has that oracle and a standalone RTTI parser does not, so the slice
+depends on function recovery having run — `rtti.rs` is a pure image parser in
+`delver-format`, but `vtables.rs` lives in `delver-analysis` because its
+terminator is an analysis result.
+
+**Every number in the write-up moved at least once under measurement, and
+usually in the direction that made the feature look worse.**
+
+The rule cut tables over 64 slots from 20 to 13 and the worst from 3,166 slots to
+619 — an improvement, not a cure. The residue is not a missing rule: those 619
+qwords all point at genuine functions, so no predicate over slot *targets* can
+end that walk, and ending it needs a data-symbol boundary. Ending a table at the
+first slot something else references was tested and rejected on the numbers — it
+fixes 4 of the 13 and truncates 24 correct tables.
+
+The cost was then measured properly and it was worse than first reported. 460 of
+4,832 tables (9.5%) are shorter than the old rule would give, 179 by more than
+four slots, the worst reporting **one slot of fifty-five**. Running that down
+found the cause is not in the vtable logic: the stopping address is a real
+virtual method that is a leaf function with no unwind data, so `.pdata` never
+named it and nothing reached it to sweep it. Supporting that, none of the 4,560
+stopping addresses corpus-wide lie inside a `.pdata` range — the rule never fires
+where the compiler declared code. Whether to feed slots back as a function seed was then
+[measured](../planning/ideas/compiler-metadata-semantic-recovery.md) and is still
+not decided. It works where predicted — a `cdp.dll` interface goes 1 slot to 55,
+every zero-slot table disappears, and none of the 4,455 new function starts lands
+inside an existing function or mid-instruction. It also fails in a way the spike
+was right to look for: 4,256 of the 4,560 lengthened tables gain exactly one slot
+because seeding the stopping address guarantees it, and `std::bad_array_new_length`
+gains 737 confident wrong slots as the longer walk runs further into the trailing
+pointer array. Seeding makes the boundary problem worse, not better.
+
+`NextVtable` turns out to be unreachable by construction rather than merely rare.
+Every vftable is preceded at `-8` by the pointer to its own locator, which lives
+in read-only data, so a walk approaching the next table always meets that data
+pointer one slot earlier and stops there.
+
+Two errors were caught by the people checking rather than by the tests. The
+contract handed to the implementation said `LOCATOR_SIZE = 20`, which puts
+`self_rva` where the real record has `pClassHierarchyDescriptor` — the spike that
+justified the whole feature had parsed 24 bytes with `pSelf` at `+20`, so the
+constant contradicted its own evidence. It was flagged, not worked around. After
+the fix, exactly the two positive tests failed and every rejection test still
+passed, which is what proved the wrong offset had been failing closed. The agent
+capability shipped with an empty input schema, so the model could only ever fetch
+page one — a gap that reads as working.
+
+A 2% scan disagreement on `cdp.dll` — 2,416 pairs against a Python spike's
+2,369 — was recorded as open rather than guessed at, then resolved: the spike
+capped the type-descriptor name window at 512 bytes, and all 47 disputed locators
+name WRL template instantiations whose decorated names run 538–999 bytes. The
+implementation is right and the spike's totals are a floor.
+
+**Clippy now gates the Rust workspace.** The workflow had carried a comment
+explaining that clippy was excluded because it reported 17 warnings and a red
+gate teaches everyone to scroll past it. Those are cleared — properly, with two
+`#[allow]`s that say why, one of them protecting binary literals whose digit
+grouping marks the `UNWIND_INFO` flags/version boundary the test exists to check.
+
+Verified: `cargo clippy --workspace --all-targets -- -D warnings` clean, fmt
+clean, 276 Rust tests, corpus 10/10, client typecheck clean, agent suites 81 and
+8. `delverctl vtables` drives the real provider and analysis server end to end and
+recovers `basic_filebuf`, `basic_ifstream` at base offset `+0xB0`, and a lambda
+whose decorated name carries the enclosing function `downloadFile`.
+
+The wiring of slots into the `probable` indirect-call tier was investigated and
+**not built**. `status.md` had named vtables as that tier's missing input; they
+are not. A slot says class `C` dispatches `F` at index `N`, which resolves
+`call [rax+0x18]` only once something establishes the object's type at the site,
+so a resolver now would pick a class and label the guess as evidence. Recorded in
+[the analysis](../planning/ideas/probable-indirect-call-resolution.md), along with
+the two read-only measurements that would overturn it.
+
 ## Moved from status.md — settled entries
 
 **Unions and enums ship end to end** — proposal, type anchor, review,
@@ -2534,7 +2622,7 @@ and 4,824 survive the check that the locator's `pSelf` points at its own RVA, so
 one comparison removes 97.7% of them. The spike covered only the locator →
 type-descriptor edge, so the zero-false-match bar is unmet and this stays P5.
 The recommendation in
-[the idea](ideas/compiler-metadata-semantic-recovery.md) is *schedule, do not
+[the idea](../planning/ideas/compiler-metadata-semantic-recovery.md) is *schedule, do not
 start*.
 
 **Cancelling a decompilation now cancels it.** `StubTaskMonitor.cancel()` is a
@@ -2545,3 +2633,308 @@ seconds in now returns in 4.1s rather than running the full 24. A cancelled run
 also stopped claiming `analysisComplete: true`. Analysis progress reporting
 works on `TaskMonitorComponent` — phase name only, never a fraction, because
 each analyzer resets the maximum for its own step.
+
+## Moved from status.md on 2026-09-01
+
+Four sections, verbatim. `status.md` says *overwrite this file* and had grown
+to 236 lines; these are the settled entries.
+
+## structured constant search
+
+`delver_search_immediates` closes a gap the dispatcher row named and the old
+tool's own usage text admitted: `delver_search_instructions` matches *formatted
+operand text*, and one constant reaches the listing as `0x1f4`, `500` or `1F4h`
+depending on the formatter. The new capability matches the value the bytes
+encode.
+
+Two decisions carry it. A field is matched by **both** its unsigned and its
+sign-extended reading, because the bytes do not record whether the programmer
+wrote `-1` or `0xFFFFFFFF` — on `Auto-updater.exe`, searching `0xffffffff` finds
+370 dword forms and searching `0xffffffffffffffff` finds 578, the same ones plus
+every byte-width encoding. And **branch displacements are excluded**: a `jmp`
+encodes a destination, not a number, so including it would make a search for
+`0x1000` match every jump that lands there.
+
+The search walks the instruction index rather than scanning bytes, so every
+candidate starts at a boundary the analysis established — decoding from an
+arbitrary offset produces plausible garbage that differs silently from the real
+stream (Stage D, F2).
+
+Working on the real sample: `0x5a4d` — `MZ` — returns exactly two hits, which is
+this binary checking PE magic in two places.
+
+## Moved from status.md
+
+**`delverAgentService.ts` split.** The capability catalog
+and the proposal/finding parsers moved to siblings, importers updated rather
+than shimmed, 414 tests passing before and after with only import lines changed
+in tests. The byte-search and signature helpers stayed: they share
+`IResolvedFunction`, `IBytePattern` and the scan types with the class itself, so
+extracting one without the other would leave the dependency direction two-way.
+
+**The Rust workspace is in CI for the first time.** ~23,000 lines with 262 tests
+and a golden corpus had no job of any kind — the repo's only Rust CI builds VS
+Code's own `cli/`. `cargo fmt --check` was clean before this session's Rust work
+and reported 14 violations after it, all introduced here and none noticed,
+because nothing looked. Fixed, and `delver-rust.yml` now gates formatting,
+clippy, tests and the corpus check. Clippy runs as `cargo clippy --workspace
+--all-targets -- -D warnings`, and the backlog that would have made it red on
+its first run is cleared.
+
+**Immediate search has corpus coverage.** `x64-immediate-widths` encodes an
+imm8, an imm32 and a sign-extended `0x83 /0` form, and its `jmp` displacement is
+deliberately the value 1 — the same field value as its `add rax,1` — so a leak
+of displacements into the immediate facts shows up as a second hit for the
+number 1 rather than as nothing at all.
+
+## the DTP request contract is no longer nominal
+
+Two declared-but-unreachable surfaces from the 2026-08-31 sweep are closed.
+
+**The protocol version is negotiated.** `delver-protocol` now owns one
+`PROTOCOL_VERSION` constant; `provider-file` and `server-analysis` both declare
+it, the schema carries it across, and the generated `DELVER_PROTOCOL_VERSION`
+is what the client checks on `initialize` at all three call sites. A mismatch —
+including a handshake with no version, which fails closed — refuses the attach
+with a message naming both versions, in the same register as the decompiler
+worker's `unsupported_protocol`.
+
+**The request Moment reaches the wire, and the field is required.** The wire
+field is required and the file provider reads it: `Static` is served, a snapshot or live request is refused with
+`UnsupportedCapability` rather than answered with file bytes. It was first
+written optional with absent meaning "the current moment", which is defensible
+for a provider that has only one — and optional is exactly how the field became
+write-only in the first place. Required means the compiler asks rather than
+every future caller remembering; the provider test lost its "omitted" case
+because that case no longer compiles.
+
+**That holds below the boundary and not above it.**
+`IDelverAnalysisService.readMemory`
+(`platform/delver/common/delverAnalysisService.ts:220`) takes no Moment at all,
+and `analysisSession.ts:165` declares `moment: IMoment = STATIC_MOMENT` as a
+*default*, so no TypeScript caller can pass one. Invariant 1 is enforced by the
+Rust wire and defaulted away in TypeScript. Not fixed.
+
+**One Moment taxonomy** ([ADR 0018](adr/0018-one-moment-taxonomy.md)).
+The code said `Static | Snapshot | Live` and `data-model.md` said
+`Live | Frozen | Snapshot | Replay`. Both are now
+`Static | Frozen | Snapshot | Live | Replay`, because three documents already
+committed to the missing kinds — the P4 row "Live vs. Frozen", the debugger
+doc's rule that a frozen read may be cached aggressively and a live one may not,
+and the P7 exit claim that Replay activates "with no data-model change", which
+was false while the variant did not exist.
+
+The shape stays `kind` + `epoch`. `tick` is what `epoch` already is, and
+`snapshotId` duplicates target identity — adding two optional fields no provider
+populates would have repeated the defect directly above it. `momentKindToWire`
+has no default arm, so a sixth kind fails to compile rather than falling through
+to a neighbour, which would be a read cached under the wrong rules.
+
+## the vtable slice, out of P5 early
+
+Two read-only spikes said the RTTI item is not uniform: the locator `pSelf`
+check removes 97.7% of candidates and 4,779 of 4,779 survivors have a vftable,
+while the hierarchy descriptors have not been looked at at all. So the measured
+half is built — MSVC x64 locators, decorated class names, and vftable method
+slots (`delver-format/src/rtti.rs`, `delver-analysis/src/vtables.rs`) — and the
+rest stays P5.
+
+**A slot is admitted only when it names a recovered function entry**, which makes
+the slice dependent on function recovery rather than a standalone parser
+([ADR 0019](adr/0019-vtable-slice-bounded-by-recovered-functions.md)).
+The naive "any executable address" rule reported `std::bad_array_new_length` — two
+virtual methods — with 3,166 slots. Under-recovery now truncates a table instead,
+which is safer and still an error, so every walk records its terminator and
+`NotAFunction` carries the address it rejected.
+
+Measured after building it, over the same 70 images: tables over 64 slots fall
+from 20 to 13 and the worst from 3,166 slots to 619, for 30 zero-slot tables in
+4,832. The residue is not a missing rule — those 619 qwords are all genuine
+functions, so ending that walk needs a data-symbol boundary rather than a better
+test of what a slot points at. Ending a table at the first referenced slot was
+tested and rejected: it fixes 4 of the 13 and truncates 24 correct tables.
+
+The truncation cost was then measured and is not rare: 460 of 4,832 tables are
+shorter under the strict rule, the worst reporting one slot of fifty-five. The
+cause is not the vtable logic — the stopping address is a real virtual method
+that is a leaf function with no unwind data, so neither `.pdata` nor the sweep
+ever named it. **Whether to feed vtable slots back as a function seed is measured
+and still not decided.** Seeding the stopping addresses and re-deriving recovers
+the named cases exactly — one `cdp.dll` interface goes 1 slot to 55, and all 30
+zero-slot tables disappear — with 0 of 4,455 new function starts landing inside
+an existing function or mid-instruction. But 4,256 of the 4,560 lengthened tables
+gain exactly one slot, which seeding makes arithmetically inevitable; the real
+gain is 304 tables. Against it, `std::bad_array_new_length` gains **737 confident
+wrong slots** as the longer walks run further into the trailing pointer array, so
+seeding makes ADR 0019's boundary problem worse rather than better, and pass 3
+still grows. The two effects are separable: the new function starts are a win for
+function recovery on their own, and lengthening the tables is what carries the
+regression.
+
+It is wired through `analysis/vtables` to the TypeScript service, and two corpus
+samples pin it — including one whose vftable is followed by pointers into the
+middle of real functions, which is the shape that produced 3,166.
+
+## The 2026-09-01 audit, verbatim from status.md
+
+## Just landed — the audit, and the first UI defects closed by observation
+
+A six-way audit on 2026-09-01 (docs against code, dead surface, blocked-item
+dependency map, analyst journeys, test coverage, roadmap direction) found the
+codebase is lean — roughly 1.7% dead — and that the recurring failure is not bad
+code but **work that stops one inch short of a user**. Four defects shared that
+shape and every file in each was individually correct: dead clicks, an
+unpackageable decompiler, types no analyst could author, parser warnings nothing
+renders.
+
+The cause was structural. Invariant 15 barred the model from driving a workbench,
+so any feature whose last step is a UI, a package, or a human entry point could
+not be finished by the session that built it — and sessions therefore selected
+work they *could* close. [ADR 0020](adr/0020-the-model-drives-the-workbench-to-verify-behaviour.md)
+splits that rule along behaviour versus appearance: the model drives to establish
+what happens, the human still judges how it looks.
+
+**Closed, and verified in a running workbench** against `Auto-updater.exe`:
+
+- **Three dead UI clicks** (#46). All three called `IViewsService.openView` on
+  descriptors registered `when: false`, which no container's view model holds.
+  They now use `IDelverWorkspaceService.showSurface`. Driven: Overview's Functions
+  row moved the Navigator `Overview` -> `Functions`; References moved the Inspector
+  `Signatures` -> `References`.
+- **An analyst can author a type** (#49). `delver.interpretation.dataType` and
+  `delver.interpretation.functionPrototype` share one validator with the model
+  path, so an authored declaration and a proposed one are byte-identical
+  downstream. Driven: both commands appear only once a listing is active, the
+  prompt named `0x1007` — the row actually selected — and `char[32]` read back
+  pre-filled on re-invocation. `CompositeType` stays model-only.
+- **`entry_role.rs` deleted** (#51) — 866 lines resolving 0 of 80 real binaries,
+  wired to no protocol or surface. Ledger row is `removed` with its reason.
+- **CI gates the TypeScript** for the first time. `pr.yml` is `pull_request`-only
+  and every Delver commit lands on `main`, so ~470 tests gated nothing;
+  `delver-typescript.yml` builds the Rust binaries first, because `resolveBinary()`
+  otherwise falls back to PATH and the real-process tests do not fail, they
+  mis-pass.
+
+Writing that gate immediately caught this session's own work: the Vtables
+capability had not updated `delverAgentGateway.test.ts`'s deliberate literal
+`toolCount`, so the new gate would have gone red on the commit that introduced it.
+
+**Still open from the audit:** #47 (invariant 1 holds on the Rust wire and is
+defaulted away in TypeScript — the fix needs a decision on where the renderer
+gets a Moment), #48 (a packaged build cannot decompile; `build/` never stages
+`scripts/ghidra`), #50 (fourteen parse-completeness flags reach TypeScript and
+are rendered by nothing), #52 and #53 (the human type path is laxer than the
+model path, and declaration "validation" is trim plus a length cap).
+
+## Also landed — four more audit defects, and what driving the UI found
+
+Closed since the audit: **#48** (a packaged build stages `scripts/ghidra` into
+`resources/delver/ghidra/` and both backends resolve through one
+`resolveGhidraScript()`), **#50** (the Overview renders one row per set
+parse-completeness flag), **#52** and **#53** (the human type-authoring path now
+shares the model path's placement rules and a real declaration check).
+
+**Verified by driving a running workbench**, against `Auto-updater.exe` and a
+copy truncated to 400,000 bytes:
+
+- the damaged image's Overview reads `Imports 0 recovered — import directory
+  parse failed` and three more like it, where it previously showed a bare `0`;
+- the clean image gains no completeness rows at all;
+- `char[32]` on an instruction in `.text` is refused — *"0x1007 is not in mapped,
+  non-executable memory"*;
+- `))))` is refused at the point of typing.
+
+**Driving found two defects nothing else could.** [ADR 0020](adr/0020-the-model-drives-the-workbench-to-verify-behaviour.md)
+was argued on exactly this and it is worth recording that it paid immediately.
+
+- **#55, fixed.** The new type commands threw *"service accessor is only valid
+  during the invocation of its target method"* on every invocation:
+  `editInterpretationAt` reached for a service after awaiting the input box. All
+  427 tests passed throughout, because they call the helper directly and never
+  cross `Action2.run`'s accessor.
+- **#54, fixed.** The Functions surface rendered a page ending
+  `0x5D6E0-0xFFFFFFFFEA160702`. That is a function RVA, not a label bug:
+  `add_function` admits a `CallTarget` without checking it lies in the image, so
+  a `call` decoded from bytes that are not code wraps below zero
+  (`0x2A160702 - 0x140000000` in `u64`). `add_function` now refuses any RVA
+  outside every section, keeping the call xref — a call is a fact about the image
+  whatever lives where it points. Measuring it over 71 real images turned up more
+  than the bug reported: it removes **12 false functions from well-formed signed
+  System32 DLLs**, so this was never only a malformed-input problem, and two
+  corpus snapshots moved because the golden corpus had been pinning a
+  `0x1015:CallTarget` in a `.text` that ends at `0x100A` — encoding the defect as
+  expected behaviour.
+
+The same measurement found **#58**: 115 export seeds across those images sit in
+non-executable sections, 112 of them in `.data`, so an exported global is
+reported as a function. It is left at the seed source rather than fixed by
+tightening the choke point, which would silence a seed the export directory
+vouches for and over-reject on packed samples.
+
+## Also landed — two more fixes, and two journeys verified rather than reasoned about
+
+**#58 fixed.** An export seeds a function only when its RVA lands in an
+executable section — tested at the seed source, where the section is already in
+hand, rather than at `add_function`, where the same test would reject every
+source and misfire on packed samples. Measured over 71 images: 116 seeds refused,
+`exports` unchanged at 7,529.
+
+**#56 and #57 were not decisions.** Both were answered by the record once
+somebody looked. Delver designs for a remote *provider*, not a remote IDE
+([target-providers.md](../architecture/target-providers.md) §, scheduled at P6),
+so `gulpfile.reh.ts` carrying no Delver is correct. And `roadmap.md` P2b keeps
+the headless backend as a deliberate fallback, so the Java bridge's "delete this
+when P2b ships" was a wrong instruction rather than a scheduling question — both
+comments now say what the file is.
+
+**Two journeys driven end to end**, which the audit could only assess by reading:
+
+- **Rename persists.** Renamed `0x1000` to `parse_config_blob`; the listing
+  updated live, the edit reached
+  `user-data/delver/interpretation/<contentHash>.delverdb` with no explicit save,
+  and it survived a full window reload.
+- **Xref navigation works.** Clicking the reference to `0x6B558` moved the
+  listing there from `0x1000` — the focus-to-listing hop that has no test
+  covering it.
+
+**Both fixes surfaced a further defect, recorded not fixed.** #59: a web build
+would register every Delver surface with nothing behind it, because
+`workbench.common.main.ts` holds the registrations and only the desktop entry
+binds implementations. #60: `amdave64.dll` reports 5,659 exports of which **5,622
+are empty EAT slots** — zero entries that PE reads as "no export at this ordinal"
+and Delver reports as `#ordinal @0x0`. The seeds are now refused; the phantom
+exports remain, and an inventory overstating by two orders of magnitude is the
+same class of wrong answer as a fabricated function.
+
+## Also landed — the fork got smaller, and an inventory got honest
+
+**#59 fixed, and it retired a patch-surface row.** The Delver service contracts
+and contrib imports moved from `workbench.common.main.ts` to
+`workbench.desktop.main.ts`, beside the implementations they need. The common
+entry file is now **byte-identical to upstream**, so
+[patch-surface.md](../development/patch-surface.md) loses its highest-risk row
+rather than gaining a note. `valid-layers-check` clean.
+
+**#60 fixed.** An `ExportTarget::Address(0)` is a hole in the export directory's
+ordinal range, not a symbol — and RVA 0 is the DOS header, so the test is exact
+rather than a heuristic. Corpus-wide the export inventory falls from 7,529 to
+1,907, one image accounts for all of it, and **no named export is lost**;
+`amdave64.dll` now reports 37 exports where it claimed 5,659. `export_total` was
+corrected with it, since it feeds `export_count` in the image summary and would
+have restated the wrong number a layer up. No new completeness flag: a hole was
+never in the sample's list, so there is no shortfall to admit.
+
+**#47 is unblocked without being taken.**
+[ADR 0021](adr/0021-the-provider-issues-the-moment.md) is written and
+`proposed`: the provider issues the Moment at `openImage`, the session carries
+it, every read passes it. That makes invariant 1 true above the process boundary
+as well as below, and gives P4's debugger an advancing epoch with no signature
+change. Accepting it is a word; the design work is done.
+
+**One path is still unexercisable, and that is the finding.** The proposal →
+review → accept loop has no route that is neither a model nor a human: proposals
+arrive only through `delver_propose_*`, reachable via the underscore-prefixed
+`_delver.agent.invoke` gateway or the DTP bridge, whose rendezvous registry,
+token leases and approval UI exist so that a person authorises the connection.
+That is correct security design and it is why the differentiating half of the
+product has never been driven end to end. Recorded on the eval-harness row.

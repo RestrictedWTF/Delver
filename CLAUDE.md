@@ -53,11 +53,19 @@ these wrong by default — that's why they're here.
 
 14. **If a decision isn't recorded in `Docs/`, raise it — don't invent it.**
     Silent architectural drift is the main risk on this project.
-15. Verify your own work by running builds, typechecks, and test suites — but
-    **not** anything needing a workbench, a rendered DOM, or a visual check.
-    Launching Code OSS, driving the UI, and judging how something looks are the
-    human's, who is faster at them. Report what you ran and what it said; a
-    claim of "done" with no output behind it is worth less than no claim.
+15. Verify your own work by running builds, typechecks, and test suites — and,
+    for a claim about **behaviour**, by launching Code OSS and driving it
+    ([`.claude/skills/launch/`](.claude/skills/launch/SKILL.md)). Whether a
+    command is reachable, a click has an effect, a view populates, a round-trip
+    persists — that is falsifiable by observation, so observe it rather than
+    reasoning about it. **Judging how something looks stays the human's**:
+    spacing, hierarchy, density, whether a surface reads well. A model reporting
+    that a pane "looks right" is reporting nothing
+    ([ADR 0020](Docs/history/adr/0020-the-model-drives-the-workbench-to-verify-behaviour.md)).
+    Driving is verification, not exploration: it runs at the end of a change,
+    against a specific claim, and never replaces a test that could assert the
+    same thing. Report what you ran and what it said; a claim of "done" with no
+    output behind it is worth less than no claim.
 16. At the end of a working session, update [`Docs/planning/status.md`](Docs/planning/status.md).
     Add or update a [`Docs/planning/ledger.md`](Docs/planning/ledger.md) row when a feature's
     status changes.

@@ -1,7 +1,8 @@
 # Compiler metadata as semantic recovery
 
-**Status:** open; the read-only spike below has been run — 2026-08-31 —
-and its result is a recommendation to schedule, not to build yet
+**Status:** partly started — 2026-08-31. The bounded vtable slice below is
+being built ([ADR 0019](../../history/adr/0019-vtable-slice-bounded-by-recovered-functions.md));
+everything else here remains a P5 item, unmeasured and not started
 
 ## What
 
@@ -123,9 +124,198 @@ corpus. The zero-false-exact-match criterion below is therefore *not* yet met �
 what is established is that the entry point into the graph validates strongly and
 that the data exists at a useful rate.
 
-**Recommendation: schedule, do not start.** It stays a P5 item. The spike says
-the leverage is real and the false-positive risk is controllable, which is what
-was unknown; it does not say the remaining structures are, and this is not P5.
+### Spike 2: the vftable edge, and where the naive walk breaks
+
+The first spike stopped at the locator → type-descriptor edge, which is the
+entry into the graph but not the part that yields anything an analyst reads. The
+second walks one edge further, over the same 69 images plus `Auto-updater.exe`:
+a locator is pointed at from `[vftable - 8]`, so the qwords after that referrer
+are the class's virtual method slots.
+
+| | |
+| --- | --- |
+| validated locators | 4,779 |
+| locators with a vftable above them | **4,779 (100.0%)** |
+| executable slots recovered | 39,319 |
+| walks ending at a non-executable pointer | 4,678 (97.9%) |
+
+**The existence edge validates completely.** Not one validated locator lacked a
+referrer, which is stronger than the 97.7% filter of spike 1 and means the
+vftable is not a heuristic step — it is structural, and the locator check already
+did the discriminating.
+
+The two spikes' totals reconcile: spike 1 ran over the 69 System32 images and
+ended at 4,771 named locators; spike 2 added `Auto-updater.exe`, whose 8 classes
+make 4,779. The corpora differ by one image, not the filters by one rule.
+
+**What the shipped implementation measures.** The Rust scanner reproduces the
+spike exactly on every image but `cdp.dll`, where it reported 2,416
+`(locator, vftable)` pairs against the spike's 2,369. That 47-pair gap was run
+down rather than left standing, and **the scanner is right**: the spike capped
+the type-descriptor name window at 512 bytes, and all 47 rejected locators name
+WRL `DelegateInvokeHelper` template instantiations whose decorated names are
+538–999 bytes. The longest name the spike accepts in that image is 491 bytes — a
+cut exactly at its own window. `cdp.dll` is the only image in the corpus with
+mangled names past 512 bytes, which is why one image disagreed and sixty-nine
+did not.
+
+Each of the 47 passes the `pSelf` discriminator, names a `.?A` descriptor, and
+has a referrer whose following qwords land in `.text`. Two of them are the same
+class at `base_offset` 0 and 8 — the multiple-inheritance case `base_offset`
+exists to record.
+
+The consequence for the numbers above: the spike's totals are a floor, not a
+count. `MAX_DECORATED_NAME` is 4096 in the implementation, against a longest
+observed name of 999.
+
+**The termination rule does not validate.** Walking "until a pointer that is not
+into executable memory" is wrong at the end of a pointer region, and the slot
+histogram shows exactly where:
+
+| slots | vtables |
+| --- | --- |
+| 1–8 | 3,834 |
+| 9–32 | 848 |
+| 33–64 | 77 |
+| **>64** | **20** |
+
+All twenty runaways are the same class — `std::bad_array_new_length`, which has
+two virtual methods and is reported with up to **3,166 slots**. It is the *last*
+RTTI vtable in `.rdata` in those images, so the walk leaves the vtable and
+continues through whatever array of function pointers follows. A boundary test
+confirmed the complementary fact: **zero** walks swallow another
+locator-preceded vtable, so the overrun is always into non-RTTI pointer data,
+which is why it survives the obvious check.
+
+**The fix is a terminator Delver has and a standalone RTTI parser does not.** A
+slot is a slot only if it points at a *recovered function entry*, not merely into
+executable memory. Delver's function set — now including chained-fragment
+attribution — is exactly that oracle. This is worth stating as a design
+constraint rather than an implementation detail: the vtable slice depends on
+function recovery having run, and is not a parser that can stand alone.
+
+**Recommendation: start the vtable slice, schedule the rest.** The spikes say
+the leverage is real and the false-positive risk is controllable on the two edges
+they measured — locator at 97.7% filtered, vftable at 100% — which is what was
+unknown. They say nothing about the hierarchy descriptors, base-class arrays or
+virtual inheritance, so those stay P5 on the same terms as before.
+
+What is lifted out is the bounded *vtable* slice: MSVC x64 locators, decorated
+class names, and method slots, with no hierarchy and no class model. It is gated
+on the slot terminator above, and the terminator that works is the one a
+standalone parser cannot have — a slot is admitted only when its target is a
+recovered function entry, which makes the slice dependent on function recovery
+having run. That dependency, and the truncation it trades the runaway tables
+for, are recorded in
+[ADR 0019](../../history/adr/0019-vtable-slice-bounded-by-recovered-functions.md).
+
+## Raised, not decided: vtable slots as a function-seed source
+
+Building the vtable slice surfaced a question it cannot answer itself. The slot
+walk admits only addresses already recovered as functions, and measurement
+([ADR 0019](../../history/adr/0019-vtable-slice-bounded-by-recovered-functions.md))
+shows 460 of 4,832 tables truncate under that rule, the worst reporting one slot
+of fifty-five. The stopping address in those cases is a real virtual method that
+is a leaf function with no unwind data: `.pdata` never named it, and no decoded
+path reached it, so neither the exception directory nor the sweep produced a
+seed.
+
+A vtable slot is itself strong evidence of a function start — stronger than a
+linear sweep's guess, since the compiler emitted a dispatch to it. Feeding
+validated slots back as a `SeedSource` and re-deriving would recover exactly the
+functions the walk is missing, and the second pass would then admit the slots
+that stopped it.
+
+What makes this a decision rather than an obvious win:
+
+- It is **circular by construction** — slots depend on functions, and functions
+  would depend on slots. It terminates (one extra pass, seeded from the first),
+  but the fixpoint has to be defined rather than assumed, and a re-derivation
+  ([ADR 0015](../../history/adr/0015-authored-corrections-re-derive-facts.md))
+  must not oscillate.
+- It **admits attacker-influenced addresses into the function set**. Today a
+  malformed vtable produces a short table; afterwards it would produce function
+  starts, which is a larger blast radius and needs its own confidence tier
+  rather than the authoritative one the exception directory gets.
+- It changes what `FunctionSource` means for a whole class of functions, which
+  0017's reconciliation reads. A new source should show up there as a named
+  category, not silently widen `delverOnly`.
+
+The measurement to settle it: seed from validated slots, re-derive, and count
+how many of the 460 truncated tables lengthen against how many new function
+starts land somewhere no backend agrees is a function.
+
+### The measurement was run
+
+Two passes over the same 70 images: recover, take every
+`NotAFunction{rejected_rva}` address, push each as a function seed, re-derive,
+re-walk. Pass 1 reproduces ADR 0019 exactly (4,832 tables, 30,839 slots, 30
+zero-slot, 13 over 64, worst 619), so the harness measures the same thing.
+
+**The mechanism is confirmed at the addresses that motivated it.** All 30
+zero-slot tables disappear. `cdp.dll`'s `.?AV?$Activity@VICDPActivity@@$$V@cdp@@`
+goes **1 → 55** — the exact interface this document predicted — its siblings go
+1 → 59, and six `amf-mft-mjpeg-decoder64.dll` interfaces go 1 → 55/56/58.
+
+**The false-positive shape does not appear.** Of 4,455 new function starts:
+zero fall strictly inside a pass-1 function's extent, zero inside a chained
+fragment, and zero land mid-instruction in pass 1's decoded stream. 96% are in
+bytes function recovery never reached at all — the "leaf function, no `.pdata`,
+nothing branches to it" profile ADR 0019 diagnosed.
+
+**And the headline is still wrong.** 4,560 tables lengthen, but 4,256 of those
+gain exactly one slot, which seeding the address that stopped the walk makes
+inevitable — it is arithmetic, not evidence. The real result is **304 tables
+materially recovered, +3,142 slots**.
+
+Three things the measurement establishes *against* the change, and they are why
+this stays open rather than becoming obvious:
+
+- **ADR 0019's own failure mode returns.** 24 of the grown tables are
+  `std::bad_array_new_length` — the two-method class — and they gain **737
+  slots** between them (`browserbroker.dll` 82 → 306, `CloudExperienceHostRedirection.dll`
+  47 → 287). New starts let the walk run further into the non-RTTI function-pointer
+  array that follows the last table in `.rdata`. Tables over 64 slots go 13 → 16.
+  That is ~10% of the gain, every slot of it a confident wrong virtual method, in
+  a class nameable in advance. Seeding does not merely fail to fix the boundary
+  problem — it makes it worse.
+- **There is no fixpoint at two passes.** Pass 3 finds 409 further starts and
+  +996 slots, decaying about an order of magnitude per pass rather than
+  converging. "Seed once" is a policy, not a termination property, and it leaves
+  roughly a thousand slots unclaimed.
+- **The clean-corpus caveat is the whole risk.** These are Microsoft-signed
+  system DLLs. The measurement says nothing about an adversarial vtable, which is
+  exactly where "attacker-influenced addresses enter the function set" lives. The
+  containment test is also inapplicable to the 46% of pass-1 functions that have
+  no `end_rva`; the mid-instruction check covers part of that gap and is the
+  stronger of the two, but neither is a cross-backend check. Only 0017's
+  reconciliation would say these starts are *real* rather than merely
+  non-contradictory.
+
+The spike also used `SeedSource::Export` as a stand-in carrier, which gives these
+seeds authoritative treatment — an optimistic bias. A real implementation needs
+its own variant at a lower confidence, which is a protocol and reconciliation
+change, not a one-line addition.
+
+**Where that leaves it.** The measurement settles the cost side and splits the
+change into two effects that are worth deciding apart. 4,455 new function starts
+with no implausible shape is a win for *function recovery* — it improves the
+listing, the xref table and the call graph regardless of RTTI. Lengthening the
+vtables is what carries the 737-slot regression.
+
+Taking the first without the second is possible, but not by default: the vtable
+walk reads the function set, so any seed added to it is admitted automatically
+and the tables lengthen whether or not that was wanted. Separating them requires
+the admission rule to *exclude* functions derived from vtable seeds — which is
+also, not coincidentally, the thing that breaks the circularity this document
+opened with. That is a real option and it is the conservative one: better
+functions everywhere, vtables unchanged, no new wrong slots.
+
+What it costs is the 304 materially recovered tables, including the 1 → 55
+interface — those exist only because the seeded functions are admitted. So the
+choice is not "seed or not". It is whether the 304 recovered tables are worth 737
+confident wrong slots in a class that can be named in advance, and that trade
+does not have to be accepted to take the function-recovery half.
 
 ## What would settle it
 

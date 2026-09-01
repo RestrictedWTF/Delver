@@ -46,7 +46,7 @@ user-facing beyond a debug view.
 | `delver-rpc` transport (JSON-RPC + binary frames) | M | stdio first |
 | `provider-file`: open a PE, return headers/sections | M | `goblin` or `object` crate |
 | `providerProcess.ts` host in the workbench | M | Modelled on how debug adapters are spawned |
-| One throwaway view listing sections | S | Proof of life, deleted in P1 |
+| One throwaway view listing sections | S | Proof of life; it shipped and stayed as `contrib/delverSections/` |
 | `delverctl` headless harness | S | Drives the protocol without the IDE |
 | Branding, telemetry off, CI (build + typecheck + layers) | M | |
 
@@ -65,7 +65,7 @@ in CI, and gives the team headless triage for free.
 - Fact vs. interpretation as separate stores, even when interpretation is empty.
 - `Anchor` as `(contentHash, rva)`, never absolute addresses.
 
-**Exit:** `delverctl sections notepad.exe` and the IDE both get the same data
+**Exit:** `delverctl info notepad.exe` and the IDE both get the same data
 from the same provider process.
 
 ---
@@ -322,14 +322,42 @@ its file on disk, and land on a real inline hook. Adding providers required
 
 | Item | Size |
 | --- | --- |
+| **Intraprocedural dataflow** — value lattice, abstract state, fixpoint over existing CFG edges | L |
 | Type system: structs, enums, function signatures, propagation | XL |
 | ~~Type application feeding back into the decompiler responder~~ — **done** | L |
 | CFG per function with layered layout | L |
 | Stack frame / local variable recovery beyond what the decompiler gives | L |
 | ELF and Mach-O loaders | L |
-| Signature matching for library code | L |
-| **Entry-point role recovery — started, incomplete** | M |
+| ~~Signature matching for library code~~ — **done** | L |
+| Entry-point role recovery — **walk removed**, redo on signature matching | M |
+| C++ RTTI and class recovery — **vtable slice lifted out and started**, rest deferred | L |
 | Demangling (MSVC, Itanium) | M |
+
+**Intraprocedural dataflow is listed first because it gates the rest of this
+phase, and it was previously not listed at all.** A 2026-09-01 audit traced every
+blocked, deferred or caveated item in `Docs/planning/` to its real blocker rather
+than its stated one. Nine resolve to the same absence — there is no value
+tracking, no type lattice and no variable model anywhere in `delver-analysis`:
+
+- `ResolutionConfidence::Probable`, which exists and is uninhabited
+  ([the analysis](ideas/probable-indirect-call-resolution.md))
+- `delver_call_graph` and `delver_call_paths` reporting `partial` on any
+  unresolved indirect site
+- indirect-call targets in the xref table
+- type propagation, the XL row below
+- consuming vtable slots as `probable` targets, and constructor vptr-write typing
+- jump tables decoded as functions
+- indirect edges in the CFG view
+
+The scaffolding is already there: `control_flow.rs` yields basic blocks and
+typed direct edges, `state.rs` holds the walk, and iced-x86 gives operand
+semantics. What is missing is a value lattice (constant / stack slot / global
+pointer / IAT slot / vptr-of-class / unknown), an abstract state over registers
+and stack slots, and a fixpoint over the edges that already exist.
+
+Nothing else in P5 is a prerequisite for it, and it is a prerequisite for most of
+P5. Sequencing it behind ELF/Mach-O loaders — where it sat implicitly, as a
+sub-clause of "propagation" — is the ordering error this row corrects.
 
 Accepted data types and function prototypes already reach the decompiler: they
 travel with each request as a versioned snapshot, PyGhidra applies them inside a
@@ -337,15 +365,15 @@ rolled-back transaction, and the snapshot is part of decompilation identity so n
 cache can serve text built against a superseded type model
 ([ADR 0013](../history/adr/0013-accepted-semantics-as-decompilation-input.md)).
 
-**Entry-point role recovery is half-built and does not work yet.** What landed:
-the PE `Subsystem` is parsed and carried (exact), and the image entry point is
+**Entry-point role recovery is back to unstarted.** What landed and stays: the
+PE `Subsystem` is parsed and carried (exact), and the image entry point is
 labelled as the C runtime stub rather than presented as the user's entry —
 useful, since it is the difference between "your code starts here" and "this is
-scaffolding". What did *not* land is finding `main`/`WinMain` behind it.
-`delver-analysis/src/entry_role.rs` holds a call-graph walk for the MSVC startup
-shape; it is written, tested, fails closed, and **resolved 0 of 80 real
-System32 binaries** — every one declined to the CRT entry alone. Two heuristics
-were falsified against real samples rather than reasoned about:
+scaffolding". What did *not* land is finding `main`/`WinMain` behind it. The
+MSVC call-graph walk that lived in `delver-analysis/src/entry_role.rs` **resolved
+0 of 80 real System32 binaries** — every one declined to the CRT entry alone —
+and was wired to no protocol or surface, so it has been deleted. Three
+heuristics were falsified against real samples rather than reasoned about:
 
 - The startup path is a **fan-out, not a chain of forwarders**. `mainCRTStartup`
   branches to the security-cookie init and the CRT frame; the frame then calls
@@ -353,17 +381,33 @@ were falsified against real samples rather than reasoned about:
   stops immediately.
 - "The call between `_initterm` and `exit`" fails because **address order is not
   execution order** — on `where.exe` the `exit` call sits *below* the `_initterm`
-  call. It would need control flow, which the walk does not use.
+  call. It would need control flow, which the walk did not use.
 - On newer binaries the CRT is statically linked, so there are no marker imports
   to anchor on at all.
 
 The real answer is the row above it: recognize the CRT functions themselves by
-**signature**, which is what other tools do and which Delver already has the
-machinery for — named signatures carry retained proofs and match across
-revisions. The walk is kept because it is correct on the shapes it does
-recognize, never produced a false positive across those 80 samples, and would
-otherwise be rebuilt from scratch when signatures land. It must not be described
-as working until it does.
+**signature**, which is what other tools do and which Delver has now shipped —
+named signatures carry retained proofs and match across revisions. Any redo of
+this item starts there, not from the deleted walk.
+
+**The RTTI item is split, and only the measured half is being built.** Two
+read-only spikes over 69 System32 images plus `Auto-updater.exe`
+([idea doc](ideas/compiler-metadata-semantic-recovery.md)) measured the two edges
+that reach something an analyst reads: the locator's `pSelf` self-reference check
+removes 97.7% of candidates, and 4,779 of 4,779 surviving locators have a vftable
+above them. Those two edges are now built — MSVC x64 locators, decorated class
+names, and vftable method slots, in `delver-format/src/rtti.rs` and
+`delver-analysis/src/vtables.rs`.
+
+Class hierarchy descriptors, base-class arrays, virtual inheritance, the Itanium
+ABI and any class model stay here, unmeasured. Demangling stays its own row.
+
+The slice is bounded by a rule that makes it **dependent on function recovery**:
+a slot counts only when it names a recovered function entry, not merely an
+address in executable memory. The naive rule reported a two-method class with
+3,166 slots. The cost is that under-recovery now truncates a table instead of
+inflating it, which is why every walk records its terminator
+([ADR 0019](../history/adr/0019-vtable-slice-bounded-by-recovered-functions.md)).
 
 ---
 
