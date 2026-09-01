@@ -125,11 +125,13 @@ where
 	}
 	for export in &exports {
 		if let Some(rva) = export.rva {
-			function_seeds.push(FunctionSeed {
-				rva,
-				end_rva: None,
-				source: SeedSource::Export,
-			});
+			if seeds_a_function(&sections, rva) {
+				function_seeds.push(FunctionSeed {
+					rva,
+					end_rva: None,
+					source: SeedSource::Export,
+				});
+			}
 		}
 	}
 	if let Some(tls) = &tls {
@@ -157,6 +159,31 @@ where
 		tls,
 		completeness,
 	})
+}
+
+/// Whether an export's RVA is worth seeding as a function start.
+///
+/// An export directory says "this symbol has a name and an address". It does
+/// not say the address is code: DLLs routinely export globals, dispatch tables
+/// and version strings, and those land in `.data` or `.rdata`. Seeding them
+/// produces a function that is really a variable, so the test here is the
+/// section's executable bit — an exported data symbol is a data export, not a
+/// function start. The export itself is still reported in
+/// [`ParsedImage::exports`]; only the *function seed* is withheld.
+///
+/// An RVA inside no section at all fails this test too, and should: a claimed
+/// address outside every mapped range is not somewhere a function can begin.
+///
+/// The same test would be wrong at the `add_function` choke point downstream.
+/// There it would reject seeds from every source, including packed samples
+/// whose real code section is marked non-executable until the unpacker stub
+/// rewrites its permissions at runtime. Here the claim is narrower: it rejects
+/// only the export directory's own word, for one address, whose section is
+/// already in hand.
+fn seeds_a_function(sections: &[Section], rva: u64) -> bool {
+	sections
+		.iter()
+		.any(|s| s.is_executable() && rva >= s.virtual_address && rva < s.virtual_end())
 }
 
 /// Sorts seeds by RVA and keeps the most authoritative source per address.
@@ -350,6 +377,35 @@ where
 ///
 /// As with imports, an empty return value carries a claim — "this DLL exports
 /// nothing" — so every failure path sets `completeness.exports_failed`.
+///
+/// Empty slots are skipped. The export directory declares one *contiguous*
+/// ordinal range and an address table sized to cover it, so an ordinal nobody
+/// exports still occupies an entry; PE spells that entry `0`, and the loader
+/// reads it as "there is no export at this ordinal". The `object` crate hands
+/// the whole address table back verbatim, zeros included, as
+/// `ExportTarget::Address(0)` — faithful to the bytes, but a hole is not a
+/// symbol, and reporting one as `#ordinal @0x0` invents an export. It is not a
+/// near miss either: RVA `0` is the DOS header, which is never code or data a
+/// symbol could point at, so the test is exact rather than a heuristic.
+/// `amdave64.dll` is the case that found this — 5,659 slots, of which 5,622
+/// are holes.
+///
+/// A hole with a *name* would be a file contradicting itself: the name pointer
+/// table would advertise a symbol the address table declines to place. That is
+/// still not an export — the address it resolves to is the DOS header — so the
+/// test is the address alone, and a name attached to a hole does not rescue it.
+/// No image in the corpus does this.
+///
+/// Ordinals survive untouched: `object` derives each from the slot's index plus
+/// the directory's ordinal base, so dropping a hole cannot renumber the exports
+/// after it. `x64-export-holes` in the corpus pins that.
+///
+/// Nothing is recorded in [`ParseCompleteness`] for the skipped slots, and that
+/// is deliberate. Those flags answer "is this list shorter than the sample's
+/// own"; a hole was never in the sample's list, so no fact was dropped and
+/// there is no shortfall to admit. `export_total` counts what survives, for the
+/// same reason — it is the number the summary reports as the image's export
+/// count, and counting holes there would restate the defect one layer up.
 fn extract_exports<'data, Pe, R>(
 	file: &PeFile<'data, Pe, R>,
 	limits: Limits,
@@ -376,11 +432,16 @@ where
 		}
 	};
 
-	completeness.export_total = all.len();
-	completeness.exports_truncated = all.len() > limits.exports;
+	let real = all
+		.into_iter()
+		.filter(|export| !matches!(export.target, ExportTarget::Address(0)))
+		.collect::<Vec<_>>();
+
+	completeness.export_total = real.len();
+	completeness.exports_truncated = real.len() > limits.exports;
 
 	let mut exports = Vec::new();
-	for export in all.into_iter().take(limits.exports) {
+	for export in real.into_iter().take(limits.exports) {
 		let name = export.name.map(|n| String::from_utf8_lossy(n).into_owned());
 		let (rva, forwarded_to) = match export.target {
 			ExportTarget::Address(addr) => (Some(addr as u64), None),
@@ -508,7 +569,7 @@ where
 			source: SeedSource::ExceptionDirectory,
 		});
 	}
-	ranges.sort_by(|left, right| left.range.start.cmp(&right.range.start));
+	ranges.sort_by_key(|entry| entry.range.start);
 	(seeds, ranges)
 }
 
@@ -579,8 +640,7 @@ where
 		let Some(next_unwind) = primary_unwind_rva(file, unwind_rva) else {
 			return Some(begin);
 		};
-		if !unwind_info_flags(file, next_unwind)
-			.is_some_and(|flags| flags & UNW_FLAG_CHAININFO != 0)
+		if unwind_info_flags(file, next_unwind).is_none_or(|flags| flags & UNW_FLAG_CHAININFO == 0)
 		{
 			return Some(begin);
 		}
@@ -844,6 +904,45 @@ mod tests {
 		IMAGE_SUBSYSTEM_NATIVE, IMAGE_SUBSYSTEM_WINDOWS_CUI, IMAGE_SUBSYSTEM_WINDOWS_GUI,
 	};
 
+	/// Sections for the seed test: executable code, then writable data.
+	fn text_and_data() -> Vec<Section> {
+		vec![
+			Section {
+				name: ".text".to_string(),
+				virtual_address: 0x1000,
+				virtual_size: 0x100,
+				raw_offset: 0x400,
+				raw_size: 0x200,
+				characteristics: 0x6000_0020, // CODE | EXECUTE | READ
+			},
+			Section {
+				name: ".data".to_string(),
+				virtual_address: 0x2000,
+				virtual_size: 0x100,
+				raw_offset: 0x600,
+				raw_size: 0x200,
+				characteristics: 0xC000_0040, // INITIALIZED_DATA | READ | WRITE
+			},
+		]
+	}
+
+	#[test]
+	fn an_export_seeds_a_function_only_from_an_executable_section() {
+		let sections = text_and_data();
+		assert_eq!(
+			(
+				seeds_a_function(&sections, 0x1000),
+				seeds_a_function(&sections, 0x10FF),
+				seeds_a_function(&sections, 0x2000),
+				// Past the last section: an RVA no section maps at all.
+				seeds_a_function(&sections, 0x9000),
+				// A sectionless image cannot vouch for any address.
+				seeds_a_function(&[], 0x1000),
+			),
+			(true, true, false, false, false)
+		);
+	}
+
 	/// The test binary is itself a PE, which makes it a convenient real image.
 	fn current_exe_image() -> ParsedImage {
 		parse_pe(&current_exe_bytes()).expect("parse current exe")
@@ -906,6 +1005,10 @@ mod tests {
 		assert_eq!(relocation_width(u16::MAX), None);
 	}
 
+	// The underscores below split each literal at the `UNWIND_INFO` field
+	// boundary — five flag bits, then three version bits — which is the whole
+	// point of writing them in binary. Even digit groups would hide it.
+	#[allow(clippy::unusual_byte_groupings)]
 	#[test]
 	fn unwind_flags_ignore_the_version_and_report_chaining() {
 		// Version lives in the low three bits and must not reach the flags. A

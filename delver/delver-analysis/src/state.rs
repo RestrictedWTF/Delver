@@ -197,7 +197,7 @@ mod tests {
 	}
 
 	fn state(image: &ParsedImage, file_size: u64) -> RvaState {
-		RvaState::new(image, file_size, &[0..file_size])
+		RvaState::new(image, file_size, std::slice::from_ref(&(0..file_size)))
 	}
 
 	fn section(virtual_address: u64, raw_size: u64) -> Section {

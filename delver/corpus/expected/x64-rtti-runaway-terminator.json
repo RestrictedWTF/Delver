@@ -1,0 +1,83 @@
+{
+  "name": "x64-rtti-runaway-terminator",
+  "covers": "the slot walk stops at the first pointer that is executable but not a recovered function entry, instead of running out of the table",
+  "arch": "X86_64",
+  "entry": "0x1000",
+  "image_base": "0x140000000",
+  "sections": [
+    {
+      "name": ".text",
+      "rva": "0x1000",
+      "virtual_size": 35
+    },
+    {
+      "name": ".rdata",
+      "rva": "0x2000",
+      "virtual_size": 120
+    },
+    {
+      "name": ".pdata",
+      "rva": "0x3000",
+      "virtual_size": 36
+    },
+    {
+      "name": ".xdata",
+      "rva": "0x4000",
+      "virtual_size": 48
+    }
+  ],
+  "imports": [],
+  "exports": [],
+  "seeds": [
+    {
+      "rva": "0x1000",
+      "end": "0x1008",
+      "source": "ExceptionDirectory"
+    },
+    {
+      "rva": "0x1010",
+      "end": "0x1018",
+      "source": "ExceptionDirectory"
+    },
+    {
+      "rva": "0x1020",
+      "end": "0x1023",
+      "source": "ExceptionDirectory"
+    }
+  ],
+  "entry_disassembly": [
+    "0x1000 mov rax,rbx",
+    "0x1003 add rax,1",
+    "0x1007 ret"
+  ],
+  "analysis": {
+    "instruction_count": 8,
+    "functions": [
+      "0x1000..0x1008:ExceptionDirectory",
+      "0x1010..0x1018:ExceptionDirectory",
+      "0x1020..0x1023:ExceptionDirectory"
+    ],
+    "xrefs": [],
+    "strings": [
+      "0x2010:Ascii:.?AVBadArrayNewLength@@"
+    ],
+    "immediates": [
+      "0x1003:8:0x1",
+      "0x1013:8:0x2"
+    ]
+  },
+  "rtti_scanned": true,
+  "vtables": [
+    {
+      "decorated_name": ".?AVBadArrayNewLength@@",
+      "locator_rva": "0x2028",
+      "vftable_rva": "0x2048",
+      "base_offset": 0,
+      "slots": [
+        "0@0x1010",
+        "1@0x1020"
+      ],
+      "terminator": "NotAFunction@0x1004"
+    }
+  ]
+}

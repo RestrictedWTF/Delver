@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 use delver_protocol::{
 	FunctionsResult, GetExportsResult, GetFunctionSeedsResult, GetImageInfoResult,
 	GetImportsResult, ListingWindowResult, ListingWindowRowWire, OpenImageResult, ReadMemoryParams,
-	Request,
+	Request, VtableTerminatorWire, VtableWire, VtablesParams, VtablesResult,
 };
 use delver_rpc::Client;
 
@@ -60,6 +60,16 @@ enum Commands {
 		#[arg(long, default_value_t = 16)]
 		rows: u64,
 	},
+	/// Recover C++ classes and their virtual-method slots.
+	///
+	/// Spawns the same provider and analysis server topology as `analyze` and
+	/// drives `analysis/vtables` over it.
+	Vtables {
+		file: PathBuf,
+		/// Slots to print per table before summarising the rest.
+		#[arg(long, default_value_t = LIST_PREVIEW as u64)]
+		slots: u64,
+	},
 }
 
 fn main() -> Result<()> {
@@ -99,7 +109,12 @@ fn main() -> Result<()> {
 			let mut session = Session::connect(&endpoint)?;
 			cmd_read(&mut session, &space, &address, &length)
 		}
-		Commands::Analyze { file, rows } => cmd_analyze(&file, rows),
+		Commands::Analyze { file, rows } => {
+			with_pipeline(&file, |endpoint| run_analysis(endpoint, rows))
+		}
+		Commands::Vtables { file, slots } => {
+			with_pipeline(&file, |endpoint| run_vtables(endpoint, slots))
+		}
 	}
 }
 
@@ -448,11 +463,13 @@ fn hex_dump(base: u64, bytes: &[u8]) {
 	}
 }
 
-/// Drives the full pipeline with provider and analysis as separate processes.
+/// Runs `body` against a freshly spawned provider + analysis server pair.
 ///
 /// This is the Stage D acceptance path: nothing here opens the file directly,
-/// and the analysis server reaches the bytes only through the provider.
-fn cmd_analyze(file: &Path, rows: u64) -> Result<()> {
+/// and the analysis server reaches the bytes only through the provider. Every
+/// command that needs the full pipeline shares this spawn and teardown, so a
+/// change to the topology is made once.
+fn with_pipeline<T>(file: &Path, body: impl FnOnce(&str) -> Result<T>) -> Result<T> {
 	let unique = std::process::id();
 	let provider_endpoint = format!("pipe://delver-provider-{unique}");
 	let analysis_endpoint = format!("pipe://delver-analysis-{unique}");
@@ -478,7 +495,7 @@ fn cmd_analyze(file: &Path, rows: u64) -> Result<()> {
 
 	std::thread::sleep(std::time::Duration::from_millis(300));
 
-	let result = run_analysis(&analysis_endpoint, rows);
+	let result = body(&analysis_endpoint);
 
 	let _ = analysis.kill();
 	let _ = analysis.wait();
@@ -574,4 +591,129 @@ fn run_analysis(endpoint: &str, rows: u64) -> Result<()> {
 	}
 
 	session.shutdown()
+}
+
+/// Prints recovered C++ classes and their virtual-method slots.
+///
+/// Deliberately verbose about why each walk stopped: a slot count is not a
+/// method count when the walk was cut short, and a table ended by a rejected
+/// address is as likely to be a hole in function recovery as a small class.
+fn run_vtables(endpoint: &str, slots: u64) -> Result<()> {
+	let mut session = Session::connect(endpoint)?;
+
+	let response = session.call("analysis/openImage", serde_json::Value::Null)?;
+	let opened: OpenImageResult = serde_json::from_value(response)?;
+
+	println!("arch:         {}", opened.arch);
+	println!("functions:    {}", opened.function_count);
+
+	let params = VtablesParams {
+		image_id: opened.image_id,
+		start: 0,
+		max_vtables: LIST_PREVIEW as u32,
+		// The server's own per-table cap: `slot_count` is what the walk
+		// admitted, and asking for fewer here would hide how far it ran.
+		max_slots_per_vtable: 0,
+	};
+	let response = session.call("analysis/vtables", serde_json::to_value(params)?)?;
+	let result: VtablesResult = serde_json::from_value(response)?;
+
+	println!();
+	// Printed before the list it qualifies: an image the scan declined to look
+	// at is not an image without classes, and the empty list looks identical.
+	if !result.scanned {
+		println!("vtables:      NOT SCANNED — the RTTI scan runs on PE32+ only, and this");
+		println!("              image is not x64. No conclusion about C++ classes can be");
+		println!("              drawn from this run.");
+		return session.shutdown();
+	}
+	if result.truncated {
+		println!(
+			"vtables:      TRUNCATED — the scan hit its own cap, so the {} classes",
+			result.total
+		);
+		println!("              below are a prefix of the image's set, not all of it.");
+	}
+
+	println!("classes:      {}", result.total);
+	for vtable in &result.vtables {
+		print_vtable(vtable, slots as usize);
+	}
+	if result.total > result.vtables.len() as u64 {
+		println!();
+		println!(
+			"  ... {} more classes",
+			result.total - result.vtables.len() as u64
+		);
+	}
+
+	session.shutdown()
+}
+
+/// Prints one class: its identity, its slots, and why its walk stopped.
+fn print_vtable(vtable: &VtableWire, slot_preview: usize) {
+	println!();
+	// Escaped and never demangled: this text came from the image and is
+	// attacker-controlled.
+	println!(
+		"  vftable=0x{:08X}  locator=0x{:08X}  base=+0x{:X}",
+		vtable.vftable_rva, vtable.locator_rva, vtable.base_offset
+	);
+	println!("  name    {:?}", vtable.decorated_name);
+	println!(
+		"  slots   {} admitted by the walk (shown {})",
+		vtable.slot_count,
+		vtable.slots.len().min(slot_preview)
+	);
+	for slot in vtable.slots.iter().take(slot_preview) {
+		println!(
+			"    [{:>4}]  slot=0x{:08X}  fn=0x{:08X}",
+			slot.index, slot.slot_rva, slot.function_rva
+		);
+	}
+	if vtable.slot_count > slot_preview as u64 {
+		println!(
+			"    ... {} more slots",
+			vtable.slot_count - slot_preview as u64
+		);
+	}
+	if vtable.slots.len() as u64 != vtable.slot_count {
+		println!(
+			"    (server returned {} of {} slots)",
+			vtable.slots.len(),
+			vtable.slot_count
+		);
+	}
+	println!("  stop    {}", terminator_note(&vtable.terminator));
+}
+
+/// Describes a walk's stopping reason, and whether it makes the slot count a
+/// lower bound rather than a method count.
+fn terminator_note(terminator: &VtableTerminatorWire) -> String {
+	match terminator {
+		VtableTerminatorWire::NotAFunction { rejected_rva } => {
+			let where_ = match rejected_rva {
+				Some(rva) => format!("0x{rva:08X}"),
+				None => "an address outside the image".to_string(),
+			};
+			format!(
+				"notAFunction — the next qword ({where_}) is not a recovered \
+				 function entry.\n          The table may be CUT SHORT by a gap in \
+				 function recovery; treat the\n          slot count as a lower bound, \
+				 not as this class's method count."
+			)
+		}
+		VtableTerminatorWire::NextVtable { vftable_rva } => format!(
+			"nextVtable — the table ended where the next one begins \
+			 (0x{vftable_rva:08X})."
+		),
+		VtableTerminatorWire::NotBackedByFile => {
+			"notBackedByFile — the next slot has no file data behind it, so the walk\n          \
+			 could not read it. The table may be CUT SHORT."
+				.to_string()
+		}
+		VtableTerminatorWire::Cap => {
+			"cap — the walker's own slot cap stopped it. The table is a PREFIX.".to_string()
+		}
+	}
 }

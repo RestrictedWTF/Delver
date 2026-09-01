@@ -35,5 +35,7 @@
     "immediates": [
       "0x1003:8:0x1"
     ]
-  }
+  },
+  "rtti_scanned": true,
+  "vtables": []
 }

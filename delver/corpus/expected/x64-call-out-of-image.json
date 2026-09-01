@@ -1,0 +1,40 @@
+{
+  "name": "x64-call-out-of-image",
+  "covers": "a call target outside every section is refused as a function start",
+  "arch": "X86_64",
+  "entry": "0x1000",
+  "image_base": "0x140000000",
+  "sections": [
+    {
+      "name": ".text",
+      "rva": "0x1000",
+      "virtual_size": 6
+    }
+  ],
+  "imports": [],
+  "exports": [],
+  "seeds": [
+    {
+      "rva": "0x1000",
+      "end": null,
+      "source": "EntryPoint"
+    }
+  ],
+  "entry_disassembly": [
+    "0x1000 call 0FFFFFFFFFE001005h",
+    "0x1005 ret"
+  ],
+  "analysis": {
+    "instruction_count": 2,
+    "functions": [
+      "0x1000:EntryPoint"
+    ],
+    "xrefs": [
+      "0x1000->0xFFFFFFFFFE001005:Call"
+    ],
+    "strings": [],
+    "immediates": []
+  },
+  "rtti_scanned": true,
+  "vtables": []
+}

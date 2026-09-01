@@ -30,8 +30,9 @@ use delver_protocol::{
 	ScanStringsResult, SearchImmediatesParams, SearchImmediatesResult, SectionWire, SeedSourceWire,
 	SetCorrectionsParams, SetCorrectionsResult, SignatureFieldReasonWire, SignatureFieldWire,
 	StringEncodingWire, StringWire, StringsResult, SubsystemWire, TargetCapabilityWire,
-	TargetDescriptorWire, TlsWire, XrefIndexParams, XrefIndexResult, XrefKindWire, XrefWire,
-	XrefsParams, XrefsResult,
+	TargetDescriptorWire, TlsWire, VtableSlotWire, VtableTerminatorWire, VtableWire, VtablesParams,
+	VtablesResult, XrefIndexParams, XrefIndexResult, XrefKindWire, XrefWire, XrefsParams,
+	XrefsResult,
 };
 
 /// Registers every type that must appear in the schema.
@@ -113,6 +114,11 @@ fn register_definitions(generator: &mut SchemaGenerator) {
 		GlobalAccessesParams,
 		GlobalAccessesResult,
 		GlobalAccessWire,
+		VtablesParams,
+		VtablesResult,
+		VtableWire,
+		VtableSlotWire,
+		VtableTerminatorWire,
 		XrefsParams,
 		XrefsResult,
 		XrefIndexParams,

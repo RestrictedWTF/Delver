@@ -34,7 +34,8 @@ use delver_protocol::{
 	RowForAddressResult, RpcError, ScanStringsParams, ScanStringsResult, SearchImmediatesParams,
 	SearchImmediatesResult, SetCorrectionsParams, SetCorrectionsResult, SignatureFieldReasonWire,
 	SignatureFieldWire, StringEncodingWire, StringWire, StringsResult, TargetCapabilityWire,
-	TargetDescriptorWire, XrefIndexParams, XrefIndexResult, XrefKindWire, XrefWire, XrefsParams,
+	TargetDescriptorWire, VtableSlotWire, VtableTerminatorWire, VtableWire, VtablesParams,
+	VtablesResult, XrefIndexParams, XrefIndexResult, XrefKindWire, XrefWire, XrefsParams,
 	XrefsResult,
 };
 use delver_rpc::framed::MAX_JSON_FRAME_BYTES;
@@ -161,6 +162,7 @@ fn handle(request: &Request, state: &Arc<Mutex<State>>) -> Response {
 		"analysis/functionProfile" => function_profile_query(request, state),
 		"analysis/globals" => globals_query(request, state),
 		"analysis/globalAccesses" => global_accesses_query(request, state),
+		"analysis/vtables" => vtables_query(request, state),
 		"analysis/xrefsTo" => xrefs(request, state, true),
 		"analysis/xrefsFrom" => xrefs(request, state, false),
 		"analysis/xrefIndex" => xref_index(request, state),
@@ -196,6 +198,19 @@ const MAX_CALL_GRAPH_EDGES: usize = 4096;
 
 /// Hard cap on global candidates or accesses in one response.
 const MAX_GLOBAL_RESULTS: usize = 65_536;
+
+/// Hard cap on classes in one `analysis/vtables` response.
+///
+/// The scan's own bound is larger; this one keeps a page of classes, each
+/// carrying its slots, inside the transport's JSON frame.
+const MAX_VTABLES: usize = 4096;
+
+/// Hard cap on slots reported for one vtable in one response.
+///
+/// Bounds the pathological table rather than the real one: the walker already
+/// refuses to admit a slot that is not a recovered function entry, so a class
+/// approaching this is a malformed image, not a deep hierarchy.
+const MAX_VTABLE_SLOTS_PER_TABLE: usize = 1024;
 
 /// Hard cap on steps in one `analysis/callPaths` path.
 const MAX_CALL_PATH_DEPTH: usize = 16;
@@ -572,6 +587,81 @@ fn global_accesses_query(
 		})
 		.map_err(|e| RpcError::protocol(-32603, format!("serialising result: {e}")))
 	})
+}
+
+/// Serves `analysis/vtables`.
+///
+/// Scans RTTI and walks the tables on every call: nothing on [`LoadedImage`]
+/// caches derived data behind an immutable borrow, and adding an eager field
+/// would make every image open pay for a query most sessions never issue.
+fn vtables_query(
+	request: &Request,
+	state: &Arc<Mutex<State>>,
+) -> Result<serde_json::Value, RpcError> {
+	let params: VtablesParams = parse_params(request)?;
+	with_image_id(state, &params.image_id, |image| {
+		let scan = delver_format::rtti::scan_rtti(&image.parsed, &image.bytes);
+		let vtables = delver_analysis::vtables::recover_vtables(
+			&image.parsed,
+			&image.bytes,
+			&image.analysis.functions,
+			&scan.classes,
+		);
+
+		let total = vtables.len();
+		let start = usize::try_from(params.start)
+			.unwrap_or(usize::MAX)
+			.min(total);
+		let limit = resolve_limit(params.max_vtables, MAX_VTABLES);
+		let end = start.saturating_add(limit).min(total);
+		let slot_limit = resolve_limit(params.max_slots_per_vtable, MAX_VTABLE_SLOTS_PER_TABLE);
+
+		let rows = vtables[start..end]
+			.iter()
+			.map(|vtable| VtableWire {
+				vftable_rva: vtable.vftable_rva,
+				locator_rva: vtable.locator_rva,
+				decorated_name: vtable.decorated_name.clone(),
+				base_offset: vtable.base_offset,
+				slots: vtable
+					.slots
+					.iter()
+					.take(slot_limit)
+					.map(|slot| VtableSlotWire {
+						index: slot.index,
+						slot_rva: slot.slot_rva,
+						function_rva: slot.function_rva,
+					})
+					.collect(),
+				slot_count: vtable.slots.len() as u64,
+				terminator: terminator_wire(&vtable.terminator),
+			})
+			.collect();
+
+		serde_json::to_value(VtablesResult {
+			vtables: rows,
+			scanned: scan.scanned,
+			truncated: scan.truncated,
+			total: total as u64,
+			next_start: (end < total).then_some(end as u64),
+		})
+		.map_err(|e| RpcError::protocol(-32603, format!("serialising result: {e}")))
+	})
+}
+
+/// Projects a walk's stopping reason onto the wire enum.
+fn terminator_wire(terminator: &delver_analysis::vtables::SlotTerminator) -> VtableTerminatorWire {
+	use delver_analysis::vtables::SlotTerminator;
+	match terminator {
+		SlotTerminator::NotAFunction { rejected_rva } => VtableTerminatorWire::NotAFunction {
+			rejected_rva: *rejected_rva,
+		},
+		SlotTerminator::NextVtable { vftable_rva } => VtableTerminatorWire::NextVtable {
+			vftable_rva: *vftable_rva,
+		},
+		SlotTerminator::NotBackedByFile => VtableTerminatorWire::NotBackedByFile,
+		SlotTerminator::Cap => VtableTerminatorWire::Cap,
+	}
 }
 
 fn with_image_id<T>(

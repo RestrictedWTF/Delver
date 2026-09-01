@@ -1,0 +1,66 @@
+{
+  "name": "x64-export-holes",
+  "covers": "an empty export-address-table slot is not reported as an export, and does not renumber the exports after it",
+  "arch": "X86_64",
+  "entry": "0x1000",
+  "image_base": "0x140000000",
+  "sections": [
+    {
+      "name": ".text",
+      "rva": "0x1000",
+      "virtual_size": 35
+    },
+    {
+      "name": ".rdata",
+      "rva": "0x2000",
+      "virtual_size": 88
+    }
+  ],
+  "imports": [],
+  "exports": [
+    "#1 First@0x1010",
+    "#3 Second@0x1020"
+  ],
+  "seeds": [
+    {
+      "rva": "0x1000",
+      "end": null,
+      "source": "EntryPoint"
+    },
+    {
+      "rva": "0x1010",
+      "end": null,
+      "source": "Export"
+    },
+    {
+      "rva": "0x1020",
+      "end": null,
+      "source": "Export"
+    }
+  ],
+  "entry_disassembly": [
+    "0x1000 mov rax,rbx",
+    "0x1003 add rax,1",
+    "0x1007 ret"
+  ],
+  "analysis": {
+    "instruction_count": 8,
+    "functions": [
+      "0x1000:EntryPoint",
+      "0x1010:Export",
+      "0x1020:Export"
+    ],
+    "xrefs": [],
+    "strings": [
+      "0x2040:Ascii:sample.dll",
+      "0x204B:Ascii:First",
+      "0x2051:Ascii:Second"
+    ],
+    "immediates": [
+      "0x1003:8:0x1",
+      "0x1013:8:0x2"
+    ]
+  },
+  "rtti_scanned": true,
+  "vtables": []
+}

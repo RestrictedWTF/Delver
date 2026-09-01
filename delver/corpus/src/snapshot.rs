@@ -37,6 +37,33 @@ pub struct Snapshot {
 	pub entry_disassembly: Vec<String>,
 	/// Facts derived by `delver-analysis`.
 	pub analysis: AnalysisFact,
+	/// Whether the RTTI scan understood this image's shape at all.
+	///
+	/// False on x86, where the locator has no `pSelf` to validate against and
+	/// the scan declines. An empty [`Self::vtables`] with this false says "not
+	/// looked for", which is not "none present".
+	pub rtti_scanned: bool,
+	/// Recovered classes and their vtables, ascending by vftable RVA.
+	pub vtables: Vec<VtableFact>,
+}
+
+/// One recovered class and the vtable below its locator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VtableFact {
+	/// Decorated class name, from the type descriptor.
+	pub decorated_name: String,
+	/// RVA of the complete-object locator.
+	pub locator_rva: String,
+	/// RVA of slot zero.
+	pub vftable_rva: String,
+	/// Offset of this subobject's vftable within the complete object.
+	pub base_offset: u32,
+	/// `index@function_rva` per slot, so a slot that shifts or disappears fails
+	/// the diff rather than passing as a shorter table.
+	pub slots: Vec<String>,
+	/// Why the walk stopped. Recorded because a short table and a small class
+	/// are otherwise indistinguishable.
+	pub terminator: String,
 }
 
 /// What static analysis derived from the sample.
@@ -124,11 +151,20 @@ pub fn snapshot_of(name: &str, covers: &str, bytes: &[u8]) -> Result<Snapshot> {
 	let exports = image
 		.exports
 		.iter()
-		.map(|e| match (&e.name, &e.forwarded_to, e.rva) {
-			(Some(n), Some(target), _) => format!("{n} -> {target}"),
-			(Some(n), None, Some(rva)) => format!("{n}@{}", hex(rva)),
-			(Some(n), None, None) => format!("{n}@<none>"),
-			(None, _, _) => format!("#{}", e.ordinal),
+		// The ordinal leads every line. It is the export directory's own
+		// numbering, derived from a slot's index in the address table, so a
+		// change in which slots are reported shows up here as a renumbering
+		// rather than passing as a shorter list — which is the whole claim
+		// `x64-export-holes` exists to make.
+		.map(|e| {
+			let ordinal = e.ordinal;
+			match (&e.name, &e.forwarded_to, e.rva) {
+				(Some(n), Some(target), _) => format!("#{ordinal} {n} -> {target}"),
+				(Some(n), None, Some(rva)) => format!("#{ordinal} {n}@{}", hex(rva)),
+				(Some(n), None, None) => format!("#{ordinal} {n}@<none>"),
+				(None, _, Some(rva)) => format!("#{ordinal} @{}", hex(rva)),
+				(None, _, None) => format!("#{ordinal}"),
+			}
 		})
 		.collect();
 
@@ -143,7 +179,16 @@ pub fn snapshot_of(name: &str, covers: &str, bytes: &[u8]) -> Result<Snapshot> {
 		.collect();
 
 	let entry_disassembly = disassemble_entry(&image, bytes);
-	let analysis = analysis_facts(&image, bytes);
+	// Analysed once and shared: function recovery is an input to the vtable
+	// facts as well as the analysis facts, and running it twice per sample
+	// would let the two views drift apart as well as cost twice over.
+	let analyzed = delver_analysis::analyze(
+		&image,
+		bytes,
+		std::slice::from_ref(&(0..bytes.len() as u64)),
+	);
+	let analysis = analysis_facts(&image, bytes, &analyzed);
+	let (rtti_scanned, vtables) = vtable_facts(&image, bytes, &analyzed);
 
 	Ok(Snapshot {
 		name: name.to_string(),
@@ -157,13 +202,70 @@ pub fn snapshot_of(name: &str, covers: &str, bytes: &[u8]) -> Result<Snapshot> {
 		seeds,
 		entry_disassembly,
 		analysis,
+		rtti_scanned,
+		vtables,
 	})
 }
 
-/// Runs static analysis and flattens the result into diffable strings.
-fn analysis_facts(image: &delver_format::ParsedImage, bytes: &[u8]) -> AnalysisFact {
-	let analyzed = delver_analysis::analyze(image, bytes, &[0..bytes.len() as u64]);
+/// Scans for RTTI and walks each class's vtable.
+///
+/// Function recovery has to run first: the slot walk admits a pointer only when
+/// it names a recovered function entry, so this re-analyses rather than
+/// weakening the rule.
+fn vtable_facts(
+	image: &delver_format::ParsedImage,
+	bytes: &[u8],
+	analyzed: &delver_analysis::AnalyzedImage,
+) -> (bool, Vec<VtableFact>) {
+	let scan = delver_format::rtti::scan_rtti(image, bytes);
+	if !scan.scanned {
+		return (false, Vec::new());
+	}
+	let vtables =
+		delver_analysis::vtables::recover_vtables(image, bytes, &analyzed.functions, &scan.classes);
 
+	let facts = vtables
+		.iter()
+		.map(|vtable| VtableFact {
+			decorated_name: vtable.decorated_name.clone(),
+			locator_rva: hex(vtable.locator_rva),
+			vftable_rva: hex(vtable.vftable_rva),
+			base_offset: vtable.base_offset,
+			slots: vtable
+				.slots
+				.iter()
+				.map(|slot| format!("{}@{}", slot.index, hex(slot.function_rva)))
+				.collect(),
+			terminator: terminator_label(&vtable.terminator),
+		})
+		.collect();
+	(true, facts)
+}
+
+/// Names a walk's stopping reason, with addresses in the file's hex style.
+fn terminator_label(terminator: &delver_analysis::vtables::SlotTerminator) -> String {
+	use delver_analysis::vtables::SlotTerminator;
+	match terminator {
+		SlotTerminator::NotAFunction {
+			rejected_rva: Some(rva),
+		} => format!("NotAFunction@{}", hex(*rva)),
+		SlotTerminator::NotAFunction { rejected_rva: None } => {
+			"NotAFunction:<outside image>".to_string()
+		}
+		SlotTerminator::NextVtable { vftable_rva } => {
+			format!("NextVtable@{}", hex(*vftable_rva))
+		}
+		SlotTerminator::NotBackedByFile => "NotBackedByFile".to_string(),
+		SlotTerminator::Cap => "Cap".to_string(),
+	}
+}
+
+/// Runs static analysis and flattens the result into diffable strings.
+fn analysis_facts(
+	image: &delver_format::ParsedImage,
+	bytes: &[u8],
+	analyzed: &delver_analysis::AnalyzedImage,
+) -> AnalysisFact {
 	AnalysisFact {
 		instruction_count: analyzed.instructions.len(),
 		functions: analyzed

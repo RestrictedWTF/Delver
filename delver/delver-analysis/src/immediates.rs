@@ -54,6 +54,10 @@ pub struct ImmediateSearch {
 /// `cmp eax, -1` and `cmp eax, 0xFFFFFFFF` assemble to the same bytes, so a
 /// search for either finds both. `width` narrows to one encoded field size when
 /// supplied — `Some(8)` finds the byte form and not the dword one.
+// A query is its parameters: what to search, where the search is allowed to
+// look, and how much of the answer to keep. Bundling them into a struct would
+// move the same eight values behind a name that says less than they do.
+#[allow(clippy::too_many_arguments)]
 pub fn search_immediates(
 	image: &ParsedImage,
 	file: &[u8],

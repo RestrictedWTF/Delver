@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 mod pe;
+pub mod rtti;
 
 use object::pe::{
 	IMAGE_SUBSYSTEM_NATIVE, IMAGE_SUBSYSTEM_UNKNOWN, IMAGE_SUBSYSTEM_WINDOWS_CUI,

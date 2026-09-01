@@ -447,6 +447,34 @@ fn seed_source_wire(source: SeedSource) -> SeedSourceWire {
 	}
 }
 
+/// Maps a target file read-only.
+///
+/// The single `unsafe` in this crate. `memmap2` cannot offer a safe version:
+/// a mapping is not a snapshot, so another process truncating or replacing the
+/// file while it is mapped can fault a read. Nothing about the file's *content*
+/// is trusted here — the bytes go straight to `delver-format`, which forbids
+/// `unsafe` — and no other code path in this crate uses `unsafe` at all.
+#[allow(unsafe_code)]
+fn map_target_read_only(file: &File) -> std::io::Result<Mmap> {
+	// SAFETY: `Mmap::map` requires that the backing file not be mutated for as
+	// long as the mapping lives. That cannot be enforced from inside this
+	// process, and it is the accepted cost of mapping an on-disk target rather
+	// than copying it; the mapping is read-only and is owned for its whole life
+	// by the `FileProvider` that created it.
+	unsafe { Mmap::map(file) }
+}
+
+/// Formats a digest as lowercase hex.
+fn hex_digest(bytes: &[u8]) -> String {
+	use std::fmt::Write;
+	bytes
+		.iter()
+		.fold(String::with_capacity(bytes.len() * 2), |mut out, b| {
+			let _ = write!(out, "{b:02x}");
+			out
+		})
+}
+
 #[cfg(test)]
 mod tests {
 	use std::thread;
@@ -617,32 +645,4 @@ mod tests {
 			"an out-of-file PointerToRawData has no valid bytes"
 		);
 	}
-}
-
-/// Maps a target file read-only.
-///
-/// The single `unsafe` in this crate. `memmap2` cannot offer a safe version:
-/// a mapping is not a snapshot, so another process truncating or replacing the
-/// file while it is mapped can fault a read. Nothing about the file's *content*
-/// is trusted here — the bytes go straight to `delver-format`, which forbids
-/// `unsafe` — and no other code path in this crate uses `unsafe` at all.
-#[allow(unsafe_code)]
-fn map_target_read_only(file: &File) -> std::io::Result<Mmap> {
-	// SAFETY: `Mmap::map` requires that the backing file not be mutated for as
-	// long as the mapping lives. That cannot be enforced from inside this
-	// process, and it is the accepted cost of mapping an on-disk target rather
-	// than copying it; the mapping is read-only and is owned for its whole life
-	// by the `FileProvider` that created it.
-	unsafe { Mmap::map(file) }
-}
-
-/// Formats a digest as lowercase hex.
-fn hex_digest(bytes: &[u8]) -> String {
-	use std::fmt::Write;
-	bytes
-		.iter()
-		.fold(String::with_capacity(bytes.len() * 2), |mut out, b| {
-			let _ = write!(out, "{b:02x}");
-			out
-		})
 }

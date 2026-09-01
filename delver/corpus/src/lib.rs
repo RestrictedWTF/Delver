@@ -161,7 +161,7 @@ mod tests {
 			.find(|s| s.name == "x64-immediate-widths")
 			.expect("sample present");
 		let image = delver_format::parse_pe(&sample.bytes).expect("parse");
-		let coverage = [0..sample.bytes.len() as u64];
+		let coverage = std::slice::from_ref(&(0..sample.bytes.len() as u64)).to_vec();
 		let analyzed = delver_analysis::analyze(&image, &sample.bytes, &coverage);
 		let disasm = delver_disasm::Disassembler::new(
 			delver_disasm::Bitness::from_arch(&image.arch).expect("x86-64 decodes"),

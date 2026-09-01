@@ -37,8 +37,7 @@
   "analysis": {
     "instruction_count": 3,
     "functions": [
-      "0x1000..0x1005:ExceptionDirectory",
-      "0x1015:CallTarget"
+      "0x1000..0x1005:ExceptionDirectory"
     ],
     "xrefs": [
       "0x1000->0x1015:Call",
@@ -46,5 +45,7 @@
     ],
     "strings": [],
     "immediates": []
-  }
+  },
+  "rtti_scanned": true,
+  "vtables": []
 }

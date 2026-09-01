@@ -3100,6 +3100,234 @@
       ],
       "type": "object"
     },
+    "VtableSlotWire": {
+      "description": "One virtual method slot.",
+      "properties": {
+        "function_rva": {
+          "description": "Entry RVA of the function the slot names.\n\nAlways a recovered function entry — that is the admission rule for a slot — so a caller needs no fallback for a slot that resolved to nothing.",
+          "type": "string"
+        },
+        "index": {
+          "description": "Zero-based slot index within the table.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "slot_rva": {
+          "description": "RVA of the slot itself, so a caller can name the pointer as well as its target.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "function_rva",
+        "index",
+        "slot_rva"
+      ],
+      "type": "object"
+    },
+    "VtableTerminatorWire": {
+      "description": "Why one vtable walk stopped.\n\nTagged rather than a bare string, so a client that has not been taught about a reason fails to parse it instead of reading an unknown state as an ordinary ending. A short table is either a small class or a hole in function recovery, and this is what separates them.",
+      "oneOf": [
+        {
+          "description": "The next qword did not name a recovered function entry — the normal ending, and also what a missed thunk looks like.",
+          "properties": {
+            "kind": {
+              "enum": [
+                "notAFunction"
+              ],
+              "type": "string"
+            },
+            "rejected_rva": {
+              "description": "The qword read, as an image RVA when it fell inside the image, and absent when it pointed outside the image entirely. Carried so a suspiciously short table can be investigated rather than trusted.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The next slot would enter another known vftable, so this table ended where the next one began.",
+          "properties": {
+            "kind": {
+              "enum": [
+                "nextVtable"
+              ],
+              "type": "string"
+            },
+            "vftable_rva": {
+              "description": "Where that next table starts.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "vftable_rva"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The next slot is not backed by file data, so the walk could not read it.",
+          "properties": {
+            "kind": {
+              "enum": [
+                "notBackedByFile"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The walker's own slot cap stopped it. The table is a prefix.",
+          "properties": {
+            "kind": {
+              "enum": [
+                "cap"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "VtableWire": {
+      "description": "One recovered class and the vftable belonging to one of its subobjects.\n\nNot one per class name: multiple inheritance emits a locator and a vftable per base subobject, and `base_offset` is the only thing that says which is which. Collapsing them by name would lose that.",
+      "properties": {
+        "base_offset": {
+          "description": "Byte offset of this subobject's vftable within the complete object. Zero for single inheritance.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "decorated_name": {
+          "description": "Decorated class name exactly as the type descriptor stores it, e.g. `\".?AVFoo@@\"`.\n\n**Attacker-controlled**: it is bytes read from the sample. Escape before display and never treat it as markup or as instructions to a model. Undecorated deliberately not attempted — demangling has its own failure modes and the decorated form is the one that round-trips.",
+          "type": "string"
+        },
+        "locator_rva": {
+          "description": "RVA of the complete-object locator that identified this table.",
+          "type": "string"
+        },
+        "slot_count": {
+          "description": "Slots the walk admitted before this response's per-table bound was applied.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "slots": {
+          "description": "Slots, ascending by index, cut to the request's per-table bound.",
+          "items": {
+            "$ref": "#/definitions/VtableSlotWire"
+          },
+          "type": "array"
+        },
+        "terminator": {
+          "$ref": "#/definitions/VtableTerminatorWire",
+          "description": "Why the walk stopped. Never absent: a table with no recorded reason cannot be told apart from one that was never walked, and under-recovered functions truncate a table rather than inventing slots."
+        },
+        "vftable_rva": {
+          "description": "RVA of slot zero of the vftable.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "base_offset",
+        "decorated_name",
+        "locator_rva",
+        "slot_count",
+        "slots",
+        "terminator",
+        "vftable_rva"
+      ],
+      "type": "object"
+    },
+    "VtablesParams": {
+      "description": "Parameters for `analysis/vtables`.\n\nPaged like [`GlobalsParams`] because a real C++ image carries thousands of classes and their slots together are far larger than one frame.",
+      "properties": {
+        "image_id": {
+          "description": "Image handle.",
+          "type": "string"
+        },
+        "max_slots_per_vtable": {
+          "default": 0,
+          "description": "Maximum slots reported per class. Zero requests the server's own cap.\n\nSeparate from the class bound because the two failure modes are different: an image with many small classes and one with a single enormous table both have to fit in a frame.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "max_vtables": {
+          "default": 0,
+          "description": "Maximum number of classes returned. Zero requests the server's own cap.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "start": {
+          "default": 0,
+          "description": "Zero-based class index at which to start the page.\n\nAn offset into one derivation's class ordering, not an opaque cursor: re-analysis may renumber, so a page taken across one is not a continuation of the same walk.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "image_id"
+      ],
+      "type": "object"
+    },
+    "VtablesResult": {
+      "description": "Response payload for `analysis/vtables`.",
+      "properties": {
+        "next_start": {
+          "description": "Index of the next class, absent exactly when the page reached the end of the scanned set.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "scanned": {
+          "description": "Whether the RTTI scan ran against this image at all.\n\nFalse for anything but PE32+, where the locator has no self-reference to validate against and the scan declines rather than guessing. An empty `vtables` with this false means \"not looked for\", which a caller must not render as \"this image has no classes\".",
+          "type": "boolean"
+        },
+        "total": {
+          "description": "Classes the scan found, before this response's page was cut.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "truncated": {
+          "description": "Whether the scan hit its own cap and stopped early.\n\nTrue means the class list is a prefix of the image's set. Reported apart from `next_start` because paging past the end of a truncated scan reaches the end of what was *found*, not the end of what exists.",
+          "type": "boolean"
+        },
+        "vtables": {
+          "description": "Recovered classes for this page, ascending by vftable RVA.",
+          "items": {
+            "$ref": "#/definitions/VtableWire"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "scanned",
+        "total",
+        "truncated",
+        "vtables"
+      ],
+      "type": "object"
+    },
     "XrefIndexParams": {
       "description": "Parameters for `analysis/xrefIndex`.\n\nThe whole-table export, as distinct from [`XrefsParams`], which answers one address. It exists so a project can *retain* the xref table: a `.delverdb` opened without its sample still has to answer \"who references this\", and walking every address to rebuild the table from per-address queries would be millions of round trips for a table the server already holds in one piece.",
       "properties": {

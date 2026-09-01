@@ -466,7 +466,7 @@ mod tests {
 			..Default::default()
 		};
 
-		let coverage = vec![0..file.len() as u64];
+		let coverage = std::slice::from_ref(&(0..file.len() as u64)).to_vec();
 		(image, file, coverage)
 	}
 
@@ -668,7 +668,7 @@ mod tests {
 				.collect(),
 			..Default::default()
 		};
-		let coverage = vec![0..file.len() as u64];
+		let coverage = std::slice::from_ref(&(0..file.len() as u64)).to_vec();
 		(image, file, coverage)
 	}
 

@@ -42,5 +42,7 @@
       "0x1007:8:0x1",
       "0x100B:8:0xFF"
     ]
-  }
+  },
+  "rtti_scanned": true,
+  "vtables": []
 }

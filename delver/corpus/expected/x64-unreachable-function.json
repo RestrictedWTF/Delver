@@ -32,5 +32,7 @@
     "xrefs": [],
     "strings": [],
     "immediates": []
-  }
+  },
+  "rtti_scanned": true,
+  "vtables": []
 }

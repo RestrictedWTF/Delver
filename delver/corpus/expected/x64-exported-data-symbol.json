@@ -1,0 +1,66 @@
+{
+  "name": "x64-exported-data-symbol",
+  "covers": "an export in a data section is reported as an export but not seeded as a function, while an export in .text is both",
+  "arch": "X86_64",
+  "entry": "0x1000",
+  "image_base": "0x140000000",
+  "sections": [
+    {
+      "name": ".text",
+      "rva": "0x1000",
+      "virtual_size": 35
+    },
+    {
+      "name": ".data",
+      "rva": "0x2000",
+      "virtual_size": 8
+    },
+    {
+      "name": ".rdata",
+      "rva": "0x3000",
+      "virtual_size": 90
+    }
+  ],
+  "imports": [],
+  "exports": [
+    "#1 Exported@0x1010",
+    "#2 g_counter@0x2000"
+  ],
+  "seeds": [
+    {
+      "rva": "0x1000",
+      "end": null,
+      "source": "EntryPoint"
+    },
+    {
+      "rva": "0x1010",
+      "end": null,
+      "source": "Export"
+    }
+  ],
+  "entry_disassembly": [
+    "0x1000 mov rax,rbx",
+    "0x1003 add rax,1",
+    "0x1007 ret"
+  ],
+  "analysis": {
+    "instruction_count": 8,
+    "functions": [
+      "0x1000:EntryPoint",
+      "0x1010:Export",
+      "0x1020:LinearSweep"
+    ],
+    "xrefs": [],
+    "strings": [
+      "0x303C:Ascii:sample.dll",
+      "0x3047:Ascii:Exported",
+      "0x3050:Ascii:g_counter"
+    ],
+    "immediates": [
+      "0x1003:8:0x1",
+      "0x1013:8:0x2"
+    ]
+  },
+  "rtti_scanned": true,
+  "vtables": []
+}

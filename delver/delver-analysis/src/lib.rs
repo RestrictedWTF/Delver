@@ -33,12 +33,12 @@
 pub mod call_graph;
 pub mod control_flow;
 pub mod corrections;
-pub mod entry_role;
 pub mod globals;
 pub mod immediates;
 pub mod index;
 pub mod listing;
 pub mod strings;
+pub mod vtables;
 pub mod xrefs;
 
 use std::collections::BTreeMap;
@@ -59,12 +59,6 @@ pub use control_flow::{BasicBlock, BasicBlockEdge, BasicBlockEdgeKind};
 pub use corrections::{
 	CorrectionConflict, CorrectionSet, Corrections, DataRangeCorrection, FunctionCorrection,
 	FunctionCorrectionKind,
-};
-// `entry_role::Subsystem` is deliberately not re-exported here: it would shadow
-// `delver_format::Subsystem`, which it converts from, for every caller that
-// holds both.
-pub use entry_role::{
-	EntryRole, EntryRoleConfidence, EntryRoleImport, EntryRoleKind, EntryRoleMethod, EntryRoleStep,
 };
 pub use globals::{GlobalAccess, GlobalCandidate};
 pub use index::InstructionIndex;
@@ -379,6 +373,17 @@ impl<'a> Descent<'a> {
 	/// refusal has to sit where addresses *become* functions, not where they
 	/// are listed.
 	fn add_function(&mut self, rva: u64, end_rva: Option<u64>, source: FunctionSource) {
+		// A function has to start somewhere the image actually maps. Descent
+		// works in RVA space, so a `call` with a large negative displacement in
+		// bytes that were never code wraps below zero and names an address near
+		// 2^64 — and every source can name one: a seed from a corrupt header, a
+		// sweep guess in a truncated file, a call target from garbage. Same
+		// choke point, same reason as an `Undefine`: an address that is in no
+		// section is not a function, however it was reached, and a function at
+		// an impossible address is a confident false claim about the sample.
+		if self.image.section_containing(rva).is_none() {
+			return;
+		}
 		if self.corrections.is_undefined(rva) {
 			return;
 		}
@@ -699,7 +704,7 @@ mod tests {
 	use delver_format::{FunctionSeed, Section};
 
 	fn analyze(image: &ParsedImage, file: &[u8]) -> AnalyzedImage {
-		super::analyze(image, file, &[0..file.len() as u64])
+		super::analyze(image, file, std::slice::from_ref(&(0..file.len() as u64)))
 	}
 
 	fn analyze_corrected(
@@ -707,7 +712,12 @@ mod tests {
 		file: &[u8],
 		corrections: &[FunctionCorrection],
 	) -> Result<AnalyzedImage, CorrectionConflict> {
-		super::analyze_corrected(image, file, &[0..file.len() as u64], corrections)
+		super::analyze_corrected(
+			image,
+			file,
+			std::slice::from_ref(&(0..file.len() as u64)),
+			corrections,
+		)
 	}
 
 	fn define(rva: u64, end_rva: Option<u64>) -> FunctionCorrection {
@@ -728,7 +738,7 @@ mod tests {
 		super::analyze_corrected(
 			image,
 			file,
-			&[0..file.len() as u64],
+			std::slice::from_ref(&(0..file.len() as u64)),
 			Corrections {
 				functions,
 				data_ranges,
@@ -952,7 +962,7 @@ mod tests {
 				rva: 0x1000,
 				end_rva: Some(0x1005),
 				source: FunctionSource::ExceptionDirectory,
-				fragments: vec![0x1005..0x100A],
+				fragments: std::slice::from_ref(&(0x1005..0x100A)).to_vec(),
 			}],
 		);
 		assert_eq!(
@@ -1434,6 +1444,40 @@ mod tests {
 				// it names — the same reason an `Undefine` keeps it.
 				vec![(0x1001, XrefKind::Call)],
 				0,
+			),
+		);
+	}
+
+	#[test]
+	fn a_call_target_outside_every_section_is_not_a_function() {
+		// call rel32 -0x02000000 / ret. Descent works in RVA space, so the
+		// target is `0x1005 + 0xFFFFFFFFFE000000` in wrapping `u64` arithmetic:
+		// `0xFFFFFFFFFE001005`, which no section maps. Bytes that are not really
+		// code produce this shape whenever a displacement reads back large and
+		// negative.
+		let code = &[
+			0xE8, 0x00, 0x00, 0x00, 0xFE, // 0x1000 call -> 0xFFFFFFFFFE001005
+			0xC3, // 0x1005 ret
+		];
+		let (image, file) = image_with_code(code);
+
+		let analysis = analyze(&image, &file);
+
+		assert_eq!(
+			(
+				starts(&analysis),
+				// The call itself is still a fact about the image, the same reason
+				// an `Undefine` keeps one. Only the function start is refused.
+				analysis
+					.xrefs
+					.all()
+					.iter()
+					.map(|x| (x.from, x.to, x.kind))
+					.collect::<Vec<_>>(),
+			),
+			(
+				vec![(0x1000, FunctionSource::EntryPoint)],
+				vec![(0x1000, 0xFFFF_FFFF_FE00_1005, XrefKind::Call)],
 			),
 		);
 	}

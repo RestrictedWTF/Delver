@@ -1287,6 +1287,152 @@ pub struct GlobalWire {
 	pub reference_count: u64,
 }
 
+/// Parameters for `analysis/vtables`.
+///
+/// Paged like [`GlobalsParams`] because a real C++ image carries thousands of
+/// classes and their slots together are far larger than one frame.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VtablesParams {
+	/// Image handle.
+	pub image_id: String,
+	/// Zero-based class index at which to start the page.
+	///
+	/// An offset into one derivation's class ordering, not an opaque cursor:
+	/// re-analysis may renumber, so a page taken across one is not a
+	/// continuation of the same walk.
+	#[serde(default)]
+	pub start: u64,
+	/// Maximum number of classes returned. Zero requests the server's own cap.
+	#[serde(default)]
+	pub max_vtables: u32,
+	/// Maximum slots reported per class. Zero requests the server's own cap.
+	///
+	/// Separate from the class bound because the two failure modes are
+	/// different: an image with many small classes and one with a single
+	/// enormous table both have to fit in a frame.
+	#[serde(default)]
+	pub max_slots_per_vtable: u32,
+}
+
+/// Response payload for `analysis/vtables`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VtablesResult {
+	/// Recovered classes for this page, ascending by vftable RVA.
+	pub vtables: Vec<VtableWire>,
+	/// Whether the RTTI scan ran against this image at all.
+	///
+	/// False for anything but PE32+, where the locator has no self-reference to
+	/// validate against and the scan declines rather than guessing. An empty
+	/// `vtables` with this false means "not looked for", which a caller must not
+	/// render as "this image has no classes".
+	pub scanned: bool,
+	/// Whether the scan hit its own cap and stopped early.
+	///
+	/// True means the class list is a prefix of the image's set. Reported apart
+	/// from `next_start` because paging past the end of a truncated scan reaches
+	/// the end of what was *found*, not the end of what exists.
+	pub truncated: bool,
+	/// Classes the scan found, before this response's page was cut.
+	pub total: u64,
+	/// Index of the next class, absent exactly when the page reached the end of
+	/// the scanned set.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub next_start: Option<u64>,
+}
+
+/// One recovered class and the vftable belonging to one of its subobjects.
+///
+/// Not one per class name: multiple inheritance emits a locator and a vftable
+/// per base subobject, and `base_offset` is the only thing that says which is
+/// which. Collapsing them by name would lose that.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VtableWire {
+	/// RVA of slot zero of the vftable.
+	#[serde(with = "crate::hex")]
+	#[schemars(with = "String")]
+	pub vftable_rva: u64,
+	/// RVA of the complete-object locator that identified this table.
+	#[serde(with = "crate::hex")]
+	#[schemars(with = "String")]
+	pub locator_rva: u64,
+	/// Decorated class name exactly as the type descriptor stores it, e.g.
+	/// `".?AVFoo@@"`.
+	///
+	/// **Attacker-controlled**: it is bytes read from the sample. Escape before
+	/// display and never treat it as markup or as instructions to a model.
+	/// Undecorated deliberately not attempted — demangling has its own failure
+	/// modes and the decorated form is the one that round-trips.
+	pub decorated_name: String,
+	/// Byte offset of this subobject's vftable within the complete object. Zero
+	/// for single inheritance.
+	pub base_offset: u32,
+	/// Slots, ascending by index, cut to the request's per-table bound.
+	pub slots: Vec<VtableSlotWire>,
+	/// Slots the walk admitted before this response's per-table bound was
+	/// applied.
+	pub slot_count: u64,
+	/// Why the walk stopped. Never absent: a table with no recorded reason
+	/// cannot be told apart from one that was never walked, and under-recovered
+	/// functions truncate a table rather than inventing slots.
+	pub terminator: VtableTerminatorWire,
+}
+
+/// One virtual method slot.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VtableSlotWire {
+	/// Zero-based slot index within the table.
+	pub index: u32,
+	/// RVA of the slot itself, so a caller can name the pointer as well as its
+	/// target.
+	#[serde(with = "crate::hex")]
+	#[schemars(with = "String")]
+	pub slot_rva: u64,
+	/// Entry RVA of the function the slot names.
+	///
+	/// Always a recovered function entry — that is the admission rule for a
+	/// slot — so a caller needs no fallback for a slot that resolved to nothing.
+	#[serde(with = "crate::hex")]
+	#[schemars(with = "String")]
+	pub function_rva: u64,
+}
+
+/// Why one vtable walk stopped.
+///
+/// Tagged rather than a bare string, so a client that has not been taught about
+/// a reason fails to parse it instead of reading an unknown state as an ordinary
+/// ending. A short table is either a small class or a hole in function
+/// recovery, and this is what separates them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum VtableTerminatorWire {
+	/// The next qword did not name a recovered function entry — the normal
+	/// ending, and also what a missed thunk looks like.
+	NotAFunction {
+		/// The qword read, as an image RVA when it fell inside the image, and
+		/// absent when it pointed outside the image entirely. Carried so a
+		/// suspiciously short table can be investigated rather than trusted.
+		#[serde(
+			default,
+			skip_serializing_if = "Option::is_none",
+			with = "crate::hex::option"
+		)]
+		#[schemars(with = "Option<String>")]
+		rejected_rva: Option<u64>,
+	},
+	/// The next slot would enter another known vftable, so this table ended
+	/// where the next one began.
+	NextVtable {
+		/// Where that next table starts.
+		#[serde(with = "crate::hex")]
+		#[schemars(with = "String")]
+		vftable_rva: u64,
+	},
+	/// The next slot is not backed by file data, so the walk could not read it.
+	NotBackedByFile,
+	/// The walker's own slot cap stopped it. The table is a prefix.
+	Cap,
+}
+
 /// Parameters for `analysis/globalAccesses`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct GlobalAccessesParams {
