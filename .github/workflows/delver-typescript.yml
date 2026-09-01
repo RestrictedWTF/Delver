@@ -1,0 +1,107 @@
+name: Delver TypeScript
+
+# Gates the Delver TypeScript: the platform services, the workbench services,
+# and every `delver*` contrib. Nothing covered this before — `pr.yml` and the
+# rest of the upstream test matrix are `pull_request`-only, and every Delver
+# commit lands directly on `main`, so on a normal day the only workflow a
+# Delver push ran was `delver-rust.yml`, which runs no TypeScript at all.
+# ~470 tests gated nothing.
+#
+# The node step is the load-bearing one. It runs `analysisSession` and
+# `providerProcess`, which spawn the real `provider-file` and `server-analysis`
+# binaries and talk to them over the real wire — the only tests that prove the
+# product works end to end. They need the Rust binaries on disk, which is why
+# `cargo build` comes before anything Node touches: `resolveBinary()` prefers
+# `delver/target/debug/` and otherwise falls back silently to PATH, so without
+# that step these tests do not fail, they mis-pass.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/vs/platform/delver/**'
+      - 'src/vs/workbench/services/delver/**'
+      - 'src/vs/workbench/contrib/delver*/**'
+      - 'delver/**'
+      - '.github/workflows/delver-typescript.yml'
+  pull_request:
+    paths:
+      - 'src/vs/platform/delver/**'
+      - 'src/vs/workbench/services/delver/**'
+      - 'src/vs/workbench/contrib/delver*/**'
+      - 'delver/**'
+      - '.github/workflows/delver-typescript.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: delver-typescript-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  delver-typescript:
+    name: Delver TypeScript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+
+      # Before npm: a failure here is a Rust failure and reads better on its
+      # own, and the binaries are what the end-to-end tests below are for.
+      # Only these two — they are the only binaries `resolveBinary()` is asked
+      # for from TypeScript.
+      - name: Build the Delver provider binaries
+        run: cargo build -p provider-file -p server-analysis
+        working-directory: delver
+
+      - name: Install build tools
+        run: sudo apt update -y && sudo apt install -y build-essential pkg-config libx11-dev libx11-xcb-dev libxkbfile-dev libnotify-bin libkrb5-dev
+
+      # Electron is never launched — the node step runs under plain node and the
+      # browser step under Playwright's chromium — so skip the download.
+      - name: Install dependencies
+        run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install build dependencies
+        run: npm ci
+        working-directory: build
+
+      # `transpile-client` and not `compile-client`: the tests need fresh `out/`
+      # and nothing else. Type checking is not skipped so much as not this
+      # workflow's job — it belongs to the compile, and doing it here would
+      # triple the runtime of a gate whose point is the tests.
+      - name: Transpile sources
+        run: npm run transpile-client
+
+      # The end-to-end tests live here. `delverSelection` is the one file in
+      # these directories that imports `vs/base/browser/window` and so cannot
+      # load under node; it runs in the browser step instead.
+      - name: Node tests
+        run: node test/unit/node/index.js --runGlob "**/vs/{platform/delver/test/{node,common},workbench/services/delver/test/common}/!(delverSelection).test.js"
+
+      - name: Install Playwright browsers
+        run: npm exec -- playwright install --with-deps chromium
+
+      # The browser harness ships an old `assert` shim whose `throws()` tries
+      # `actual instanceof expected` before calling a predicate matcher, which
+      # a modern arrow function has no prototype to satisfy.
+      # `delverDecompilerService` uses a predicate matcher and is therefore
+      # excluded here — it is not dropped, the node step above runs it.
+      - name: Browser tests
+        run: node test/unit/browser/index.js --browser chromium --runGlob "**/vs/workbench/{services/delver,contrib/delver*}/test/{browser,common}/!(delverDecompilerService).test.js"
+
+      # Not gated: `src/vs/workbench/services/delver/test/electron-browser/
+      # delverTargetService.test.ts`. It needs a real Electron renderer, which
+      # means the packaged Electron download and a display server — the whole
+      # cost this workflow avoids. It runs in the upstream `pr-*-test`
+      # workflows on a pull request, and nowhere on a push to `main`.

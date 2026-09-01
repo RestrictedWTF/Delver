@@ -38,7 +38,7 @@ jobs:
           set -e
           rustup update stable
           rustup default stable
-          rustup component add rustfmt
+          rustup component add rustfmt clippy
 
       - name: Versions
         run: |
@@ -51,11 +51,13 @@ jobs:
       - name: Formatting
         run: cargo fmt --all -- --check
 
-      # Clippy is deliberately absent. `cargo clippy --workspace --all-targets`
-      # reports 17 warnings today, across eight files and mostly predating this
-      # workflow, so gating on it would land a pipeline that is red on its first
-      # run — which teaches everyone to ignore it. Adding the step is one line
-      # once those are cleared; see the defect audit.
+      # Clippy before the tests: it covers every target including examples, so
+      # it catches a lint in code the test run never builds, and it fails in
+      # seconds rather than after a full test cycle. `-D warnings` is the point
+      # — a warning nobody has to fix is one everybody learns to scroll past.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
       - name: Tests
         run: cargo test --workspace
 
