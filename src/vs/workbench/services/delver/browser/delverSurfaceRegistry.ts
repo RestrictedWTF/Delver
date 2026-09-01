@@ -144,6 +144,24 @@ export function surfacesForZone(
 		.sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
 }
 
+/**
+ * The zone that would show `id`, or `undefined` if nothing would.
+ *
+ * Exported because a reveal is only real if the id it names resolves to a
+ * registered surface: `IDelverWorkspaceService.showSurface` is fire-and-forget,
+ * so an id that resolves nowhere — a leftover *view* id, say, of the kind that
+ * left three shipped reveal actions silent no-ops — fails invisibly. Routing
+ * and its tests share this one lookup so that cannot drift apart again.
+ */
+export function zoneForSurface(all: readonly IDelverSurfaceDescriptor[], id: string): DelverZone | undefined {
+	for (const zone of [DelverZone.Navigator, DelverZone.Inspector, DelverZone.Primary]) {
+		if (surfacesForZone(all, zone).some(surface => surface.id === id)) {
+			return zone;
+		}
+	}
+	return undefined;
+}
+
 /** Ids that appear under another surface's tab rather than owning one. */
 export function companionSurfaceIds(all: readonly IDelverSurfaceDescriptor[]): ReadonlySet<string> {
 	const companions = new Set<string>();

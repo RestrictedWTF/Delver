@@ -226,6 +226,33 @@ suite('Delver AI Tool Definitions', () => {
 		});
 	});
 
+	test('describes recovered classes with paging the handler will honour', () => {
+		const tool = getDelverAgentToolData().find(candidate => candidate.id === 'delver_vtables');
+
+		assert.deepStrictEqual({
+			properties: Object.keys(tool?.inputSchema?.properties ?? {}),
+			countMaximum: tool?.inputSchema?.properties?.count?.maximum,
+			maxSlotsMaximum: tool?.inputSchema?.properties?.maxSlots?.maximum,
+			hasCursor: typeof tool?.inputSchema?.properties?.cursor?.description === 'string',
+			// The two sentences a model must not be able to miss.
+			warnsSlotCountIsNotMethodCount: tool?.modelDescription.includes('never from `slotCount` alone'),
+			warnsNotScannedIsNotAbsence: tool?.modelDescription.includes('nothing was looked for, not that nothing is there'),
+			warnsSubobjectsAreNotDuplicates: tool?.modelDescription.includes('not a duplicate'),
+			warnsNamesAreDecorated: tool?.modelDescription.includes('deliberately not demangled'),
+			requiresAttachment: tool?.modelDescription.includes('Requires the original sample to be attached'),
+		}, {
+			properties: ['count', 'maxSlots', 'cursor'],
+			countMaximum: 500,
+			maxSlotsMaximum: 512,
+			hasCursor: true,
+			warnsSlotCountIsNotMethodCount: true,
+			warnsNotScannedIsNotAbsence: true,
+			warnsSubobjectsAreNotDuplicates: true,
+			warnsNamesAreDecorated: true,
+			requiresAttachment: true,
+		});
+	});
+
 	test('describes review-only proposal batches with bounded canonical schemas', () => {
 		const tools = new Map(getDelverAgentToolData().map(tool => [tool.id, tool]));
 		const rename = tools.get('delver_propose_rename');

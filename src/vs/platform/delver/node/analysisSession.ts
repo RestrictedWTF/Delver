@@ -13,7 +13,7 @@ import {
 } from '../common/delverAnalysisService.js';
 import { IAddressForRowResult, IBasicBlocksResult, ICallGraphResult, ICallPathsResult, IDataRangeCorrectionWire,
 	IFunctionCorrectionWire, IFunctionProfileResult, IFunctionsResult, IGetExportsResult, IGetImageInfoResult, IGetImportsResult, IGlobalAccessesResult, IGlobalsResult, IListingWindowResult, IOpenImageResult, IReadMemoryResult, IRowForAddressResult, IScanStringsResult,
-	ISearchImmediatesResult, ISetCorrectionsResult, IStringsResult, IXrefIndexResult, IXrefsResult } from '../common/protocol.generated.js';
+	ISearchImmediatesResult, ISetCorrectionsResult, IStringsResult, IVtablesResult, IXrefIndexResult, IXrefsResult } from '../common/protocol.generated.js';
 import { IMoment, STATIC_MOMENT } from '../common/moment.js';
 import { readInitializeResult } from '../common/protocolVersion.js';
 import { momentToWire } from '../common/wire.js';
@@ -260,6 +260,16 @@ export class DelverAnalysisSession extends Disposable {
 			max_globals: maxGlobals,
 		});
 		return json.result as IGlobalsResult;
+	}
+
+	async vtables(start: number, maxVtables: number, maxSlotsPerVtable: number): Promise<IVtablesResult> {
+		const { json } = await this.rpc.call('analysis/vtables', {
+			image_id: this.image.image_id,
+			start,
+			max_vtables: maxVtables,
+			max_slots_per_vtable: maxSlotsPerVtable,
+		});
+		return json.result as IVtablesResult;
 	}
 
 	async globalAccesses(rva: bigint, maxAccesses: number): Promise<IGlobalAccessesResult> {

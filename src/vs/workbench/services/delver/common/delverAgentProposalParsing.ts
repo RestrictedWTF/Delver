@@ -159,6 +159,98 @@ function parseProposalTags(value: unknown, index: number): readonly string[] {
 	return canonical;
 }
 
+/** Brackets a declaration may nest, so an unmatched one is caught here. */
+const DECLARATION_CLOSERS: Readonly<Record<string, string>> = { '(': ')', '[': ']', '{': '}' };
+
+/**
+ * What may sit inside `[...]`: nothing, a bound, or a named constant, with the
+ * arithmetic a header writes bounds with. Deliberately permissive about the
+ * expression and strict about the characters, so `[SIZE * 2]` survives and
+ * `[)]` does not.
+ */
+const ARRAY_SUBSCRIPT_PATTERN = /^[\sA-Za-z0-9_+\-*/]*$/;
+
+/**
+ * Validates one declaration string for a data type or a function prototype.
+ *
+ * Shared with the human authoring commands rather than duplicated there: an
+ * analyst typing a declaration and a model proposing the same one must produce
+ * the identical stored value, or the same declaration would read as two
+ * different ones downstream. An empty string is allowed and clears — a deletion
+ * is an append like everything else.
+ *
+ * **What this guarantees.** The string is printable, is not longer than the
+ * limit, opens with something that could begin a C declaration — an identifier,
+ * a keyword, `const`, `unsigned`, `struct`, an MSVC `__int64` or `__fastcall` —
+ * nests its brackets in matching pairs, and puts only a bound or a named
+ * constant inside an array subscript. That is enough to stop the class of
+ * failure this exists for: `))))`, a pasted line of prose, a truncated
+ * declaration, a control character smuggled through the wire.
+ *
+ * **What it explicitly does not.** It does not know C. It does not resolve a
+ * type name, check that a struct exists, count arguments, or notice that
+ * `int int int` is nonsense. Real syntax lives in the Ghidra worker, which has
+ * the type database this layer does not, and duplicating a C parser here would
+ * mean two grammars disagreeing about the same declaration. The trade is
+ * deliberate in this direction: an exotic-but-valid declaration reaching the
+ * worker costs one clear error at application time, while a valid declaration
+ * refused at the keyboard is a tool telling an analyst they are wrong about
+ * their own binary.
+ */
+export function parseTypeDeclaration(value: unknown, path: string): string {
+	if (typeof value !== 'string') {
+		throw proposalArgument(`${path} must be a string.`);
+	}
+	const declaration = value.trim();
+	if (declaration.length > DELVER_AGENT_LIMITS.proposals.declarationCharacters) {
+		throw proposalArgument(`${path} must not exceed ${DELVER_AGENT_LIMITS.proposals.declarationCharacters} characters.`);
+	}
+	if (declaration.length === 0) {
+		return declaration;
+	}
+	// Control characters never occur in a typed declaration; they occur in
+	// something pasted out of a file or crafted on the wire, and they would be
+	// stored verbatim into an append-only log and rendered back into a listing.
+	if (/[\u0000-\u001f\u007f]/.test(declaration)) {
+		throw proposalArgument(`${path} must not contain control characters.`);
+	}
+	// A declaration names a type before it decorates one. Leading `*`, a digit,
+	// or a closing bracket means whatever this is, it is not one.
+	if (!/^[A-Za-z_]/.test(declaration)) {
+		throw proposalArgument(`${path} must begin with a type name or keyword, such as "unsigned __int64", "struct Config *", or "char[32]".`);
+	}
+	const open: string[] = [];
+	let subscriptStart = -1;
+	for (let index = 0; index < declaration.length; index++) {
+		const character = declaration[index];
+		const closer = DECLARATION_CLOSERS[character];
+		if (closer !== undefined) {
+			if (character === '[' && open.length === 0) {
+				subscriptStart = index + 1;
+			}
+			open.push(closer);
+			continue;
+		}
+		if (character !== ')' && character !== ']' && character !== '}') {
+			continue;
+		}
+		if (open.pop() !== character) {
+			throw proposalArgument(`${path} has unbalanced brackets.`);
+		}
+		if (character === ']' && open.length === 0 && subscriptStart >= 0) {
+			const subscript = declaration.slice(subscriptStart, index);
+			if (!ARRAY_SUBSCRIPT_PATTERN.test(subscript)) {
+				throw proposalArgument(`${path} has an array subscript that is not a bound: "[${subscript}]".`);
+			}
+			subscriptStart = -1;
+		}
+	}
+	if (open.length > 0) {
+		throw proposalArgument(`${path} has unbalanced brackets.`);
+	}
+	return declaration;
+}
+
 export function parseTypeProposals(value: unknown): readonly IParsedTypeProposal[] {
 	if (!Array.isArray(value) || value.length === 0 || value.length > DELVER_AGENT_LIMITS.proposals.max) {
 		throw proposalArgument(`proposals must contain between 1 and ${DELVER_AGENT_LIMITS.proposals.max} items.`);
@@ -178,13 +270,7 @@ export function parseTypeProposals(value: unknown): readonly IParsedTypeProposal
 		if (item.target !== 'data' && item.target !== 'function') {
 			throw proposalArgument(`proposals[${index}].target must be "data", "function", or "composite".`);
 		}
-		if (typeof item.declaration !== 'string') {
-			throw proposalArgument(`proposals[${index}].declaration must be a string.`);
-		}
-		const declaration = item.declaration.trim();
-		if (declaration.length > DELVER_AGENT_LIMITS.proposals.declarationCharacters) {
-			throw proposalArgument(`proposals[${index}].declaration must not exceed ${DELVER_AGENT_LIMITS.proposals.declarationCharacters} characters.`);
-		}
+		const declaration = parseTypeDeclaration(item.declaration, `proposals[${index}].declaration`);
 		return {
 			rva: parseWireAddress(item.address),
 			op: item.target === 'data' ? EditOp.DataType : EditOp.FunctionPrototype,

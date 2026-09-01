@@ -196,6 +196,10 @@ export const DELVER_AGENT_LIMITS = {
 	functions: { default: 100, max: 1000 },
 	globals: { default: 100, max: 1000 },
 	globalAccesses: { default: 100, max: 2000 },
+	/** How many RTTI-recovered classes one vtable page may return. */
+	vtables: { default: 50, max: 500 },
+	/** How many virtual-method slots are reported per class. */
+	vtableSlots: { default: 64, max: 512 },
 	xrefs: { default: 100, max: 2000 },
 	strings: { default: 100, max: 1000 },
 	imports: { default: 100, max: 1000 },

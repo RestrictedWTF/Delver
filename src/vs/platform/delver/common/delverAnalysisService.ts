@@ -6,7 +6,7 @@
 import { Event } from '../../../base/common/event.js';
 import { createDecorator } from '../../instantiation/common/instantiation.js';
 import { IBasicBlocksResult, ICallGraphResult, ICallPathsResult, IDataRangeCorrectionWire,
-	IFunctionCorrectionWire, IFunctionProfileResult, IFunctionsResult, IGetExportsResult, IGetImageInfoResult, IGetImportsResult, IGlobalAccessesResult, IGlobalsResult, IListingWindowResult, IMomentWire, IOpenImageResult, IRangeWire, IScanStringsResult, ISearchImmediatesResult, ISetCorrectionsResult, IStringsResult, IXrefIndexResult, IXrefsResult } from './protocol.generated.js';
+	IFunctionCorrectionWire, IFunctionProfileResult, IFunctionsResult, IGetExportsResult, IGetImageInfoResult, IGetImportsResult, IGlobalAccessesResult, IGlobalsResult, IListingWindowResult, IMomentWire, IOpenImageResult, IRangeWire, IScanStringsResult, ISearchImmediatesResult, ISetCorrectionsResult, IStringsResult, IVtablesResult, IXrefIndexResult, IXrefsResult } from './protocol.generated.js';
 import { TargetConfig } from './target.js';
 
 export const IDelverAnalysisService = createDecorator<IDelverAnalysisService>('delverAnalysisService');
@@ -250,6 +250,16 @@ export interface IDelverAnalysisService {
 
 	/** Returns decoded instructions that reference one observed global-data address. */
 	globalAccesses(sessionId: AnalysisSessionId, rva: string, maxAccesses: number): Promise<IGlobalAccessesResult>;
+
+	/**
+	 * Returns one page of classes recovered from MSVC RTTI, with their vtable
+	 * slots.
+	 *
+	 * **An empty `vtables` is not a proof of absence.** The scan is x64-only, and
+	 * `scanned === false` means the image was never looked at rather than that it
+	 * carries no classes; `truncated` means the class list is a prefix.
+	 */
+	vtables(sessionId: AnalysisSessionId, start: number, maxVtables: number, maxSlotsPerVtable: number): Promise<IVtablesResult>;
 
 	/**
 	 * Image headers: architecture, entry point, sections, and directory counts.

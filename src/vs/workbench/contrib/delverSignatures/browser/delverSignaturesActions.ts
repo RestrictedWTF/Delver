@@ -29,7 +29,8 @@ import { IDelverHistoricalSignature, IDelverProjectService } from '../../../serv
 import { EditorsOrder } from '../../../common/editor.js';
 import { TreeViewItemHandleArg } from '../../../common/views.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
-import { IViewsService } from '../../../services/views/common/viewsService.js';
+import { DelverSurfaceId } from '../../../services/delver/browser/delverSurface.js';
+import { IDelverWorkspaceService } from '../../../services/delver/common/delverWorkspaceService.js';
 import { DELVER_NAVIGATION_ORIGIN } from '../../../services/delver/browser/delverListingContext.js';
 import { DelverListingInput } from '../../../services/delver/browser/delverListingInput.js';
 import { DELVER_GENERATE_SIGNATURE_COMMAND, IGeneratedSignatureSaveOutcome, ISignatureGenerationInvocation, validateSignatureName } from '../../../services/delver/browser/delverSignatureActions.js';
@@ -74,7 +75,7 @@ export class SearchBytePatternAction extends Action2 {
 		const notificationService = accessor.get(INotificationService);
 		const progressService = accessor.get(IProgressService);
 		const sessionService = accessor.get(IDelverSessionService);
-		const viewsService = accessor.get(IViewsService);
+		const workspaceService = accessor.get(IDelverWorkspaceService);
 		const contentHash = sessionService.activeSession?.contentHash;
 		if (!contentHash) {
 			return;
@@ -113,7 +114,11 @@ export class SearchBytePatternAction extends Action2 {
 			}
 			const search = byteSearchPresentation(result);
 			stateService.setSearch(search, append === true);
-			await viewsService.openView(DELVER_SIGNATURES_VIEW_ID, true);
+			// Signatures is a workspace-editor surface, not a container view: its
+			// view descriptor is registered `when: false` (see
+			// `registerDelverTreeSurface`), so `IViewsService.openView` can never
+			// open it. Reveal goes through the workspace service instead.
+			workspaceService.showSurface(DelverSurfaceId.Signatures);
 			if (search.matches.length === 0 && search.completeness === 'complete') {
 				notificationService.info(localize('delverBytePatternNoMatches', "No matches found for {0}.", search.pattern));
 			}
@@ -269,7 +274,7 @@ export class ScanEarlierSignaturesAction extends Action2 {
 		const stateService = accessor.get(IDelverSignaturesStateService);
 		const notificationService = accessor.get(INotificationService);
 		const progressService = accessor.get(IProgressService);
-		const viewsService = accessor.get(IViewsService);
+		const workspaceService = accessor.get(IDelverWorkspaceService);
 		const session = sessionService.activeSession;
 		if (!session) {
 			return;
@@ -343,7 +348,11 @@ export class ScanEarlierSignaturesAction extends Action2 {
 				results,
 				omittedCount,
 			});
-			await viewsService.openView(DELVER_SIGNATURES_VIEW_ID, true);
+			// Signatures is a workspace-editor surface, not a container view: its
+			// view descriptor is registered `when: false` (see
+			// `registerDelverTreeSurface`), so `IViewsService.openView` can never
+			// open it. Reveal goes through the workspace service instead.
+			workspaceService.showSurface(DelverSurfaceId.Signatures);
 			notificationService.info(revisionSignatureScanSummary(results, omittedCount));
 		} catch (error) {
 			if (!(error instanceof DelverAgentError && error.code === DelverAgentErrorCode.Cancelled)) {

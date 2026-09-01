@@ -597,6 +597,16 @@ export class DelverListingWidget extends Disposable implements IDelverSurface, I
 	 * and nowhere else. String rows come from the appended string table.
 	 */
 	private publishSelection(row: IListingRow | undefined): void {
+		// Guarded the same way `publishFocus` is, and for a sharper reason. This
+		// also fires for the `setSelection` inside `applyFocus`, which is async —
+		// one address lookup per focus — so an echo in flight when the analyst
+		// right-clicks elsewhere lands *after* that click and overwrites the
+		// selection the menu was opened on. The menu then acts on the row the
+		// listing was showing before. Nothing needs the echo: every surface that
+		// opens this menu publishes the object under the cursor first.
+		if (this.applyingFocus) {
+			return;
+		}
 		if (!row) {
 			this.selectionService.setSelection(DELVER_SELECTION_NONE);
 			return;

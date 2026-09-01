@@ -327,18 +327,21 @@ export class DecompileFunctionAction extends Action2 {
 		});
 	}
 
-	async run(accessor: ServicesAccessor): Promise<void> {
+	async run(accessor: ServicesAccessor, target?: unknown): Promise<void> {
 		const editorService = accessor.get(IEditorService);
 		const focusService = accessor.get(IDelverFocusService);
 		const interpretationService = accessor.get(IDelverInterpretationService);
-		const listing = activeListing();
 		const session = accessor.get(IDelverSessionService).activeSession;
 		const notifications = accessor.get(INotificationService);
-		if (!listing || !session) {
+		if (!session) {
 			return;
 		}
 
-		const functionRva = await listing.selectedFunctionRva();
+		// The menu entry is gated on a *function* being selected, so an address
+		// forwarded from it is already the entry — no containing-function lookup.
+		// Asking the listing instead is what made right-clicking a pseudocode line
+		// decompile whatever the listing happened to have selected.
+		const functionRva = requestedAddress(target) ?? await selectedFunctionRva();
 		if (functionRva === undefined) {
 			notifications.info(localize('delverNoFunctionAtSelection', "The selected instruction is not inside a detected function."));
 			return;
@@ -407,8 +410,18 @@ export class ReturnAction extends Action2 {
  * Absent when the command came from a keybinding or the palette, where the bus
  * is the right answer.
  */
-function requestedAddress(value: unknown): bigint | undefined {
+export function requestedAddress(value: unknown): bigint | undefined {
 	return typeof value === 'string' && /^0x[0-9a-f]+$/i.test(value) ? BigInt(value) : undefined;
+}
+
+/**
+ * The entry of the function containing the listing's selected row.
+ *
+ * The fallback for the keybinding and palette paths, where no menu named a
+ * target and the listing's selection is the right answer.
+ */
+async function selectedFunctionRva(): Promise<bigint | undefined> {
+	return activeListing()?.selectedFunctionRva();
 }
 
 export class RenameAction extends Action2 {
@@ -509,6 +522,75 @@ export class TagAction extends Action2 {
 			return;
 		}
 		await editInterpretationAt(accessor, address, EditOp.Tags);
+	}
+}
+
+/**
+ * Declares the authored data type at the selected data address.
+ *
+ * The human counterpart of the model's type proposal: the declaration goes
+ * through the same validator, and the append is the same op with the same
+ * value, so review, the semantic snapshot, and application cannot tell an
+ * analyst's declaration from a model's.
+ */
+export class SetDataTypeAction extends Action2 {
+	constructor() {
+		super({
+			id: 'delver.interpretation.dataType',
+			title: localize2('delverSetDataType', 'Set Data Type'),
+			category: localize2('delverCategory', 'Delver'),
+			f1: true,
+			precondition: LISTING_ACTIVE,
+			menu: [{
+				id: MenuDelverSelectionContext,
+				when: whenSelectionIs('string'),
+				group: 'delver.interpretation',
+				order: 4,
+			}],
+		});
+	}
+
+	async run(accessor: ServicesAccessor, target?: unknown): Promise<void> {
+		const address = requestedAddress(target) ?? accessor.get(IDelverFocusService).focus.location?.address;
+		if (address === undefined) {
+			accessor.get(INotificationService).info(localize('delverNothingToType', "Select a data address to declare a type for."));
+			return;
+		}
+		await editInterpretationAt(accessor, address, EditOp.DataType);
+	}
+}
+
+/**
+ * Declares the authored prototype of the selected function.
+ *
+ * Anchored to the entry of the function the cursor is in rather than the row
+ * under it: the proposal path refuses a prototype at anything but an exact
+ * function entry, and the human path must not be the lax one.
+ */
+export class SetFunctionPrototypeAction extends Action2 {
+	constructor() {
+		super({
+			id: 'delver.interpretation.functionPrototype',
+			title: localize2('delverSetFunctionPrototype', 'Set Function Prototype'),
+			category: localize2('delverCategory', 'Delver'),
+			f1: true,
+			precondition: LISTING_ACTIVE,
+			menu: [{
+				id: MenuDelverSelectionContext,
+				when: whenSelectionIs('function'),
+				group: 'delver.interpretation',
+				order: 5,
+			}],
+		});
+	}
+
+	async run(accessor: ServicesAccessor, target?: unknown): Promise<void> {
+		const address = requestedAddress(target) ?? await selectedFunctionRva();
+		if (address === undefined) {
+			accessor.get(INotificationService).info(localize('delverNothingToPrototype', "Select a function to declare a prototype for."));
+			return;
+		}
+		await editInterpretationAt(accessor, address, EditOp.FunctionPrototype);
 	}
 }
 

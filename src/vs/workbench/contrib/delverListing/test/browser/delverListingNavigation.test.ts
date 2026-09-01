@@ -8,7 +8,7 @@ import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/tes
 import { FunctionSourceWire } from '../../../../../platform/delver/common/protocol.generated.js';
 import { shouldFollowWhilePinned } from '../../../../services/delver/browser/delverListingContext.js';
 import { FocusReason } from '../../../../services/delver/common/delverFocusService.js';
-import { parseAddress } from '../../browser/delverListingNavigation.js';
+import { parseAddress, requestedAddress } from '../../browser/delverListingNavigation.js';
 import { containingFunctionRva } from '../../../../services/delver/common/delverFunctions.js';
 
 /** Mocha cannot serialize a BigInt, so failures print nothing useful without this. */
@@ -62,6 +62,29 @@ suite('Delver listing navigation', () => {
 		assert.strictEqual(containingFunctionRva(functions, 0x100fn), 0x1000n);
 		assert.strictEqual(containingFunctionRva(functions, 0x1010n), undefined);
 		assert.strictEqual(containingFunctionRva(functions, 0x1028n), 0x1020n);
+	});
+
+	test('a menu-forwarded target wins over whatever the bus points at', () => {
+		// Right-clicking a pseudocode line names that line. Every action reachable
+		// from that menu — Decompile Function included — has to read the name
+		// rather than ask the listing, which is still on the previously selected
+		// row. Anything that is not a wire address is a keybinding or palette
+		// invocation, where the bus is the right answer.
+		assert.deepStrictEqual({
+			forwarded: show(requestedAddress('0x1234')),
+			upperCase: show(requestedAddress('0X1AbC')),
+			noPrefix: show(requestedAddress('1234')),
+			notAnAddress: show(requestedAddress('nope')),
+			wrongType: show(requestedAddress(0x1234)),
+			absent: show(requestedAddress(undefined)),
+		}, {
+			forwarded: '0x1234',
+			upperCase: '0x1abc',
+			noPrefix: '<invalid>',
+			notAnAddress: '<invalid>',
+			wrongType: '<invalid>',
+			absent: '<invalid>',
+		});
 	});
 
 	suite('pinning', () => {

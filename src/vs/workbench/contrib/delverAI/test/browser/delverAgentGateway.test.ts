@@ -128,7 +128,7 @@ suite('Delver Agent Command Gateway', () => {
 			// walk past, and the previous `DELVER_AGENT_CAPABILITIES.length` was
 			// an identity that could never fail, since the tool list is built by
 			// mapping that same list.
-			toolCount: 40,
+			toolCount: 41,
 			// Pinned rather than counted. A capability with no presentation entry
 			// still ships — with a beaker icon, no usage text and an empty input
 			// schema — so the model is handed a tool it cannot call correctly.

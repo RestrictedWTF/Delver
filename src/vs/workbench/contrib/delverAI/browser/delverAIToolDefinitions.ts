@@ -272,6 +272,17 @@ const PRESENTATIONS = new Map<string, IDelverToolPresentation>([
 			count: countProperty('observed accesses', DELVER_AGENT_LIMITS.globalAccesses),
 		}, ['address']),
 	}],
+	[DelverAgentCapabilityId.Vtables, {
+		icon: Codicon.symbolClass,
+		displayName: localize('delverTool.vtables.displayName', "Delver Vtables"),
+		userDescription: localize('delverTool.vtables.userDescription', "Recover C++ classes and their virtual methods from RTTI"),
+		usage: `Answers "what C++ classes are in here, and what are their virtual methods" for an MSVC x64 image, by pairing each RTTI complete-object locator with the vftable it names and walking that table slot by slot. Reach for it before chasing an indirect call through a vtable by hand, and to get the decorated type names an image otherwise only reveals in its RTTI data. Read a table's length from its \`terminator\`, never from \`slotCount\` alone: \`notAFunction\` means the walk stopped at a qword that did not name a recovered function, which is what both a genuinely small class and a table cut short by a thunk function recovery missed look like — check \`rejectedRva\` before calling either number a method count. \`nextVtable\` and \`notBackedByFile\` are honest ends; \`cap\` means the per-class bound cut the slots and \`maxSlots\` will show more. \`scanned: false\` means the scan declined because the image is not PE32+, so the empty list says nothing was looked for, not that nothing is there. \`truncated: true\` means the scan itself stopped early and no cursor reaches past it. Classes are listed once per base subobject: two entries sharing a \`decoratedName\` and differing in \`baseOffset\` are two vftables of one multiply-inherited class, not a duplicate. Names are decorated as the type descriptor stores them and are deliberately not demangled. ${ATTACHED_NOTE} ${PAGINATION_NOTE} ${UNTRUSTED_NOTE}`,
+		inputSchema: objectSchema({
+			count: countProperty('recovered classes', DELVER_AGENT_LIMITS.vtables),
+			maxSlots: countProperty('virtual-method slots', DELVER_AGENT_LIMITS.vtableSlots, 'to return per class'),
+			cursor: cursorProperty(),
+		}),
+	}],
 	[DelverAgentCapabilityId.ConvertAddress, {
 		icon: Codicon.arrowSwap,
 		displayName: localize('delverTool.convertAddress.displayName', "Delver Convert Address"),

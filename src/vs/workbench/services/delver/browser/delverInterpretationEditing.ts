@@ -7,18 +7,27 @@ import { Codicon } from '../../../../base/common/codicons.js';
 import { localize } from '../../../../nls.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
-import { EditOp, EditValue } from '../../../../platform/delver/common/interpretation.js';
+import { EditOp, EditValue, IInterpretationAt } from '../../../../platform/delver/common/interpretation.js';
 import { placeholderFunctionName } from '../../../../platform/delver/common/naming.js';
 import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
-import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
+import { IInputOptions, IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
 import { IDelverInterpretationService } from '../common/delverInterpretationService.js';
+import { parseTypeDeclaration } from '../common/delverAgentProposalParsing.js';
 import { IDelverSessionService } from '../common/delverSessionService.js';
+import { loadTypePlacementFacts, typePlacementRefusal } from '../common/delverTypePlacement.js';
 import { TreeViewItemHandleArg } from '../../../common/views.js';
 
 /** Prompts for and persists one authored field at an image RVA. */
 export async function editInterpretationAt(accessor: ServicesAccessor, rva: bigint, op: EditOp): Promise<boolean> {
-	const session = accessor.get(IDelverSessionService).activeSession;
+	// Every service this function needs is resolved here, before the first
+	// `await`. A `ServicesAccessor` is only valid during the synchronous part
+	// of the command it was handed to, so reaching for one after the input box
+	// throws "service accessor is only valid during the invocation of its
+	// target method" — at runtime only, which no unit test calling this
+	// helper directly can reach.
+	const sessionService = accessor.get(IDelverSessionService);
+	const session = sessionService.activeSession;
 	const notificationService = accessor.get(INotificationService);
 	if (!session) {
 		notificationService.info(localize('delverNoInterpretationSession', "Open a target before editing interpretation."));
@@ -29,32 +38,116 @@ export async function editInterpretationAt(accessor: ServicesAccessor, rva: bigi
 	const anchor = { kind: 'image' as const, contentHash: session.contentHash, rva };
 	const existing = interpretationService.at(anchor);
 	const address = `0x${rva.toString(16).toUpperCase()}`;
-	const value = await accessor.get(IQuickInputService).input(op === EditOp.Rename
-		? {
-			prompt: localize('delverRenamePrompt', "Name for {0}", address),
-			value: existing?.name ?? '',
-			placeHolder: placeholderFunctionName(rva),
-		}
-		: op === EditOp.Comment ? {
-			prompt: localize('delverCommentPrompt', "Comment for {0}", address),
-			value: existing?.comment ?? '',
-			placeHolder: localize('delverCommentPlaceholder', "Describe what this instruction does"),
-		} : {
-			prompt: localize('delverTagsPrompt', "Comma-separated tags for {0}", address),
-			value: existing?.tags?.join(', ') ?? '',
-			placeHolder: localize('delverTagsPlaceholder', "crypto, config, reviewed"),
-		});
+	const value = await accessor.get(IQuickInputService).input(inputOptionsFor(op, rva, address, existing));
 	if (value === undefined) {
 		return false;
 	}
 
 	try {
-		const editValue: EditValue = op === EditOp.Tags ? parseTags(value) : value.trim();
-		await interpretationService.edit(anchor, op, editValue);
+		const edit = interpretationEditValue(op, value);
+		const refused = await declarationPlacementRefusal(sessionService, op, rva, edit);
+		if (refused !== undefined) {
+			notificationService.error(refused);
+			return false;
+		}
+		await interpretationService.edit(anchor, op, edit);
 		return true;
 	} catch (error) {
 		notificationService.error(error instanceof Error ? error : String(error));
 		return false;
+	}
+}
+
+/**
+ * The message for a declaration the analyst may not attach here, or
+ * `undefined` when the placement is fine.
+ *
+ * The same two rules the proposal path spends, from the same module. They were
+ * only ever enforced against models, which left the palette as the lax door
+ * into a log that is append-only for both — an analyst could declare a struct
+ * over `.text` and find out when the worker refused it, long after the edit was
+ * recorded as theirs.
+ */
+export async function declarationPlacementRefusal(sessionService: IDelverSessionService, op: EditOp, rva: bigint, value: EditValue): Promise<string | undefined> {
+	if (op !== EditOp.DataType && op !== EditOp.FunctionPrototype) {
+		return undefined;
+	}
+	const declaration = typeof value === 'string' ? value : '';
+	if (declaration.length === 0) {
+		return undefined;
+	}
+	const address = `0x${rva.toString(16).toUpperCase()}`;
+	// A project open without its sample can answer neither question. Refusing
+	// is the honest reading: the rule is unchecked, not satisfied.
+	let facts;
+	try {
+		facts = await loadTypePlacementFacts(sessionService, op);
+	} catch (error) {
+		return localize('delverPlacementUnavailable', "Cannot check where {0} sits in the image, so the declaration was not recorded: {1}", address, error instanceof Error ? error.message : String(error));
+	}
+	switch (typePlacementRefusal(op, rva, declaration, facts)) {
+		case 'not-data-memory':
+			return localize('delverNotDataMemory', "{0} is not in mapped, non-executable memory. A data type has to attach to a data address.", address);
+		case 'not-function-entry':
+			return localize('delverNotFunctionEntry', "{0} is not a detected function entry. A prototype has to attach to the exact entry of a function.", address);
+		default:
+			return undefined;
+	}
+}
+
+function inputOptionsFor(op: EditOp, rva: bigint, address: string, existing: IInterpretationAt | undefined): IInputOptions {
+	switch (op) {
+		case EditOp.Rename:
+			return {
+				prompt: localize('delverRenamePrompt', "Name for {0}", address),
+				value: existing?.name ?? '',
+				placeHolder: placeholderFunctionName(rva),
+			};
+		case EditOp.Comment:
+			return {
+				prompt: localize('delverCommentPrompt', "Comment for {0}", address),
+				value: existing?.comment ?? '',
+				placeHolder: localize('delverCommentPlaceholder', "Describe what this instruction does"),
+			};
+		case EditOp.DataType:
+			return {
+				prompt: localize('delverDataTypePrompt', "Data type for {0}", address),
+				value: existing?.dataType ?? '',
+				placeHolder: localize('delverDataTypePlaceholder', "char[32], struct Config *, unsigned int"),
+			};
+		case EditOp.FunctionPrototype:
+			return {
+				prompt: localize('delverPrototypePrompt', "Function prototype for {0}", address),
+				value: existing?.functionPrototype ?? '',
+				placeHolder: localize('delverPrototypePlaceholder', "int __fastcall decode(char *buffer, unsigned int length)"),
+			};
+		default:
+			return {
+				prompt: localize('delverTagsPrompt', "Comma-separated tags for {0}", address),
+				value: existing?.tags?.join(', ') ?? '',
+				placeHolder: localize('delverTagsPlaceholder', "crypto, config, reviewed"),
+			};
+	}
+}
+
+/**
+ * The stored value for one authored field, from what the analyst typed.
+ *
+ * The declaration ops go through the same validator the proposal path uses, so
+ * an analyst and a model who write the same declaration store the same string
+ * and everything downstream — review, the semantic snapshot, application —
+ * cannot tell the two apart. Throws exactly what the proposal path throws for
+ * input it would refuse.
+ */
+export function interpretationEditValue(op: EditOp, value: string): EditValue {
+	switch (op) {
+		case EditOp.Tags:
+			return parseTags(value);
+		case EditOp.DataType:
+		case EditOp.FunctionPrototype:
+			return parseTypeDeclaration(value, localize('delverDeclarationField', "The declaration"));
+		default:
+			return value.trim();
 	}
 }
 

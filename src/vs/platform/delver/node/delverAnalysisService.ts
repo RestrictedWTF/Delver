@@ -22,7 +22,7 @@ import {
 	IDelverReadMemoryWire,
 } from '../common/delverAnalysisService.js';
 import { IBasicBlocksResult, ICallGraphResult, ICallPathsResult, IDataRangeCorrectionWire,
-	IFunctionCorrectionWire, IFunctionProfileResult, IFunctionsResult, IGetExportsResult, IGetImageInfoResult, IGetImportsResult, IGlobalAccessesResult, IGlobalsResult, IListingWindowResult, IScanStringsResult, ISearchImmediatesResult, ISetCorrectionsResult, IStringsResult, IXrefIndexResult, IXrefsResult } from '../common/protocol.generated.js';
+	IFunctionCorrectionWire, IFunctionProfileResult, IFunctionsResult, IGetExportsResult, IGetImageInfoResult, IGetImportsResult, IGlobalAccessesResult, IGlobalsResult, IListingWindowResult, IScanStringsResult, ISearchImmediatesResult, ISetCorrectionsResult, IStringsResult, IVtablesResult, IXrefIndexResult, IXrefsResult } from '../common/protocol.generated.js';
 import { TargetConfig } from '../common/target.js';
 import { DelverAnalysisSession } from './analysisSession.js';
 import { discoverGhidraHeadless, GHIDRA_PINNED_VERSION, runGhidraHeadless } from './ghidraHeadlessDecompiler.js';
@@ -102,6 +102,10 @@ export class DelverAnalysisService extends Disposable implements IDelverAnalysis
 
 	async globalAccesses(sessionId: AnalysisSessionId, rva: string, maxAccesses: number): Promise<IGlobalAccessesResult> {
 		return this.session(sessionId).globalAccesses(BigInt(rva), maxAccesses);
+	}
+
+	async vtables(sessionId: AnalysisSessionId, start: number, maxVtables: number, maxSlotsPerVtable: number): Promise<IVtablesResult> {
+		return this.session(sessionId).vtables(start, maxVtables, maxSlotsPerVtable);
 	}
 
 	async imageInfo(sessionId: AnalysisSessionId): Promise<IGetImageInfoResult> {

@@ -48,6 +48,8 @@ import {
 	RenameAction,
 	RevertAuthorAction,
 	ReturnAction,
+	SetDataTypeAction,
+	SetFunctionPrototypeAction,
 	TagAction,
 	TogglePinAction,
 	UndoInterpretationAction,
@@ -387,6 +389,8 @@ registerWorkbenchContribution2(
 registerAction2(RenameAction);
 registerAction2(CommentAction);
 registerAction2(TagAction);
+registerAction2(SetDataTypeAction);
+registerAction2(SetFunctionPrototypeAction);
 registerAction2(UndoInterpretationAction);
 registerAction2(RedoInterpretationAction);
 registerAction2(RevertAuthorAction);

@@ -25,7 +25,7 @@ import {
 	FocusReason,
 	IDelverFocusService,
 } from '../../../services/delver/common/delverFocusService.js';
-import { IViewsService } from '../../../services/views/common/viewsService.js';
+import { IDelverWorkspaceService } from '../../../services/delver/common/delverWorkspaceService.js';
 import { DelverOverviewTreeDataProvider, DELVER_OVERVIEW_GO_TO_COMMAND, DELVER_OVERVIEW_REVEAL_COMMAND } from './delverOverviewView.js';
 
 export const DELVER_OVERVIEW_VIEW_ID = 'delver.view.overview';
@@ -126,8 +126,12 @@ CommandsRegistry.registerCommand(DELVER_OVERVIEW_GO_TO_COMMAND, (accessor: Servi
 	);
 });
 
-CommandsRegistry.registerCommand(DELVER_OVERVIEW_REVEAL_COMMAND, async (accessor: ServicesAccessor, viewId: string) => {
+CommandsRegistry.registerCommand(DELVER_OVERVIEW_REVEAL_COMMAND, (accessor: ServicesAccessor, surfaceId: string) => {
 	// Reveals rather than toggles: a row that hides the pane you just asked for
 	// would be a trap, since Overview does not show whether it is already open.
-	await accessor.get(IViewsService).openView(viewId, false);
+	//
+	// The rows name workspace *surfaces*, not container views. Their view
+	// descriptors are registered `when: false` (see `registerDelverTreeSurface`),
+	// so `IViewsService.openView` could never open one — it was a silent no-op.
+	accessor.get(IDelverWorkspaceService).showSurface(surfaceId);
 });

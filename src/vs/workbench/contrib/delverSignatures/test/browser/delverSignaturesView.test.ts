@@ -9,7 +9,18 @@ import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/tes
 import { DelverSignaturePolicy, IDelverNamedSignature } from '../../../../../platform/delver/common/delverSignature.js';
 import { IViewDescriptorService } from '../../../../common/views.js';
 import { DelverSurfaceId } from '../../../../services/delver/browser/delverSurface.js';
-import { allDelverSurfaces } from '../../../../services/delver/browser/delverSurfaceRegistry.js';
+import { allDelverSurfaces, registerDelverSurface, zoneForSurface } from '../../../../services/delver/browser/delverSurfaceRegistry.js';
+import { DelverZone, IDelverSurface } from '../../../../services/delver/browser/delverSurface.js';
+import { SyncDescriptor } from '../../../../../platform/instantiation/common/descriptors.js';
+import { Disposable } from '../../../../../base/common/lifecycle.js';
+import { Dimension } from '../../../../../base/browser/dom.js';
+import { DelverWorkspaceService, IDelverWorkspaceService } from '../../../../services/delver/common/delverWorkspaceService.js';
+import { ServicesAccessor } from '../../../../../platform/instantiation/common/instantiation.js';
+import { INotificationService } from '../../../../../platform/notification/common/notification.js';
+import { IProgressService } from '../../../../../platform/progress/common/progress.js';
+import { IQuickInputService } from '../../../../../platform/quickinput/common/quickInput.js';
+import { IDelverAgentService } from '../../../../services/delver/common/delverAgentService.js';
+import { SearchBytePatternAction } from '../../browser/delverSignaturesActions.js';
 import { IDelverAgentResult } from '../../../../services/delver/common/delverAgentTypes.js';
 import { IDelverProjectService } from '../../../../services/delver/common/delverProjectService.js';
 import { IDelverSessionService } from '../../../../services/delver/common/delverSessionService.js';
@@ -327,6 +338,56 @@ suite('Delver signatures view contribution lifetime', () => {
 	});
 });
 
+/** Stands in for the surface its owning contribution would register. */
+class StubSurface extends Disposable implements IDelverSurface {
+	render(_container: HTMLElement): void { }
+	layout(_dimension: Dimension): void { }
+	setVisible(_visible: boolean): void { }
+	focus(): void { }
+}
+
+suite('Delver signatures reveal', () => {
+	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
+
+	// The search action used to reveal through `IViewsService.openView`, which
+	// can never open a Delver surface: the Signatures view descriptor is
+	// registered `when: false` (it exists only so `TreeView`'s progress location
+	// resolves), so it is in no container's view model and the reveal silently
+	// did nothing. Asserting a call was made would not have caught that; this
+	// asserts the reveal names a surface the Inspector zone actually hosts.
+	test('searching a byte pattern reveals the Signatures surface in its zone', async () => {
+		// A stand-in for the surface `DelverSignaturesViewContribution` registers:
+		// its view descriptor cannot be registered twice in one process, and the
+		// lifetime suite above already covers that the real contribution
+		// registers this id in this zone.
+		disposables.add(registerDelverSurface({
+			id: DelverSurfaceId.Signatures,
+			title: { value: 'Signatures', original: 'Signatures' },
+			zone: DelverZone.Inspector,
+			order: 10,
+			ctor: new SyncDescriptor<IDelverSurface>(StubSurface),
+		}));
+
+		const workspaceService = disposables.add(new DelverWorkspaceService());
+		const reached: { id: string; zone: DelverZone | undefined }[] = [];
+		disposables.add(workspaceService.onDidRequestSurface(id => reached.push({ id, zone: zoneForSurface(allDelverSurfaces(), id) })));
+
+		const stubs = new Map<unknown, unknown>([
+			[IDelverWorkspaceService, workspaceService],
+			[IDelverAgentService, { invoke: async () => result({ pattern: '48 8B ?? FF', matches: [{ rva: '0x1010', section: '.text', bytesHex: '488b12ff' }] }) }],
+			[IDelverSignaturesStateService, { search: undefined, setSearch: () => { } }],
+			[IQuickInputService, {}],
+			[INotificationService, { info: () => { }, error: () => { } }],
+			[IProgressService, { withProgress: (_options: unknown, task: () => Promise<unknown>) => task() }],
+			[IDelverSessionService, { activeSession: { contentHash: 'a'.repeat(64) } }],
+		]);
+		const accessor = { get: (id: unknown) => stubs.get(id) } as unknown as ServicesAccessor;
+
+		await new SearchBytePatternAction().run(accessor, '48 8B ?? FF');
+
+		assert.deepStrictEqual(reached, [{ id: DelverSurfaceId.Signatures, zone: DelverZone.Inspector }]);
+	});
+});
 function result(data: unknown): IDelverAgentResult {
 	return {
 		schemaVersion: 1,

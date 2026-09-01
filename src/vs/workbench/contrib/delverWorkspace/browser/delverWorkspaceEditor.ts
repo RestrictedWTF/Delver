@@ -29,7 +29,7 @@ import { IEditorGroup } from '../../../services/editor/common/editorGroupsServic
 import { IEditorService, SIDE_GROUP } from '../../../services/editor/common/editorService.js';
 import { SyncDescriptor0 } from '../../../../platform/instantiation/common/descriptors.js';
 import { DelverSurfaceId, DelverZone, IDelverSurface, MenuDelverPrimaryChrome } from '../../../services/delver/browser/delverSurface.js';
-import { allDelverSurfaces, IDelverSurfaceContext, IDelverSurfaceDescriptor, onDidChangeDelverSurfaces, surfacesForZone } from '../../../services/delver/browser/delverSurfaceRegistry.js';
+import { allDelverSurfaces, IDelverSurfaceContext, IDelverSurfaceDescriptor, onDidChangeDelverSurfaces, surfacesForZone, zoneForSurface } from '../../../services/delver/browser/delverSurfaceRegistry.js';
 import { DELVER_WORKSPACE_EDITOR_ID, DelverWorkspaceInput } from '../../../services/delver/browser/delverWorkspaceInput.js';
 import { DelverRecentTargetsStore, DelverWorkspaceStateStore, IDelverWorkspaceState } from '../../../services/delver/browser/delverWorkspaceState.js';
 import { IDelverFocusService } from '../../../services/delver/common/delverFocusService.js';
@@ -470,13 +470,10 @@ export class DelverWorkspaceEditor extends EditorPane {
 	}
 
 	private showRequestedSurface(id: string): void {
-		const all = allDelverSurfaces();
-		if (surfacesForZone(all, DelverZone.Navigator).some(surface => surface.id === id)) {
-			this.selectNavigator(id);
-		} else if (surfacesForZone(all, DelverZone.Inspector).some(surface => surface.id === id)) {
-			this.selectInspector(id);
-		} else if (surfacesForZone(all, DelverZone.Primary).some(surface => surface.id === id)) {
-			this.selectPrimary(id);
+		switch (zoneForSurface(allDelverSurfaces(), id)) {
+			case DelverZone.Navigator: this.selectNavigator(id); break;
+			case DelverZone.Inspector: this.selectInspector(id); break;
+			case DelverZone.Primary: this.selectPrimary(id); break;
 		}
 	}
 

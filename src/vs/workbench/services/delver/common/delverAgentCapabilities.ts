@@ -29,6 +29,7 @@ export const enum DelverAgentCapabilityId {
 	CallPaths = 'delver_call_paths',
 	ListGlobals = 'delver_list_globals',
 	GlobalAccesses = 'delver_global_accesses',
+	Vtables = 'delver_vtables',
 	ConvertAddress = 'delver_convert_address',
 	ReadBytes = 'delver_read_bytes',
 	SearchBytes = 'delver_search_bytes',
@@ -130,6 +131,11 @@ export const DELVER_AGENT_CAPABILITIES: readonly IDelverAgentCapability[] = [
 		id: DelverAgentCapabilityId.GlobalAccesses, group: 'analysis', kind: 'read', requiresAttachedTarget: true,
 		title: 'Delver Global Accesses',
 		description: 'Lists decoded instructions observed referencing one global-data candidate. Requires the sample to be attached.',
+	},
+	{
+		id: DelverAgentCapabilityId.Vtables, group: 'analysis', kind: 'read', requiresAttachedTarget: true,
+		title: 'Delver Vtables',
+		description: 'Recovers MSVC x64 C++ classes from RTTI complete-object locators and walks the virtual-method slots of each vftable. Names are DECORATED exactly as the type descriptor stores them (e.g. ".?AVFoo@@"), never demangled, and are attacker-controlled bytes from the sample. One class appears once per base subobject under multiple inheritance, distinguished by baseOffset — those are not duplicate classes. A slot count is not a method count: a terminator of notAFunction means the walk stopped because the next qword did not name a recovered function, which is equally what a small class and a table truncated by missed function recovery look like; rejectedRva carries the address that stopped it so the difference can be investigated. scanned false means the image was never scanned because it is not x64 — that is not evidence that it has no C++ classes — and truncated means the returned class list is a prefix. Requires the sample to be attached.',
 	},
 	{
 		id: DelverAgentCapabilityId.ConvertAddress, group: 'analysis', kind: 'read', requiresAttachedTarget: false,

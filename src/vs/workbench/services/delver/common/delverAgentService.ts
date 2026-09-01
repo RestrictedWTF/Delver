@@ -98,6 +98,7 @@ import {
 	proposalAuthor,
 	proposalSubject,
 } from './delverAgentProposalParsing.js';
+import { containsWireRange, IDelverTypePlacementFacts, typePlacementRefusal } from './delverTypePlacement.js';
 
 export const IDelverAgentService = createDecorator<IDelverAgentService>('delverAgentService');
 
@@ -492,6 +493,7 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 		this.handlers.set(DelverAgentCapabilityId.CallPaths, context => this.handleCallPaths(context));
 		this.handlers.set(DelverAgentCapabilityId.ListGlobals, context => this.handleListGlobals(context));
 		this.handlers.set(DelverAgentCapabilityId.GlobalAccesses, context => this.handleGlobalAccesses(context));
+		this.handlers.set(DelverAgentCapabilityId.Vtables, context => this.handleVtables(context));
 		this.handlers.set(DelverAgentCapabilityId.ConvertAddress, context => this.handleConvertAddress(context));
 		this.handlers.set(DelverAgentCapabilityId.ReadBytes, context => this.handleReadBytes(context));
 		this.handlers.set(DelverAgentCapabilityId.SearchBytes, context => this.handleSearchBytes(context));
@@ -1449,6 +1451,74 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 				detail: `Retained static data references to ${result.rva}.`,
 				contentHash: session.contentHash,
 				addresses: [result.rva, ...result.accesses.map(access => access.site)],
+				untrusted: true,
+			}],
+		};
+	}
+
+	/**
+	 * Recovered C++ classes and the virtual-method slots of their vftables.
+	 *
+	 * Never `complete`: a walk stops at the first qword that does not name a
+	 * recovered function, so a short table is either a small class or a hole in
+	 * function recovery, and this result cannot tell the two apart. It carries
+	 * the rejected address instead, so the reader can go and look.
+	 */
+	private async handleVtables(context: IHandlerContext): Promise<IHandlerOutput> {
+		const session = this.requireAttached();
+		const project = this.requireProjectIdentity();
+		const start = decodeCursor(context.args.cursor, DelverAgentCapabilityId.Vtables, project);
+		const count = boundedCount(context.args.count, DELVER_AGENT_LIMITS.vtables);
+		const slots = boundedCount(context.args.maxSlots, DELVER_AGENT_LIMITS.vtableSlots);
+		const result = await this.analysisService.vtables(session.sessionId, start, count, slots);
+		this.throwIfCancelled(context.token);
+
+		const reasons: string[] = [];
+		if (!result.scanned) {
+			reasons.push(VTABLE_NOT_SCANNED_REASON);
+		}
+		if (result.truncated) {
+			reasons.push(VTABLE_SCAN_TRUNCATED_REASON);
+		}
+		if (result.next_start !== undefined) {
+			reasons.push(`${result.total - result.next_start} more recovered classes remain; continue with nextCursor.`);
+		}
+		reasons.push(VTABLE_SLOT_COUNT_REASON);
+
+		return {
+			data: {
+				scanned: result.scanned,
+				truncated: result.truncated,
+				total: result.total,
+				classes: result.vtables.map(vtable => ({
+					decoratedName: vtable.decorated_name,
+					baseOffset: vtable.base_offset,
+					vftableRva: vtable.vftable_rva,
+					locatorRva: vtable.locator_rva,
+					slotCount: vtable.slot_count,
+					terminator: vtable.terminator,
+					slots: vtable.slots.map(slot => ({
+						index: slot.index,
+						slotRva: slot.slot_rva,
+						functionRva: slot.function_rva,
+					})),
+				})),
+			},
+			// A vtable walk ends where function recovery ended, and the scan
+			// itself declines on anything but x64, so neither an empty list nor a
+			// short table is ever an answer about what the image contains.
+			completeness: 'partial',
+			...(result.next_start === undefined ? {} : {
+				nextCursor: encodeCursor(DelverAgentCapabilityId.Vtables, project, result.next_start),
+			}),
+			omitted: { reason: reasons.join(' ') },
+			provenance: [{
+				source: 'analysis',
+				detail: result.scanned
+					? `RTTI-recovered classes ${start}..${start + result.vtables.length} of ${result.total}.`
+					: 'RTTI scan declined: the image is not PE32+.',
+				contentHash: session.contentHash,
+				addresses: result.vtables.map(vtable => vtable.vftable_rva),
 				untrusted: true,
 			}],
 		};
@@ -2907,24 +2977,27 @@ export class DelverAgentService extends Disposable implements IDelverAgentServic
 		const session = this.requireSession();
 		const author = proposalAuthor(context.caller);
 		const proposals = parseTypeProposals(context.args.proposals);
-		if (proposals.some(proposal => proposal.op === EditOp.DataType && proposal.declaration.length > 0)) {
-			const image = await this.sessionService.imageInfo();
+		// The same two rules the palette spends, from the same module: the agent
+		// path was the only one enforcing them, which made the human door the
+		// lax one into a log neither can take back.
+		const needsSections = proposals.some(proposal => proposal.op === EditOp.DataType && proposal.declaration.length > 0);
+		const needsEntries = proposals.some(proposal => proposal.op === EditOp.FunctionPrototype && proposal.declaration.length > 0);
+		if (needsSections || needsEntries) {
+			const facts: IDelverTypePlacementFacts = {
+				sections: needsSections ? (await this.sessionService.imageInfo()).sections : [],
+				functionEntries: needsEntries
+					? new Set((await this.resolvedFunctions(session)).map(fn => fn.rva))
+					: new Set<bigint>(),
+			};
 			for (const proposal of proposals) {
-				if (proposal.op !== EditOp.DataType || proposal.declaration.length === 0) {
+				if (proposal.op === EditOp.CompositeType) {
 					continue;
 				}
-				const section = image.sections.find(candidate => containsWireRange(proposal.rva, candidate.virtual_address, candidate.virtual_size));
-				if (!section || section.executable) {
-					throw proposalArgument(`${toWireAddress(proposal.rva)} is not in mapped non-executable memory; data types must attach to data addresses.`);
-				}
-			}
-		}
-		if (proposals.some(proposal => proposal.op === EditOp.FunctionPrototype)) {
-			const functions = await this.resolvedFunctions(session);
-			const entries = new Set(functions.map(fn => fn.rva));
-			for (const proposal of proposals) {
-				if (proposal.op === EditOp.FunctionPrototype && !entries.has(proposal.rva)) {
-					throw proposalArgument(`${toWireAddress(proposal.rva)} is not a detected function entry; function prototypes must attach to exact function entries.`);
+				const refusal = typePlacementRefusal(proposal.op, proposal.rva, proposal.declaration, facts);
+				if (refusal !== undefined) {
+					throw proposalArgument(`${toWireAddress(proposal.rva)} ${refusal === 'not-data-memory'
+						? 'is not in mapped non-executable memory; data types must attach to data addresses.'
+						: 'is not a detected function entry; function prototypes must attach to exact function entries.'}`);
 				}
 			}
 		}
@@ -3464,6 +3537,12 @@ function importsIncompleteReason(failed: boolean, truncated: boolean): string {
 		: '';
 }
 
+const VTABLE_NOT_SCANNED_REASON = 'The RTTI scan never ran against this image: it is not PE32+, and the complete-object locator has no self-reference to validate against outside x64. An empty class list here means "not looked for", never "this image has no C++ classes".';
+
+const VTABLE_SCAN_TRUNCATED_REASON = 'The scan hit its own cap, so the recovered class set is a prefix of the set this image carries, and paging reaches the end of what was found rather than the end of what exists.';
+
+const VTABLE_SLOT_COUNT_REASON = 'A slot count is not a method count. Each walk stops at the first qword that does not name a recovered function, reported as terminator notAFunction with the rejected address, and a table truncated by a thunk function recovery missed is indistinguishable from a genuinely small class without checking that address. Decorated names are sample bytes and are not demangled; one class emits one entry per base subobject, told apart by baseOffset rather than being duplicates.';
+
 const FUNCTION_LIST_BOUNDED_REASON = 'The analysis server capped the function list, so functions exist that this walk never saw. A name missing from it has not been shown to be absent, and an address outside it has not been shown to belong to no function.';
 
 const SCAN_TRUNCATED_REASON = 'The image string scan hit its cap, so some strings were never extracted and no cursor will reach them.';
@@ -3516,11 +3595,6 @@ function addressConversionSpace(value: unknown): AddressConversionSpace {
 		return value;
 	}
 	throw new DelverAgentError(DelverAgentErrorCode.InvalidArgument, 'from must be "rva", "va", or "file".');
-}
-
-function containsWireRange(address: bigint, startWire: string, size: number): boolean {
-	const start = parseWireAddress(startWire);
-	return address >= start && address < start + BigInt(size);
 }
 
 function addressNotMapped(space: AddressConversionSpace, address: bigint): DelverAgentError {

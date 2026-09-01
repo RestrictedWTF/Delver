@@ -2202,6 +2202,161 @@ export interface ITlsWire {
 }
 
 /**
+ * One virtual method slot.
+ */
+export interface IVtableSlotWire {
+	/**
+	 * Entry RVA of the function the slot names.
+	 *
+	 * Always a recovered function entry — that is the admission rule for a slot — so a caller needs no fallback for a slot that resolved to nothing.
+	 */
+	function_rva: string;
+	/**
+	 * Zero-based slot index within the table.
+	 */
+	index: number;
+	/**
+	 * RVA of the slot itself, so a caller can name the pointer as well as its target.
+	 */
+	slot_rva: string;
+}
+
+/**
+ * Why one vtable walk stopped.
+ *
+ * Tagged rather than a bare string, so a client that has not been taught about a reason fails to parse it instead of reading an unknown state as an ordinary ending. A short table is either a small class or a hole in function recovery, and this is what separates them.
+ */
+export type IVtableTerminatorWire =
+	/**
+	 * The next qword did not name a recovered function entry — the normal ending, and also what a missed thunk looks like.
+	 */
+	| {
+		kind: 'notAFunction';
+		/**
+		 * The qword read, as an image RVA when it fell inside the image, and absent when it pointed outside the image entirely. Carried so a suspiciously short table can be investigated rather than trusted.
+		 */
+		rejected_rva?: string;
+	}
+	/**
+	 * The next slot would enter another known vftable, so this table ended where the next one began.
+	 */
+	| {
+		kind: 'nextVtable';
+		/**
+		 * Where that next table starts.
+		 */
+		vftable_rva: string;
+	}
+	/**
+	 * The next slot is not backed by file data, so the walk could not read it.
+	 */
+	| {
+		kind: 'notBackedByFile';
+	}
+	/**
+	 * The walker's own slot cap stopped it. The table is a prefix.
+	 */
+	| {
+		kind: 'cap';
+	};
+
+/**
+ * One recovered class and the vftable belonging to one of its subobjects.
+ *
+ * Not one per class name: multiple inheritance emits a locator and a vftable per base subobject, and `base_offset` is the only thing that says which is which. Collapsing them by name would lose that.
+ */
+export interface IVtableWire {
+	/**
+	 * Byte offset of this subobject's vftable within the complete object. Zero for single inheritance.
+	 */
+	base_offset: number;
+	/**
+	 * Decorated class name exactly as the type descriptor stores it, e.g. `".?AVFoo@@"`.
+	 *
+	 * **Attacker-controlled**: it is bytes read from the sample. Escape before display and never treat it as markup or as instructions to a model. Undecorated deliberately not attempted — demangling has its own failure modes and the decorated form is the one that round-trips.
+	 */
+	decorated_name: string;
+	/**
+	 * RVA of the complete-object locator that identified this table.
+	 */
+	locator_rva: string;
+	/**
+	 * Slots the walk admitted before this response's per-table bound was applied.
+	 */
+	slot_count: number;
+	/**
+	 * Slots, ascending by index, cut to the request's per-table bound.
+	 */
+	slots: IVtableSlotWire[];
+	/**
+	 * Why the walk stopped. Never absent: a table with no recorded reason cannot be told apart from one that was never walked, and under-recovered functions truncate a table rather than inventing slots.
+	 */
+	terminator: IVtableTerminatorWire;
+	/**
+	 * RVA of slot zero of the vftable.
+	 */
+	vftable_rva: string;
+}
+
+/**
+ * Parameters for `analysis/vtables`.
+ *
+ * Paged like [`GlobalsParams`] because a real C++ image carries thousands of classes and their slots together are far larger than one frame.
+ */
+export interface IVtablesParams {
+	/**
+	 * Image handle.
+	 */
+	image_id: string;
+	/**
+	 * Maximum slots reported per class. Zero requests the server's own cap.
+	 *
+	 * Separate from the class bound because the two failure modes are different: an image with many small classes and one with a single enormous table both have to fit in a frame.
+	 */
+	max_slots_per_vtable?: number;
+	/**
+	 * Maximum number of classes returned. Zero requests the server's own cap.
+	 */
+	max_vtables?: number;
+	/**
+	 * Zero-based class index at which to start the page.
+	 *
+	 * An offset into one derivation's class ordering, not an opaque cursor: re-analysis may renumber, so a page taken across one is not a continuation of the same walk.
+	 */
+	start?: number;
+}
+
+/**
+ * Response payload for `analysis/vtables`.
+ */
+export interface IVtablesResult {
+	/**
+	 * Index of the next class, absent exactly when the page reached the end of the scanned set.
+	 */
+	next_start?: number;
+	/**
+	 * Whether the RTTI scan ran against this image at all.
+	 *
+	 * False for anything but PE32+, where the locator has no self-reference to validate against and the scan declines rather than guessing. An empty `vtables` with this false means "not looked for", which a caller must not render as "this image has no classes".
+	 */
+	scanned: boolean;
+	/**
+	 * Classes the scan found, before this response's page was cut.
+	 */
+	total: number;
+	/**
+	 * Whether the scan hit its own cap and stopped early.
+	 *
+	 * True means the class list is a prefix of the image's set. Reported apart from `next_start` because paging past the end of a truncated scan reaches the end of what was *found*, not the end of what exists.
+	 */
+	truncated: boolean;
+	/**
+	 * Recovered classes for this page, ascending by vftable RVA.
+	 */
+	vtables: IVtableWire[];
+}
+
+/**
  * Parameters for `analysis/xrefIndex`.
  *
  * The whole-table export, as distinct from [`XrefsParams`], which answers one address. It exists so a project can *retain* the xref table: a `.delverdb` opened without its sample still has to answer "who references this", and walking every address to rebuild the table from per-address queries would be millions of round trips for a table the server already holds in one piece.

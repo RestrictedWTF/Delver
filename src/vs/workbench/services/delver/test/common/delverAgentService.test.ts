@@ -37,6 +37,7 @@ import {
 	IScanStringsResult,
 	ISearchImmediatesResult,
 	ISetCorrectionsResult,
+	IVtablesResult,
 	IXrefsResult,
 	IXrefWire,
 	ResolutionConfidenceWire,
@@ -391,6 +392,7 @@ class FakeAnalysisService implements Partial<IDelverAnalysisService> {
 	};
 	globalsResult: IGlobalsResult = { globals: [], total: 0 };
 	globalAccessesResult: IGlobalAccessesResult = { rva: '0x2000', accesses: [], total: 0, truncated: false };
+	vtablesResult: IVtablesResult = { vtables: [], scanned: true, truncated: false, total: 0 };
 	memoryReader: ((space: 'image' | 'file', address: string, count: number) => IDelverReadMemoryWire) | undefined;
 	memoryResult: IDelverReadMemoryWire = {
 		bytesHex: '78563412ffeeddccaa',
@@ -438,6 +440,11 @@ class FakeAnalysisService implements Partial<IDelverAnalysisService> {
 	async globals(_sessionId: AnalysisSessionId, start: number, maxGlobals: number): Promise<IGlobalsResult> {
 		this.calls.push(`globals:${start}:${maxGlobals}`);
 		return this.globalsResult;
+	}
+
+	async vtables(_sessionId: AnalysisSessionId, start: number, maxVtables: number, maxSlotsPerVtable: number): Promise<IVtablesResult> {
+		this.calls.push(`vtables:${start}:${maxVtables}:${maxSlotsPerVtable}`);
+		return this.vtablesResult;
 	}
 
 	async globalAccesses(_sessionId: AnalysisSessionId, rva: string, maxAccesses: number): Promise<IGlobalAccessesResult> {
@@ -1667,6 +1674,79 @@ suite('DelverAgentService', () => {
 			accessCompleteness: 'partial',
 			accessWarning: 'Only retained static data references are represented; register-derived and runtime-only accesses are outside this result.',
 			calls: ['globals:0:1', 'globals:1:1', 'globalAccesses:0x2000:100'],
+		});
+	});
+
+	test('reports recovered classes without letting a stopped walk pass for a method count', async () => {
+		const { service, session, analysis } = createService(store);
+		session.activeSession = LIVE_SESSION;
+		analysis.vtablesResult = {
+			vtables: [
+				{
+					decorated_name: '.?AVFoo@@', base_offset: 0, vftable_rva: '0x4000', locator_rva: '0x5000',
+					slot_count: 2, terminator: { kind: 'notAFunction', rejected_rva: '0x4010' },
+					slots: [
+						{ index: 0, slot_rva: '0x4000', function_rva: '0x1000' },
+						{ index: 1, slot_rva: '0x4008', function_rva: '0x2000' },
+					],
+				},
+				{
+					decorated_name: '.?AVFoo@@', base_offset: 16, vftable_rva: '0x4100', locator_rva: '0x5010',
+					slot_count: 1, terminator: { kind: 'nextVtable', vftable_rva: '0x4200' },
+					slots: [{ index: 0, slot_rva: '0x4100', function_rva: '0x1000' }],
+				},
+			],
+			scanned: true, truncated: true, total: 3, next_start: 2,
+		};
+
+		const page = await service.invoke({ capability: 'delver_vtables', args: { count: 2, maxSlots: 8 } }, CancellationToken.None);
+		analysis.vtablesResult = { vtables: [], scanned: false, truncated: false, total: 0 };
+		const notScanned = await service.invoke({ capability: 'delver_vtables', args: {} }, CancellationToken.None);
+
+		assert.deepStrictEqual({
+			page: page.data,
+			pageCompleteness: page.completeness,
+			pageHasCursor: typeof page.nextCursor === 'string',
+			pageWarnsTruncated: page.omitted?.reason.includes('prefix'),
+			pageWarnsSlotCount: page.omitted?.reason.includes('A slot count is not a method count.'),
+			pageProvenance: page.provenance,
+			notScanned: notScanned.data,
+			notScannedWarning: notScanned.omitted?.reason.includes('never looked for'),
+			notScannedSaysNotLookedFor: notScanned.omitted?.reason.includes('"not looked for"'),
+			calls: analysis.calls,
+		}, {
+			page: {
+				scanned: true,
+				truncated: true,
+				total: 3,
+				classes: [
+					{
+						decoratedName: '.?AVFoo@@', baseOffset: 0, vftableRva: '0x4000', locatorRva: '0x5000',
+						slotCount: 2, terminator: { kind: 'notAFunction', rejected_rva: '0x4010' },
+						slots: [
+							{ index: 0, slotRva: '0x4000', functionRva: '0x1000' },
+							{ index: 1, slotRva: '0x4008', functionRva: '0x2000' },
+						],
+					},
+					{
+						decoratedName: '.?AVFoo@@', baseOffset: 16, vftableRva: '0x4100', locatorRva: '0x5010',
+						slotCount: 1, terminator: { kind: 'nextVtable', vftable_rva: '0x4200' },
+						slots: [{ index: 0, slotRva: '0x4100', functionRva: '0x1000' }],
+					},
+				],
+			},
+			pageCompleteness: 'partial',
+			pageHasCursor: true,
+			pageWarnsTruncated: true,
+			pageWarnsSlotCount: true,
+			pageProvenance: [{
+				source: 'analysis', detail: 'RTTI-recovered classes 0..2 of 3.',
+				contentHash: CONTENT_HASH, addresses: ['0x4000', '0x4100'], untrusted: true,
+			}],
+			notScanned: { scanned: false, truncated: false, total: 0, classes: [] },
+			notScannedWarning: false,
+			notScannedSaysNotLookedFor: true,
+			calls: ['vtables:0:2:8', 'vtables:0:50:64'],
 		});
 	});
 
@@ -3806,6 +3886,16 @@ suite('DelverAgentService', () => {
 					{ address: '8256', target: 'data', declaration: 'uint16_t' },
 				] },
 			}),
+			// The rule the palette now spends too: a data type in `.text` is
+			// refused whoever asks for it.
+			executable: await errorCode(service, {
+				capability: 'delver_propose_type', caller,
+				args: { proposals: [{ address: '0x1000', target: 'data', declaration: 'uint8_t[16]' }] },
+			}),
+			malformed: await errorCode(service, {
+				capability: 'delver_propose_type', caller,
+				args: { proposals: [{ address: '0x2040', target: 'data', declaration: '))))' }] },
+			}),
 		}, {
 			result: {
 				proposals: [
@@ -3821,6 +3911,8 @@ suite('DelverAgentService', () => {
 			accepted: { dataType: 'uint8_t[32]', functionPrototype: 'void old_signature(void)' },
 			nonEntry: 'INVALID_ARGUMENT',
 			duplicate: 'INVALID_ARGUMENT',
+			executable: 'INVALID_ARGUMENT',
+			malformed: 'INVALID_ARGUMENT',
 		});
 	});
 
