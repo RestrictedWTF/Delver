@@ -48,6 +48,34 @@ is `proposed` and needs a yes or no — invariant 1 holds below the process
 boundary and not above it until it lands. The proposal -> review -> accept loop
 still has no exercise path that is neither a model nor a human.
 
+## The review loop has been driven, and it works
+
+I had recorded that the proposal -> review -> accept loop "has no exercise path
+that is neither a model nor a human". That was wrong, and `delver-mcp` is the
+path. Connected as an MCP client over stdio against a window opened on a
+workspace folder:
+
+- **41 tools**, not the three a test fixture in `delver-mcp/src/backend.rs`
+  suggested — `list_tools` returns whatever the window's catalog holds.
+- `delver_image_info` returned live facts for the open project.
+- `delver_propose_rename` created a proposal, and it appeared in the Review
+  surface as `Rename 0x1010 to mcp_verified_rename`, attributed to
+  `dtp:delver-mcp` with `kind: model`, with the segment badging `Review · 1`.
+  That is the attribution the whole moat rests on, working.
+- Schema validation is strict and fails closed: an extra `rationale` field was
+  refused by name.
+
+Two things stopped the accept, and neither is the security design I assumed:
+the accept action is hover-only inline UI that CDP could not trigger, and a
+second client could not reconnect (**#62** — every later attempt returned
+`no Delver window matches the requested root`, undiagnosed). Binding a key to
+`delver.review.acceptAll` instead surfaced **#61**: four review commands
+dereference `handle.$treeItemHandle` unguarded and throw a raw `TypeError`
+when invoked from any path but the view menu.
+
+**An eval harness driven over MCP is therefore viable**, and is the cheapest
+route to measuring which of the 41 capabilities an agent actually calls.
+
 ## Where to pick up
 
 - **Local variable naming needs a durable identity design** before any of its
