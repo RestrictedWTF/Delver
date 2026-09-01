@@ -98,6 +98,17 @@ import '../platform/agentHost/browser/agentHostEnablementService.js';
 import './services/browserView/electron-browser/playwrightWorkbenchService.js';
 import './services/process/electron-browser/processService.js';
 import './services/power/electron-browser/powerService.js';
+// DELVER: Delver is desktop-only by design - it drives a remote provider, never a
+// remote IDE (Docs/architecture/target-providers.md, Docs/planning/roadmap.md P6).
+// The service contracts and contribs live here, not in workbench.common.main.ts, so a
+// web build cannot register the UI with the implementations unbound.
+import './services/delver/common/delverFocusService.js';
+import './services/delver/common/delverSessionService.js';
+import './services/delver/common/delverInterpretationService.js';
+import './services/delver/common/delverSelection.js';
+import './services/delver/common/delverDecompilerService.js';
+import './services/delver/common/delverAgentService.js';
+import './services/delver/common/delverWorkspaceService.js';
 import './services/delver/electron-browser/delverTargetService.js';
 import '../platform/delver/electron-browser/delverProcessService.js';
 import '../platform/delver/electron-browser/delverAnalysisService.js';
@@ -213,6 +224,23 @@ import './contrib/keybindingsExport/electron-browser/keybindingsExport.contribut
 
 // System-wide (OS global) Keybindings
 import './contrib/keybindings/electron-browser/systemWideKeybindings.contribution.js';
+
+// DELVER: Delver contributions (desktop-only, see the DELVER note above)
+import './contrib/delverOverview/browser/delverOverview.contribution.js';
+import './contrib/delverPseudocode/browser/delverPseudocode.contribution.js';
+import './contrib/delverFunctions/browser/delverFunctions.contribution.js';
+import './contrib/delverHandshake/browser/delverHandshake.contribution.js';
+import './contrib/delverImports/browser/delverImports.contribution.js';
+import './contrib/delverExports/browser/delverExports.contribution.js';
+import './contrib/delverStrings/browser/delverStrings.contribution.js';
+import './contrib/delverSections/browser/delverSections.contribution.js';
+import './contrib/delverListing/browser/delverListing.contribution.js';
+import './contrib/delverXrefs/browser/delverXrefs.contribution.js';
+import './contrib/delverSignatures/browser/delverSignatures.contribution.js';
+import './contrib/delverAI/browser/delverAITools.contribution.js';
+import './contrib/delverAI/browser/delverAgentGateway.contribution.js';
+import './contrib/delverAI/browser/delverReview.contribution.js';
+import './contrib/delverWorkspace/browser/delverWorkspace.contribution.js';
 
 //#endregion
 

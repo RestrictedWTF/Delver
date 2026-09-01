@@ -7,11 +7,11 @@ import { ChildProcess, SpawnOptions, spawn } from 'child_process';
 import { createHash } from 'crypto';
 import { createReadStream, existsSync, promises as fs } from 'fs';
 import { tmpdir } from 'os';
-import { fileURLToPath } from 'url';
 import { CancellationToken } from '../../../base/common/cancellation.js';
 import { CancellationError } from '../../../base/common/errors.js';
 import * as path from '../../../base/common/path.js';
 import { killTree } from '../../../base/node/processes.js';
+import { resolveGhidraScript } from './delverBinaries.js';
 
 export const GHIDRA_PINNED_VERSION = '12.1';
 
@@ -36,10 +36,12 @@ export interface IGhidraHeadlessInvocation {
 	readonly options: SpawnOptions;
 }
 
-/** Locates the source-tree script used only by the P2a scaffold. */
+/**
+ * Locates the script used by the headless fallback backend: `scripts/ghidra/` in a
+ * checkout, the staged `resources/delver/ghidra/` copy in a packaged build.
+ */
 export function resolveGhidraScriptPath(): string {
-	const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
-	return path.resolve(moduleDirectory, '..', '..', '..', '..', '..', 'scripts', 'ghidra', SCRIPT_NAME);
+	return resolveGhidraScript(SCRIPT_NAME);
 }
 
 /** Validates a configured Ghidra home without searching or mutating the host. */

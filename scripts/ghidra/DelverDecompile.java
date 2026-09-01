@@ -3,7 +3,12 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-// Delver's temporary P2a Ghidra 12.1 bridge. This script must be deleted when P2b ships.
+// Delver's Ghidra 12.1 headless bridge. It was written for P2a and is NOT
+// temporary: roadmap.md's P2b item list keeps the headless backend as a
+// deliberate fallback ("Recovery and compatibility path, not the normal
+// per-function path"), so it survives P2b rather than being deleted by it.
+// It ships in a package — build/gulpfile.vscode.ts stages it into
+// resources/delver/ghidra/ — so deleting it breaks the fallback backend.
 // @category Delver
 
 import java.io.BufferedWriter;

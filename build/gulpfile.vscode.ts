@@ -374,6 +374,12 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 		const telemetry = gulp.src('.build/telemetry/**', { base: '.build/telemetry', dot: true });
 		const delverResources = gulp.src(`resources/delver/bin/${platform}/**`, { base: '.', allowEmpty: false })
 			.pipe(util.setExecutableBit(['**/provider-file', '**/server-analysis', '**/delverctl', '**/delver-agent-relay', '**/delver-mcp']));
+		// The decompiler backends spawn these helper scripts at runtime. In a
+		// checkout they are read from `scripts/ghidra/`; a package has no
+		// `scripts/`, so they are staged next to the native binaries under
+		// `resources/delver/` (see `delverBinaries.ts#resolveGhidraScript`).
+		const delverGhidraScripts = gulp.src(['scripts/ghidra/*.py', 'scripts/ghidra/*.java', '!scripts/ghidra/test_*.py'], { base: 'scripts/ghidra', allowEmpty: false })
+			.pipe(rename(p => { p.dirname = path.join('resources/delver/ghidra', p.dirname); }));
 
 		const jsFilter = util.filter(data => !data.isDirectory() && /\.js$/.test(data.path));
 		const root = path.resolve(path.join(import.meta.dirname, '..'));
@@ -449,6 +455,7 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 			api,
 			telemetry,
 			delverResources,
+			delverGhidraScripts,
 			sources,
 			deps
 		];

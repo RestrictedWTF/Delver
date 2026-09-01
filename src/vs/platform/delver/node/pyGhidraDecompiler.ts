@@ -4,11 +4,11 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { existsSync, promises as fs, readdirSync } from 'fs';
-import { fileURLToPath } from 'url';
 import { CancellationToken } from '../../../base/common/cancellation.js';
 import { Disposable } from '../../../base/common/lifecycle.js';
 import * as path from '../../../base/common/path.js';
 import { IDelverDecompilationSemanticsWire } from '../common/delverAnalysisService.js';
+import { resolveGhidraScript } from './delverBinaries.js';
 import { DecompilerWorkerHost, IDecompilerWorkerInvocation, IWorkerProgress } from './decompilerWorkerHost.js';
 
 const WORKER_SCRIPT_NAME = 'delver_decompiler_worker.py';
@@ -25,10 +25,12 @@ export type PyGhidraWorkerDiscovery =
 	| { readonly available: true; readonly configuration: IPyGhidraWorkerConfiguration }
 	| { readonly available: false; readonly reason: string };
 
-/** Resolves the backend-neutral Python worker shipped in the source tree. */
+/**
+ * Resolves the backend-neutral Python worker: `scripts/ghidra/` in a checkout,
+ * the staged `resources/delver/ghidra/` copy in a packaged build.
+ */
 export function resolvePyGhidraWorkerScriptPath(): string {
-	const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
-	return path.resolve(moduleDirectory, '..', '..', '..', '..', '..', 'scripts', 'ghidra', WORKER_SCRIPT_NAME);
+	return resolveGhidraScript(WORKER_SCRIPT_NAME);
 }
 
 /** Checks static worker prerequisites. The protocol handshake verifies PyGhidra itself. */

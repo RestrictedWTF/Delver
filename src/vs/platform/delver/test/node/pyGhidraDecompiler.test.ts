@@ -10,6 +10,8 @@ import { join } from 'path';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import { DecompilerWorkerHost, IDecompilerWorkerHello } from '../../node/decompilerWorkerHost.js';
+import { resolvePyGhidraWorkerScriptPath } from '../../node/pyGhidraDecompiler.js';
+import { getDevGhidraScriptsDir, getStagedGhidraScriptsDir } from '../../node/delverBinaries.js';
 import { createPyGhidraWorkerInvocation, discoverPyGhidraWorker, PyGhidraDecompiler, pyGhidraProjectDirectory, readBackendFunctions, resolvePythonPath } from '../../node/pyGhidraDecompiler.js';
 
 const EMPTY_SEMANTICS = { schemaVersion: 2 as const, composites: [], dataTypes: [], functionPrototypes: [] };
@@ -246,5 +248,17 @@ suite('PyGhidraDecompiler', () => {
 			decompiler.dispose();
 			await fs.rm(cacheRoot, { recursive: true, force: true });
 		}
+	});
+
+	test('resolves the worker script from the checkout, falling back to the staged copy', () => {
+		const resolved = resolvePyGhidraWorkerScriptPath();
+		assert.deepStrictEqual(
+			[
+				resolved === join(getDevGhidraScriptsDir(), 'delver_decompiler_worker.py') ||
+				resolved === join(getStagedGhidraScriptsDir(), 'delver_decompiler_worker.py'),
+				getStagedGhidraScriptsDir().split(/[\\/]/).slice(-3),
+			],
+			[true, ['resources', 'delver', 'ghidra']],
+		);
 	});
 });

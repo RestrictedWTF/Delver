@@ -479,28 +479,4 @@ import './contrib/editTelemetry/browser/editTelemetry.contribution.js';
 // Opener
 import './contrib/opener/browser/opener.contribution.js';
 
-// DELVER: Delver services and contributions
-import './services/delver/common/delverFocusService.js';
-import './services/delver/common/delverSessionService.js';
-import './services/delver/common/delverInterpretationService.js';
-import './services/delver/common/delverSelection.js';
-import './services/delver/common/delverDecompilerService.js';
-import './services/delver/common/delverAgentService.js';
-import './services/delver/common/delverWorkspaceService.js';
-import './contrib/delverOverview/browser/delverOverview.contribution.js';
-import './contrib/delverPseudocode/browser/delverPseudocode.contribution.js';
-import './contrib/delverFunctions/browser/delverFunctions.contribution.js';
-import './contrib/delverHandshake/browser/delverHandshake.contribution.js';
-import './contrib/delverImports/browser/delverImports.contribution.js';
-import './contrib/delverExports/browser/delverExports.contribution.js';
-import './contrib/delverStrings/browser/delverStrings.contribution.js';
-import './contrib/delverSections/browser/delverSections.contribution.js';
-import './contrib/delverListing/browser/delverListing.contribution.js';
-import './contrib/delverXrefs/browser/delverXrefs.contribution.js';
-import './contrib/delverSignatures/browser/delverSignatures.contribution.js';
-import './contrib/delverAI/browser/delverAITools.contribution.js';
-import './contrib/delverAI/browser/delverAgentGateway.contribution.js';
-import './contrib/delverAI/browser/delverReview.contribution.js';
-import './contrib/delverWorkspace/browser/delverWorkspace.contribution.js';
-
 //#endregion

@@ -7,6 +7,8 @@ import * as assert from 'assert';
 import { promises as fs } from 'fs';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import { createGhidraInvocation, discoverGhidraHeadless, resolveGhidraScriptPath } from '../../node/ghidraHeadlessDecompiler.js';
+import { getDevGhidraScriptsDir, getStagedGhidraScriptsDir, resolveGhidraScript } from '../../node/delverBinaries.js';
+import * as path from '../../../../base/common/path.js';
 
 suite('GhidraHeadlessDecompiler', () => {
 	ensureNoDisposablesAreLeakedInTestSuite();
@@ -92,5 +94,28 @@ suite('GhidraHeadlessDecompiler', () => {
 		const script = await fs.readFile(resolveGhidraScriptPath(), 'utf8');
 		assert.ok(script.includes('variable.getStorage()'));
 		assert.ok(!script.includes('variable.getVariableStorage()'));
+	});
+
+	test('resolves the checkout script in a dev tree and the staged copy in a package', () => {
+		assert.deepStrictEqual(
+			{
+				dev: resolveGhidraScript('DelverDecompile.java', () => true),
+				packaged: resolveGhidraScript('DelverDecompile.java', () => false),
+			},
+			{
+				dev: path.join(getDevGhidraScriptsDir(), 'DelverDecompile.java'),
+				packaged: path.join(getStagedGhidraScriptsDir(), 'DelverDecompile.java'),
+			},
+		);
+	});
+
+	test('the staged script directory sits under resources/delver', () => {
+		assert.deepStrictEqual(
+			[
+				getStagedGhidraScriptsDir().split(/[\\/]/).slice(-3),
+				getDevGhidraScriptsDir().split(/[\\/]/).slice(-2),
+			],
+			[['resources', 'delver', 'ghidra'], ['scripts', 'ghidra']],
+		);
 	});
 });

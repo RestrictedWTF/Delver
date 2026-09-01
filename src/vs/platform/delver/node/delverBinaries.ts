@@ -61,3 +61,42 @@ export function resolveBinary(name: string): string {
 	// Fall back to the bare name and let the OS resolve it via PATH.
 	return name;
 }
+
+/**
+ * Returns the directory that the Ghidra helper scripts are staged in for a
+ * packaged build. Mirrors {@link getStagedBinariesDir}: the packaging pipeline
+ * copies `scripts/ghidra/` into `resources/delver/ghidra/`.
+ */
+export function getStagedGhidraScriptsDir(): string {
+	return path.resolve(getModuleDirname(), '..', '..', '..', '..', '..', 'resources', 'delver', 'ghidra');
+}
+
+/**
+ * Returns the source-tree directory holding the Ghidra helper scripts. Only
+ * exists in a development checkout.
+ */
+export function getDevGhidraScriptsDir(): string {
+	return path.resolve(getModuleDirname(), '..', '..', '..', '..', '..', 'scripts', 'ghidra');
+}
+
+/**
+ * Resolves a Ghidra helper script by file name.
+ *
+ * As with {@link resolveBinary}, the development checkout wins: `scripts/ghidra/`
+ * is the editable source of truth and only exists in a checkout, so a developer
+ * editing the worker sees the edit immediately. A packaged build has no
+ * `scripts/` directory, so the staged copy wins there without a mode flag.
+ *
+ * When neither exists the staged path is returned, so the caller's existence
+ * check reports the location a package is expected to carry.
+ */
+export function resolveGhidraScript(
+	name: string,
+	pathExists: (candidate: string) => boolean = existsSync,
+): string {
+	const dev = path.join(getDevGhidraScriptsDir(), name);
+	if (pathExists(dev)) {
+		return dev;
+	}
+	return path.join(getStagedGhidraScriptsDir(), name);
+}
