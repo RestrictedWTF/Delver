@@ -1,46 +1,109 @@
 # Delver
 
-Delver is an open-source reverse-engineering workbench built on Code - OSS. It brings binary analysis, decompilation, durable investigation state, and grounded AI tooling into one editor-style interface. The current prototype focuses on static analysis of PE files for x86 and x64.
+<p align="center">
+  <a href="LICENSE.txt"><img src="https://img.shields.io/badge/License-MIT-4c566a" alt="License: MIT"></a>
+  <a href="https://doc.rust-lang.org/edition-guide/rust-2021/index.html"><img src="https://img.shields.io/badge/Rust-2021-4c566a?logo=rust&amp;logoColor=white" alt="Rust 2021"></a>
+</p>
 
-> Delver is under active development. Interfaces and project formats may change before the first stable release.
+Delver is a reverse engineering workbench built on Code - OSS.
+The Rust engine analyzes PE files for x86 and x64.
+The editor presents disassembly, decompilation, and saved investigations.
 
-## Current features
+Delver remains under development.
+Interfaces and project formats can change.
 
-- Native PE parsing and x86/x64 analysis, including sections, functions, imports, exports, strings, and cross-references.
-- A virtualized disassembly listing with go-to, follow/return, navigation history, synchronized focus, and function-aware labels.
-- Dedicated Overview, Functions, Sections, Imports, Exports, References, and Strings views.
-- Ghidra 12.1 decompilation through a persistent PyGhidra worker, with an explicit headless fallback and synchronized pseudocode-to-listing navigation.
-- Append-only, attributed renames, comments, and tags with undo, author reversion, import/export, and proposal-resolution support.
-- Portable SQLite `.delverdb` projects that preserve analysis, pseudocode, interpretation, provenance, and revisions without embedding the original binary, and safely auto-attach a saved in-workspace target after hash verification.
-- Twenty bounded, provenance-aware agent capabilities for built-in chat and external MCP clients, including review-only rename, comment, and tag proposals plus durable findings that can cite retained prior tool results, with local authorization, cancellation, and root-scoped transport.
-- A Rust analysis pipeline, versioned RPC protocol, generated TypeScript types, headless `delverctl`, and a synthetic regression corpus.
+## Features
+
+- The engine reads sections, functions, imports, exports, strings, and references.
+- The disassembly listing supports navigation history and synchronized selection.
+- The workbench provides views for functions, sections, imports, exports, references, and strings.
+- The Ghidra integration provides decompilation through a persistent PyGhidra worker.
+- The workbench retains attributed renames, comments, tags, and review decisions.
+- SQLite `.delverdb` files retain analysis and investigation state.
+- Project files identify the original binary through its hash without embedding its bytes.
+- MCP tools expose analysis, navigation, proposals, and findings to external clients.
+- The `delverctl` command provides analysis operations without the editor interface.
+
+## Build the Rust components
+
+The Rust workspace contains the engine, providers, analysis server, and command tools.
+
+```sh
+cargo build --manifest-path delver/Cargo.toml --workspace --release
+```
+
+Cargo writes the executables under `delver/target/release`.
+Windows adds the `.exe` extension.
+
+The command tool can analyze a file without starting the editor:
+
+```powershell
+.\delver\target\release\delverctl.exe analyze C:\path\to\program.exe
+```
+
+## Build the editor
+
+The editor uses Node.js, npm, Electron, and the Rust toolchain.
+Use the Node.js version in [`.nvmrc`](.nvmrc).
+Install the Code - OSS native build dependencies for your platform.
+The [contribution guide](CONTRIBUTING.md) links the upstream build documentation.
+
+These scripts run from the repository root:
+
+```sh
+npm ci
+npm run delver:build
+npm run compile
+npm run delver:launch
+```
+
+The development launcher starts an isolated editor profile.
+Ghidra decompilation requires a configured Ghidra installation and PyGhidra environment.
+The [Ghidra scripts](scripts/ghidra) contain the worker and headless integration.
+
+## External agents
+
+The `delver-mcp` adapter connects an MCP client to a running Delver window.
+The adapter requires an explicit workspace root.
+The window controls authorization and advertises its available tools.
+
+Read the [external agent guide](Docs/development/external-agents.md) for configuration and connection requirements.
 
 ## Project structure
 
-```text
-delver/                         Rust analysis engine, protocol, providers, CLI, and MCP adapter
-src/vs/platform/delver/         Shared Delver types and native platform services
-src/vs/workbench/services/delver/ Session, focus, project, decompiler, and agent services
-src/vs/workbench/contrib/delver*/ Workbench views, editors, navigation, and AI tools
-extensions/delver-agent-bridge/ External-agent authorization and transport bridge
-scripts/ghidra/                 PyGhidra worker and headless Ghidra integration
-build/lib/delver/               Build, launch, and protocol-generation tooling
-Docs/                           Architecture, development notes, plans, and status
+| Path | Responsibility |
+| --- | --- |
+| [`delver`](delver) | Implements analysis, providers, the protocol, command tools, and the MCP adapter. |
+| [`src/vs/platform/delver`](src/vs/platform/delver) | Defines shared types and native platform services. |
+| [`src/vs/workbench/services/delver`](src/vs/workbench/services/delver) | Manages sessions, projects, focus, decompilation, and agent services. |
+| [`extensions/delver-agent-bridge`](extensions/delver-agent-bridge) | Connects authorized external agents. |
+| [`scripts/ghidra`](scripts/ghidra) | Runs Ghidra decompilation workers. |
+| [`build/lib/delver`](build/lib/delver) | Defines build, launch, and protocol generation tools. |
+| [`Docs`](Docs) | Records architecture, development guidance, and project status. |
+
+## Checks
+
+The repository defines these Delver checks:
+
+```sh
+npm run delver:test
+npm run delver:corpus
 ```
 
-## Roadmap
+The [development guide](Docs/development/README.md) describes the repository workflow.
+The [feature ledger](Docs/planning/ledger.md) records implementation details and remaining work.
 
-| Phase | Focus | Status |
-| --- | --- | --- |
-| P0-P1 | Native pipeline, PE static analysis, listing, navigation, and interpretation | Implemented |
-| P2 | Portable projects and backend-neutral decompilation | Core flow implemented; UI polish, p-code, and IDA/Hex-Rays remain |
-| P3 | Grounded AI tools, proposals, evidence, review, Python client, and notebooks | In progress; read/navigation tools, provisional interpretation/finding writes, append-only review decisions, evidence navigation, and the MCP bridge are implemented |
-| P4 | Live process attach, debugging, memory views, and memory-vs-disk diff | Planned |
-| P5-P6 | Types, CFGs, more formats/providers, signatures, recipes, and hardening | Planned |
-| P7 | Kernel and hypervisor providers | Parked |
+## Scope
 
-See the [detailed roadmap](Docs/planning/roadmap.md), [feature ledger](Docs/planning/ledger.md), and [current status](Docs/planning/status.md) for implementation-level detail.
+The current file provider targets PE images for x86 and x64.
+Live debugging, additional executable formats, and kernel providers remain roadmap work.
+Ghidra provides the current decompiler integration.
+Other decompiler providers remain roadmap work.
+
+The [roadmap](Docs/planning/roadmap.md) and [status](Docs/planning/status.md) describe the development plan.
 
 ## License
 
-Delver is based on [Code - OSS](https://github.com/microsoft/vscode) and is available under the [MIT License](LICENSE.txt).
+Delver builds on [Code - OSS](https://github.com/microsoft/vscode).
+The [MIT license](LICENSE.txt) covers the repository.
+Existing Microsoft and third-party notices remain applicable.
